@@ -4,6 +4,7 @@ import type { REST } from "@discordjs/rest";
 import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider } from "@earendil-works/pi-ai";
 import { llm } from "../src/llm/models.ts";
 import { respond, typicalLength } from "../src/agent/respond.ts";
+import { formatMessage } from "../src/agent/tools.ts";
 import { GuildCache } from "../src/discord/cache.ts";
 import { Reader } from "../src/discord/reader.ts";
 import { GUILD, makeGuild, SELF } from "./helpers.ts";
@@ -41,4 +42,40 @@ test("the agent calls read tools through the reader and returns its final text",
 test("the typical length is the median of the human samples", () => {
   assert.equal(typicalLength([]), null);
   assert.equal(typicalLength(["あ", "あいう", "あいうえおかきくけこ"]), 3);
+});
+
+test("writes go through propose_plan only when proposing is allowed", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    const cache = new GuildCache(GUILD);
+    cache.guild = makeGuild();
+    const rest = { get: async () => [] } as unknown as REST;
+    const reader = new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "1" }, { maxMessages: 500 });
+    const proposed: unknown[] = [];
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("propose_plan", { steps: [{ op: "POST /guilds/{guild}/channels", body: { name: "new" } }] })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("チャンネル作成を提案しました")]),
+    ]);
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader, botName: "bot", transcript: [], target: "[1] owner: newを作って", webSearch: false,
+      propose: async (drafts) => {
+        proposed.push(...drafts);
+        return { id: "p1", steps: drafts, risk: "write" } as never;
+      },
+    });
+    assert.deepEqual(proposed, [{ op: "POST /guilds/{guild}/channels", body: { name: "new" } }]);
+    assert.deepEqual(result.toolCalls, ["propose_plan"]);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
+test("the bot's own dialogs (Components V2) are readable in the transcript", () => {
+  const line = formatMessage({
+    id: "1", timestamp: "2026-10-21T00:00:00.000Z", content: "", attachments: [], embeds: [],
+    author: { id: SELF, username: "bot", bot: true },
+    components: [{ type: 10, content: "### 変更の確認\n✅ 実行しました" }],
+  } as never);
+  assert.match(line, /変更の確認\n✅ 実行しました/);
 });

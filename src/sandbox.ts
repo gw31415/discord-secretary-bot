@@ -18,6 +18,11 @@ export interface SandboxLimits {
 
 export const AGENT_SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 30_000, memoryBytes: 64 * 1024 * 1024, maxGets: 200 };
 
+const PRELUDE = [
+  "function call(op, args) { args = args || {}; return { id: args.id, op: op, path: args.path, query: args.query, body: args.body }; }",
+  "function plan(steps) { return { steps: steps }; }",
+].join("\n");
+
 export interface SandboxResult {
   ok: boolean;
   value?: unknown;
@@ -62,7 +67,8 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     }).consume((fn) => vm.setProp(vm.global, "log", fn));
 
     // Wrapped so the code can `return` its answer; JSON keeps host and guest values apart.
-    const wrapped = `JSON.stringify((function () {\n${code}\n})())`;
+    // call()/plan() only build plain objects: a returned plan is a proposal, not a write.
+    const wrapped = `${PRELUDE}\nJSON.stringify((function () {\n${code}\n})())`;
     const result = await vm.evalCodeAsync(wrapped, "agent.js");
     if (result.error) {
       const err = vm.dump(result.error) as { name?: string; message?: string } | string;

@@ -1,22 +1,13 @@
 import type { API } from "@discordjs/core";
-import { ComponentType, InteractionType, MessageFlags } from "discord-api-types/v10";
-import type { APIInteraction, APIModalSubmitInteraction } from "discord-api-types/v10";
+import { InteractionType, MessageFlags } from "discord-api-types/v10";
+import type { APIInteraction } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
+import { modalValue } from "./discord/modal.ts";
 import { PROVIDERS } from "./llm/models.ts";
 import { keyModal, parseCustomId, renderPanel } from "./llm/panel.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
 // within 3 seconds; everything here is a local DB operation, so no defer is needed.
-
-function modalValue(interaction: APIModalSubmitInteraction, customId: string): string | undefined {
-  for (const row of interaction.data.components) {
-    const inner = "components" in row ? row.components : "component" in row ? [row.component] : [];
-    for (const c of inner) {
-      if (c.type === ComponentType.TextInput && c.custom_id === customId) return c.value;
-    }
-  }
-  return undefined;
-}
 
 function panelUpdate(store: Store, userId: string, notice?: string) {
   // UPDATE_MESSAGE cannot change the ephemeral flag, so only Components V2 is sent.

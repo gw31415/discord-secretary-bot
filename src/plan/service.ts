@@ -1,0 +1,566 @@
+import { createHash, randomBytes } from "node:crypto";
+import type { API } from "@discordjs/core";
+import { DiscordAPIError } from "@discordjs/rest";
+import { InteractionType, MessageFlags } from "discord-api-types/v10";
+import type { APIChannel, APIGuild, APIGuildMember, APIInteraction, APIRole } from "discord-api-types/v10";
+import type { PlanRow, Store, StepRow } from "../db.ts";
+import type { GuildCaches } from "../discord/cache.ts";
+import { toChannel, toMember, toRole } from "../discord/cache.ts";
+import { modalValue } from "../discord/modal.ts";
+import { shareableChannels } from "../discord/permissions.ts";
+import type { GuildState, MemberState } from "../discord/permissions.ts";
+import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
+import type { Body } from "./catalog.ts";
+import { confirmModal, confirmPhrase, label, parsePlanCustomId, renderDialog } from "./dialog.ts";
+import type { DialogState } from "./dialog.ts";
+import { isRef } from "./types.ts";
+import type { Plan, Precondition, Step, StepDraft } from "./types.ts";
+import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
+
+// Proposal → approval dialog → re-verification → execution. Every write the
+// bot makes on someone's behalf goes through here.
+
+export const APPROVAL_MS = 5 * 60_000;
+export const SNAPSHOT_RETENTION_MS = 90 * 24 * 60 * 60_000;
+
+export interface PlannerDeps {
+  api: API;
+  store: Store;
+  caches: Pick<GuildCaches, "get">;
+  selfId: () => string;
+  now: () => number;
+  log: (message: string, error?: unknown) => void;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface ProposeInput {
+  guildId: string;
+  /** Where the dialog is posted. */
+  channelId: string;
+  replyToId: string | null;
+  actorId: string;
+  drafts: StepDraft[];
+  /** Channels this conversation may show; the preview must stay within them. */
+  shareable: Set<string>;
+}
+
+type Resource = Record<string, unknown> | null;
+
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stable((value as Record<string, unknown>)[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+export function fingerprint(resource: Resource, fields: string[]): string {
+  if (!resource) return "absent";
+  return sha256(stable(fields.map((f) => [f, resource[f] ?? null])));
+}
+
+export function planHash(plan: Omit<Plan, "hash">): string {
+  const { id, guildId, actor, preconditions, steps, labels, risk, createdAt, expiresAt } = plan;
+  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, createdAt, expiresAt }));
+}
+
+/** Fields shown as "before" in the preview, on top of the ones the step depends on. */
+function displayValues(kind: string, resource: Resource, fields: string[]): Record<string, unknown> | null {
+  if (!resource) return null;
+  const values: Record<string, unknown> = {};
+  for (const f of fields) values[f] = resource[f] ?? null;
+  if (kind === "message") {
+    values.content = resource.content;
+    values.author = { username: (resource.author as { username?: string } | undefined)?.username };
+  }
+  if (kind === "channel" || kind === "role") values.name = resource.name;
+  return values;
+}
+
+function memberLabel(m: APIGuildMember): string {
+  return m.nick ?? m.user.global_name ?? m.user.username;
+}
+
+/** Thrown when the world changed between approval and execution. */
+class Aborted extends Error {}
+
+export class Planner {
+  readonly deps: PlannerDeps;
+
+  constructor(deps: PlannerDeps) {
+    this.deps = deps;
+  }
+
+  get #rest() {
+    return this.deps.api.rest;
+  }
+
+  async #get(path: string): Promise<Resource> {
+    try {
+      return (await this.#rest.get(path as `/${string}`)) as Record<string, unknown>;
+    } catch (e) {
+      if (e instanceof DiscordAPIError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** Current state of a resource key, straight from REST (never the cache). */
+  async resource(guildId: string, key: string): Promise<Resource> {
+    const sep = key.indexOf(":");
+    const kind = key.slice(0, sep);
+    const [a, b] = key.slice(sep + 1).split("/") as [string, string | undefined];
+    switch (kind) {
+      case "channel":
+        return this.#get(`/channels/${a}`);
+      case "role":
+        return this.#get(`/guilds/${guildId}/roles/${a}`);
+      case "member":
+        return this.#get(`/guilds/${guildId}/members/${a}`);
+      case "message":
+        return this.#get(`/channels/${a}/messages/${b}`);
+      case "overwrite": {
+        const channel = (await this.#get(`/channels/${a}`)) as { permission_overwrites?: Array<Record<string, unknown>> } | null;
+        return channel?.permission_overwrites?.find((o) => o.id === b) ?? null;
+      }
+      case "ban":
+        return this.#get(`/guilds/${a}/bans/${b}`);
+      default:
+        throw new Error(`不明なリソース ${key}`);
+    }
+  }
+
+  // --- Proposal -----------------------------------------------------------
+
+  async propose(input: ProposeInput): Promise<Plan> {
+    const cache = this.deps.caches.get(input.guildId);
+    if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
+    const guild = cache.guild;
+    const id = randomBytes(6).toString("hex");
+    const steps = normalizeSteps(input.drafts, input.guildId, id);
+    const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId() };
+    const problems = steps.flatMap((s) => [...permissionProblems(s, ctx), ...visibilityProblems(s, input.shareable)]);
+    if (problems.length > 0) throw new PlanRejected(problems);
+
+    {
+      const preconditions = await this.#preconditions(input.guildId, steps);
+      const labels = await this.#labels(input.guildId, guild, steps, input.actorId);
+      const createdAt = new Date(this.deps.now());
+      const draft: Omit<Plan, "hash"> = {
+        id,
+        guildId: input.guildId,
+        actor: { kind: "user", userId: input.actorId, via: "conversation" },
+        preconditions,
+        steps,
+        labels,
+        risk: planRisk(steps),
+        createdAt: createdAt.toISOString(),
+        expiresAt: new Date(createdAt.getTime() + APPROVAL_MS).toISOString(),
+      };
+      const plan: Plan = { ...draft, hash: planHash(draft) };
+      this.deps.store.insertPlan(plan);
+      this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op) }, plan.id);
+
+      const message = await this.deps.api.channels.createMessage(input.channelId, {
+        ...renderDialog(plan, { status: "pending_approval" }),
+        allowed_mentions: { parse: [] },
+        ...(input.replyToId ? { message_reference: { message_id: input.replyToId, fail_if_not_exists: false } } : {}),
+      });
+      this.deps.store.setPlanMessage(plan.id, input.channelId, message.id);
+      return plan;
+    }
+  }
+
+  async #preconditions(guildId: string, steps: Step[]): Promise<Precondition[]> {
+    const byResource = new Map<string, Set<string>>();
+    for (const step of steps) {
+      const spec = specOf(step);
+      if (!spec.target || Object.values(step.pathParams).some(isRef)) continue;
+      const key = spec.target(step.pathParams, guildId);
+      const fields = byResource.get(key) ?? new Set<string>();
+      for (const f of spec.targetFields?.(step.body as Body) ?? []) fields.add(f);
+      byResource.set(key, fields);
+    }
+    const result: Precondition[] = [];
+    const missing: string[] = [];
+    for (const [key, fieldSet] of byResource) {
+      const resource = await this.resource(guildId, key);
+      const kind = key.slice(0, key.indexOf(":"));
+      // A new channel overwrite has nothing to replace; everything else must exist.
+      if (!resource && kind !== "overwrite") missing.push(key);
+      const fields = [...fieldSet].sort();
+      result.push({ resource: key, fields, values: displayValues(kind, resource, fields), fingerprint: fingerprint(resource, fields) });
+    }
+    if (missing.length > 0) throw new PlanRejected(missing.map((k) => `対象が見つかりません: ${k}`));
+    return result;
+  }
+
+  async #labels(guildId: string, guild: GuildState, steps: Step[], actorId: string): Promise<Record<string, string>> {
+    const labels: Record<string, string> = {};
+    let roles: APIRole[] | null = null;
+    const user = async (id: string) => {
+      const m = (await this.#get(`/guilds/${guildId}/members/${id}`)) as APIGuildMember | null;
+      if (m) labels[id] = memberLabel(m);
+      else {
+        const u = (await this.#get(`/users/${id}`)) as { username?: string; global_name?: string | null } | null;
+        if (u) labels[id] = u.global_name ?? u.username ?? id;
+      }
+    };
+    const channel = async (id: string) => {
+      const name = guild.channels.get(id)?.name ?? ((await this.#get(`/channels/${id}`)) as { name?: string } | null)?.name;
+      if (name) labels[id] = `#${name}`;
+    };
+    const role = async (id: string) => {
+      roles ??= (await this.#rest.get(`/guilds/${guildId}/roles`)) as APIRole[];
+      const r = roles.find((x) => x.id === id);
+      if (r) labels[id] = id === guildId ? "@everyone" : `@${r.name}`;
+    };
+
+    await user(actorId);
+    for (const step of steps) {
+      const spec = specOf(step);
+      const body = step.body as Body;
+      const wanted: Array<{ id: unknown; kind: "channel" | "role" | "user" }> = [
+        ...(spec.mentions?.(step.pathParams, body) ?? []),
+        ...(spec.channels?.(step.pathParams, body) ?? []).map((id) => ({ id, kind: "channel" as const })),
+      ];
+      for (const { id, kind } of wanted) {
+        if (typeof id !== "string" || labels[id]) continue;
+        if (kind === "user") await user(id);
+        else if (kind === "role") await role(id);
+        else await channel(id);
+      }
+    }
+    return labels;
+  }
+
+  // --- Interactions -------------------------------------------------------
+
+  /** Handles plan buttons and the confirmation modal. Returns false for anything else. */
+  async handleInteraction(interaction: APIInteraction): Promise<boolean> {
+    if (interaction.type !== InteractionType.MessageComponent && interaction.type !== InteractionType.ModalSubmit) return false;
+    const parsed = parsePlanCustomId(interaction.data.custom_id);
+    if (!parsed) return false;
+    const { api, store } = this.deps;
+    const userId = interaction.member?.user.id ?? interaction.user?.id;
+    const ephemeral = (content: string) =>
+      api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+
+    const row = store.getPlan(parsed.planId);
+    if (!row || row.plan.hash.slice(0, 8) !== parsed.hash8) {
+      await ephemeral("この変更は見つかりません");
+      return true;
+    }
+    const { plan } = row;
+
+    if (parsed.action === "json") {
+      const json = JSON.stringify({ plan, status: row.status, reason: row.reason, steps: store.getSteps(plan.id) }, null, 2);
+      await api.interactions.reply(interaction.id, interaction.token, {
+        content: `変更 \`${plan.id}\` の全内容です`,
+        files: [{ name: `plan-${plan.id}.json`, data: Buffer.from(json) }],
+        flags: MessageFlags.Ephemeral,
+      });
+      return true;
+    }
+    if (userId !== plan.actor.userId) {
+      await ephemeral("この変更を操作できるのは依頼した本人だけです");
+      return true;
+    }
+    const update = (state: DialogState) => api.interactions.updateMessage(interaction.id, interaction.token, renderDialog(plan, state));
+    const expired = () => Date.parse(plan.expiresAt) <= this.deps.now();
+
+    switch (parsed.action) {
+      case "cancel": {
+        if (!store.transitionPlan(plan.id, ["pending_approval"], "cancelled", { reason: "依頼者が取り消しました" })) {
+          await ephemeral("この変更はもう承認待ちではありません");
+          return true;
+        }
+        store.audit(plan.actor, "plan.cancel", {}, plan.id);
+        await update({ status: "cancelled", reason: "依頼者が取り消しました" });
+        return true;
+      }
+      case "run":
+      case "confirm": {
+        if (row.status !== "pending_approval") {
+          await ephemeral("この変更はもう承認待ちではありません");
+          return true;
+        }
+        if (expired()) {
+          await this.#expire(plan.id);
+          await update({ status: "cancelled", reason: "期限切れになりました(5分)。もう一度頼んでください。" });
+          return true;
+        }
+        if (parsed.action === "run" && plan.risk === "destructive") {
+          await api.interactions.createModal(interaction.id, interaction.token, confirmModal(plan));
+          return true;
+        }
+        if (parsed.action === "confirm") {
+          const typed = interaction.type === InteractionType.ModalSubmit ? modalValue(interaction, "confirm")?.trim() : undefined;
+          if (typed !== confirmPhrase(plan)) {
+            await ephemeral("入力が一致しないため実行しませんでした。もう一度「実行」を押してください。");
+            return true;
+          }
+        }
+        if (!store.transitionPlan(plan.id, ["pending_approval"], "approved", { approvedBy: userId })) {
+          await ephemeral("この変更はもう承認待ちではありません");
+          return true;
+        }
+        store.audit(plan.actor, "plan.approve", {}, plan.id);
+        await update({ status: "executing" });
+        void this.execute(plan.id);
+        return true;
+      }
+      case "resume": {
+        if (!store.transitionPlan(plan.id, ["failed"], "approved", { reason: null })) {
+          await ephemeral("この変更は再開できる状態ではありません");
+          return true;
+        }
+        store.audit(plan.actor, "plan.resume", {}, plan.id);
+        await update({ status: "executing", steps: store.getSteps(plan.id) });
+        void this.execute(plan.id);
+        return true;
+      }
+      case "restore": {
+        if (row.status !== "failed" || !row.channelId) {
+          await ephemeral("この変更は復元できる状態ではありません");
+          return true;
+        }
+        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        const followUp = (content: string) =>
+          api.interactions.followUp(interaction.application_id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+        const { drafts, skipped } = this.restoreDrafts(row);
+        if (drafts.length === 0) {
+          await followUp(`戻せる変更がありません。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
+          return true;
+        }
+        try {
+          const cache = this.deps.caches.get(plan.guildId);
+          const actor = cache?.member(plan.actor.userId);
+          if (!cache?.guild || !actor) throw new Error("サーバーの情報を読み込めていません");
+          const shareable = shareableChannels(cache.guild, row.channelId, actor, this.deps.selfId());
+          const restore = await this.propose({ guildId: plan.guildId, channelId: row.channelId, replyToId: row.messageId, actorId: plan.actor.userId, drafts, shareable });
+          store.audit(plan.actor, "plan.restore", { restorePlan: restore.id, skipped }, plan.id);
+          await this.#refresh(plan.id, false, `復元の変更 \`${restore.id}\` を提案しました。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
+        } catch (e) {
+          const reasons = e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e);
+          await followUp(`復元の変更を作れませんでした:\n${reasons.slice(0, 1800)}`);
+        }
+        return true;
+      }
+      case "keep": {
+        if (row.status !== "failed") {
+          await ephemeral("この変更はもう終わっています");
+          return true;
+        }
+        store.audit(plan.actor, "plan.keep", {}, plan.id);
+        await update({ status: "failed", steps: store.getSteps(plan.id), reason: `${row.reason ?? ""}\nそのままにしました。`, actions: false });
+        return true;
+      }
+    }
+  }
+
+  /** Steps that undo what a failed plan already did, newest first. */
+  restoreDrafts(row: PlanRow): { drafts: StepDraft[]; skipped: string[] } {
+    const { plan } = row;
+    const rows = new Map(this.deps.store.getSteps(plan.id).map((s) => [s.stepId, s]));
+    const drafts: StepDraft[] = [];
+    const skipped: string[] = [];
+    for (const step of [...plan.steps].reverse()) {
+      const state = rows.get(step.id);
+      if (state?.state !== "done" || !state.request) continue;
+      const spec = specOf(step);
+      const snapshot = this.deps.store.getSnapshot(plan.id, step.id)?.data ?? null;
+      const inverse = spec.inverse?.(state.request.pathParams, state.request.body as Body, snapshot, state.response as Record<string, unknown> | null);
+      if (inverse) drafts.push(inverse);
+      else skipped.push(`${step.id}(${spec.label})`);
+    }
+    return { drafts, skipped };
+  }
+
+  // --- Execution ----------------------------------------------------------
+
+  async #freshState(plan: Plan, steps: Step[]): Promise<GuildState> {
+    const g = plan.guildId;
+    const guild = (await this.#rest.get(`/guilds/${g}`)) as APIGuild;
+    const channels = (await this.#rest.get(`/guilds/${g}/channels`)) as APIChannel[];
+    const state: GuildState = {
+      id: g,
+      ownerId: guild.owner_id,
+      roles: new Map(guild.roles.map((r) => [r.id, toRole(r)])),
+      channels: new Map(channels.map((c) => [c.id, toChannel(c)])),
+      members: new Map(),
+    };
+    const memberIds = new Set([plan.actor.userId, this.deps.selfId()]);
+    for (const step of steps) {
+      const param = specOf(step).hierarchy?.member;
+      if (param && !isRef(step.pathParams[param])) memberIds.add(String(step.pathParams[param]));
+    }
+    for (const id of memberIds) await this.#addMember(state, id);
+    for (const step of steps) await this.#addChannel(state, step);
+    return state;
+  }
+
+  async #addMember(state: GuildState, userId: string): Promise<void> {
+    const m = (await this.#get(`/guilds/${state.id}/members/${userId}`)) as APIGuildMember | null;
+    if (m) state.members.set(userId, toMember(m) as MemberState);
+  }
+
+  /** Threads and channels created earlier in the plan are not in the guild's channel list. */
+  async #addChannel(state: GuildState, step: Step): Promise<void> {
+    const param = specOf(step).channel;
+    const value = param ? step.pathParams[param] : undefined;
+    if (typeof value !== "string" || state.channels.has(value)) return;
+    const raw = (await this.#get(`/channels/${value}`)) as (APIChannel & { guild_id?: string }) | null;
+    if (raw?.guild_id === state.id) state.channels.set(raw.id, toChannel(raw));
+  }
+
+  async #send(plan: Plan, step: Step): Promise<unknown> {
+    const { api } = this.deps;
+    const spec = specOf(step);
+    const body = step.body as Record<string, unknown> | undefined;
+    if (spec.op === "POST /users/{user}/dm") {
+      const dm = await api.users.createDM(String(step.pathParams.user));
+      return api.channels.createMessage(dm.id, { content: String(body?.content), allowed_mentions: { parse: [] } });
+    }
+    const reason = `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
+    const { method, path } = routeOf(step.op, step.pathParams);
+    let payload: unknown = body;
+    if (spec.op === "POST /channels/{channel}/messages") {
+      // Pings only the users the approved text names; the nonce stops a retry from posting twice.
+      payload = { ...body, allowed_mentions: { parse: ["users"] }, nonce: sha256(step.idempotencyKey).slice(0, 25), enforce_nonce: true };
+    }
+    const options = { reason, ...(payload !== undefined ? { body: payload } : {}) };
+    switch (method) {
+      case "POST":
+        return this.#rest.post(path, options);
+      case "PUT":
+        return this.#rest.put(path, options);
+      case "PATCH":
+        return this.#rest.patch(path, options);
+      case "DELETE":
+        return this.#rest.delete(path, { reason });
+      default:
+        throw new Error(`未対応のメソッド ${method}`);
+    }
+  }
+
+  /** Runs an approved plan. Preconditions and permissions are re-read from REST first. */
+  async execute(planId: string): Promise<void> {
+    const { store } = this.deps;
+    const row = store.getPlan(planId);
+    if (!row || !store.transitionPlan(planId, ["approved"], "executing")) return;
+    const { plan } = row;
+    const sleep = this.deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+
+    {
+      const rows = new Map(store.getSteps(plan.id).map((s) => [s.stepId, s]));
+      const remaining = plan.steps.filter((s) => rows.get(s.id)?.state !== "done");
+      const results = new Map<string, unknown>(plan.steps.filter((s) => rows.get(s.id)?.state === "done").map((s) => [s.id, rows.get(s.id)!.response]));
+      let current: Step | undefined;
+      try {
+        const state = await this.#freshState(plan, remaining);
+        await this.#checkPreconditions(plan, remaining, results);
+        const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }));
+        if (problems.length > 0) throw new Aborted(`権限が足りなくなりました: ${problems.join(" / ")}`);
+
+        let lastDm = 0;
+        for (const step of remaining) {
+          current = step;
+          const resolved: Step = { ...step, pathParams: resolveRefs(step.pathParams, results), ...(step.body !== undefined ? { body: resolveRefs(step.body, results) } : {}) };
+          const spec = specOf(resolved);
+          await this.#addChannel(state, resolved);
+          const stepProblems = permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() });
+          if (stepProblems.length > 0) throw new Error(stepProblems.join(" / "));
+          if (spec.target) {
+            const key = spec.target(resolved.pathParams, plan.guildId);
+            store.saveSnapshot(plan.id, step.id, key, await this.resource(plan.guildId, key));
+          }
+          if (spec.op === "POST /users/{user}/dm") {
+            const wait = lastDm + DM_INTERVAL_MS - this.deps.now();
+            if (wait > 0) await sleep(wait);
+            lastDm = this.deps.now();
+          }
+          store.markStepInFlight(plan.id, step.id, { pathParams: resolved.pathParams, body: resolved.body });
+          const response = await this.#send(plan, resolved);
+          const resultId = (response as { id?: string } | undefined)?.id ?? null;
+          store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
+          results.set(step.id, response ?? null);
+        }
+        store.transitionPlan(plan.id, ["executing"], "succeeded", { reason: null });
+        store.audit(plan.actor, "plan.succeeded", { steps: plan.steps.length }, plan.id);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (e instanceof Aborted) {
+          store.transitionPlan(plan.id, ["executing"], "aborted", { reason: message });
+          store.audit(plan.actor, "plan.aborted", { reason: message }, plan.id);
+        } else {
+          if (current) store.finishStep(plan.id, current.id, { state: "failed", error: message.slice(0, 500) });
+          const reason = current ? `${current.id} で失敗: ${message.slice(0, 300)}` : `実行前の確認で失敗: ${message.slice(0, 300)}`;
+          store.transitionPlan(plan.id, ["executing"], "failed", { reason });
+          store.audit(plan.actor, "plan.failed", { step: current?.id, error: message.slice(0, 500) }, plan.id);
+          this.deps.log(`変更 ${plan.id} の実行に失敗`, e);
+        }
+      }
+    }
+    await this.#refresh(plan.id).catch((e) => this.deps.log(`変更 ${plan.id} の表示更新に失敗`, e));
+  }
+
+  /**
+   * The state each remaining step relies on must be as it was at proposal.
+   * Resources an already-finished step of this plan touched are skipped: the
+   * plan itself changed them.
+   */
+  async #checkPreconditions(plan: Plan, remaining: Step[], done: Map<string, unknown>): Promise<void> {
+    const keyOf = (s: Step) => specOf(s).target?.(s.pathParams, plan.guildId);
+    const touched = new Set(plan.steps.filter((s) => done.has(s.id)).map(keyOf));
+    const needed = new Set(remaining.map(keyOf));
+    for (const pre of plan.preconditions) {
+      if (!needed.has(pre.resource) || touched.has(pre.resource)) continue;
+      const now = fingerprint(await this.resource(plan.guildId, pre.resource), pre.fields);
+      if (now !== pre.fingerprint) throw new Aborted(`${pre.resource} の状態が提案のあとに変わりました`);
+    }
+  }
+
+  async #expire(planId: string): Promise<boolean> {
+    const reason = "期限切れになりました(5分)。もう一度頼んでください。";
+    if (!this.deps.store.transitionPlan(planId, ["pending_approval"], "cancelled", { reason })) return false;
+    this.deps.store.audit({ kind: "system" }, "plan.expire", {}, planId);
+    return true;
+  }
+
+  /** Redraws a plan's dialog from the database. */
+  async #refresh(planId: string, actions = true, note?: string): Promise<void> {
+    const row = this.deps.store.getPlan(planId);
+    if (!row?.channelId || !row.messageId) return;
+    const steps: StepRow[] = this.deps.store.getSteps(planId);
+    const reason = note ? `${row.reason ?? ""}\n${note}` : row.reason;
+    await this.deps.api.channels.editMessage(row.channelId, row.messageId, renderDialog(row.plan, { status: row.status, steps, reason, actions }));
+  }
+
+  /** Expires unanswered dialogs and drops old snapshots. Called every minute. */
+  async sweep(): Promise<void> {
+    const now = this.deps.now();
+    for (const row of this.deps.store.expiredPlans(new Date(now))) {
+      if (await this.#expire(row.plan.id)) await this.#refresh(row.plan.id).catch((e) => this.deps.log(`変更 ${row.plan.id} の表示更新に失敗`, e));
+    }
+    this.deps.store.deleteSnapshotsBefore(new Date(now - SNAPSHOT_RETENTION_MS));
+  }
+
+  /** A restart interrupted these plans; whether the in-flight request landed is unknown. */
+  async recover(): Promise<void> {
+    const { store } = this.deps;
+    for (const id of store.interruptedPlans()) {
+      for (const step of store.getSteps(id)) {
+        if (step.state === "in_flight") {
+          store.finishStep(id, step.stepId, { state: "failed", error: "Botの再起動で中断しました(実行されたかは不明です。再開すると送り直します)" });
+        }
+      }
+      store.transitionPlan(id, ["executing", "approved"], "failed", { reason: "Botの再起動で中断しました。" });
+      store.audit({ kind: "system" }, "plan.interrupted", {}, id);
+      await this.#refresh(id).catch((e) => this.deps.log(`変更 ${id} の表示更新に失敗`, e));
+    }
+  }
+}

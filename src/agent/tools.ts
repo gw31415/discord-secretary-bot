@@ -2,10 +2,14 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { TSchema } from "@earendil-works/pi-ai";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
-import { ChannelType } from "discord-api-types/v10";
+import { ChannelType, ComponentType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";
 import { downloadImages, imageRefs, MAX_IMAGES } from "./images.ts";
 import { AGENT_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
+import { catalogSummary } from "../plan/catalog.ts";
+import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
+import type { Plan, StepDraft } from "../plan/types.ts";
+import { PlanRejected } from "../plan/validate.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
 // narrows results to what may be shown in the channel the reply goes to.
@@ -17,11 +21,23 @@ function text(value: string) {
   return { content: [{ type: "text" as const, text: body }], details: {} };
 }
 
+/** Text of Components V2 messages (the bot's own dialogs), which have no content. */
+function componentText(components: unknown[] | undefined): string[] {
+  const out: string[] = [];
+  for (const c of components ?? []) {
+    const comp = c as { type?: number; content?: string; components?: unknown[] };
+    if (comp.type === ComponentType.TextDisplay && comp.content) out.push(comp.content);
+    if (comp.components) out.push(...componentText(comp.components));
+  }
+  return out;
+}
+
 export function formatMessage(m: Omit<APIMessage, "reactions">): string {
   const name = m.author.global_name ?? m.author.username;
   const parts = [`[${m.id}] ${m.timestamp.slice(0, 16).replace("T", " ")} ${name}(${m.author.id})${m.author.bot ? "[bot]" : ""}`];
   if (m.message_reference?.message_id) parts.push(`返信先:${m.message_reference.message_id}`);
-  let line = `${parts.join(" ")}: ${m.content}`;
+  const content = [m.content, ...componentText(m.components)].filter(Boolean).join("\n");
+  let line = `${parts.join(" ")}: ${content}`;
   if (m.attachments.length > 0) {
     line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : ""}`).join(", ")}]`;
   }
@@ -45,6 +61,8 @@ export interface ToolOptions {
   /** The model accepts images, so view_images is offered. */
   images: boolean;
   fetch?: typeof fetch;
+  /** Posts an approval dialog for the steps. Present when writes are allowed. */
+  propose?: (drafts: StepDraft[]) => Promise<Plan>;
 }
 
 export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
@@ -171,5 +189,57 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   });
 
   const tools = [readMessages, searchMessages, listChannels, findMembers, runCode];
-  return options.images ? [...tools, viewImages] : tools;
+  if (options.images) tools.push(viewImages);
+  if (options.propose) tools.push(proposePlan(reader, options.propose));
+  return tools;
+}
+
+function proposePlan(reader: Reader, propose: (drafts: StepDraft[]) => Promise<Plan>): AgentTool<any> {
+  return tool({
+    name: "propose_plan",
+    label: "変更を提案",
+    description: [
+      "書き込み操作の変更案を出し、チャンネルに承認ダイアログを投稿します。依頼者が「実行」を押したときだけ実行されます。",
+      "steps か code のどちらかを渡します。",
+      "steps: [{ id?, op, path, body? }]。op は下の一覧のどれか、path はパスパラメータ(guild は省略可)。前のステップの結果は { \"$ref\": \"steps.<id>.result.id\" } で参照できます。",
+      "code: 多数の対象をまとめるときに使う読み取り専用のJavaScript。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。",
+      "使える操作(これ以外と、仕様にないフィールドは拒否されます):",
+      catalogSummary(),
+    ].join("\n"),
+    parameters: Type.Object({
+      steps: Type.Optional(Type.Array(StepDraftSchema, { maxItems: 100 })),
+      code: Type.Optional(Type.String({ description: "plan([...]) を return する関数本体" })),
+    }),
+    execute: async (_id, params) => {
+      let drafts: StepDraft[];
+      if (params.code) {
+        const result = await runSandboxed(
+          params.code,
+          {
+            guildId: reader.guild.id,
+            actor: { kind: "user", userId: reader.scope.speakerId },
+            get: (route, query) => reader.get(route, query as Record<string, string>),
+          },
+          AGENT_SANDBOX_LIMITS,
+        );
+        if (!result.ok) throw new Error(result.error);
+        const value = result.value as { steps?: unknown } | undefined;
+        if (!value || !Array.isArray(value.steps)) throw new Error("code は plan([...]) を return してください");
+        drafts = value.steps as StepDraft[];
+      } else if (params.steps) {
+        drafts = params.steps;
+      } else {
+        throw new Error("steps か code を渡してください");
+      }
+      try {
+        const plan = await propose(drafts);
+        return text(
+          `承認ダイアログを投稿しました(変更 ${plan.id}、${plan.steps.length}件、危険度: ${RISK_LABEL[plan.risk]})。依頼者が「実行」を押すと実行され、結果はダイアログに表示されます。詳細はダイアログにあるので、返答では何を提案したかを一言添えるだけにしてください。`,
+        );
+      } catch (e) {
+        if (e instanceof PlanRejected) throw new Error(`変更案は拒否されました:\n${e.reasons.join("\n")}`);
+        throw e;
+      }
+    },
+  });
 }

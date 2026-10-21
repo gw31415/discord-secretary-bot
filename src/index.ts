@@ -11,6 +11,7 @@ import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
 import { Reader } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
+import { Planner } from "./plan/service.ts";
 
 const config = loadConfig();
 const store = new Store(config.dbPath, config.masterKey);
@@ -41,6 +42,8 @@ function log(message: string, error?: unknown): void {
   else console.log(`${time} ${message}`);
 }
 
+const planner = new Planner({ api: client.api, store, caches, selfId: () => selfId, now: () => Date.now(), log });
+
 const conversations = new Conversations({
   store,
   selfId: () => selfId,
@@ -68,6 +71,7 @@ const conversations = new Conversations({
   },
   respond,
   judge: judgeAddressed,
+  propose: (input) => planner.propose(input),
   log,
 });
 
@@ -138,6 +142,7 @@ client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
 client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
   if (!caches.get(data.guild_id)) return;
   try {
+    if (await planner.handleInteraction(data)) return;
     await handleInteraction(api, store, data);
   } catch (e) {
     log("インタラクションの処理に失敗", e);
@@ -148,7 +153,10 @@ function guildOf(channel: object): string | undefined {
   return "guild_id" in channel ? (channel.guild_id as string | undefined) : undefined;
 }
 
-const sweeper = setInterval(() => conversations.sweep(), 60_000);
+const sweeper = setInterval(() => {
+  conversations.sweep();
+  planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
+}, 60_000);
 
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
@@ -160,4 +168,6 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
+// Plans a restart cut off are marked failed (and can be resumed) before anything else runs.
+await planner.recover().catch((e) => log("中断された変更の後始末に失敗", e));
 await gateway.connect();

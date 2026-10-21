@@ -9,6 +9,8 @@ import { findChatModel, findJudgeModel } from "./llm/models.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
+import type { ProposeInput } from "./plan/service.ts";
+import type { Plan } from "./plan/types.ts";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -33,6 +35,8 @@ export interface ConversationDeps {
   makeReader: (scope: ReadScope) => Reader;
   respond: (input: RespondInput) => Promise<RespondResult>;
   judge: (input: { model: JudgeModel; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
+  /** Posts an approval dialog for writes. Absent keeps conversations read-only. */
+  propose?: (input: ProposeInput) => Promise<Plan>;
   log: (message: string, error?: unknown) => void;
 }
 
@@ -209,6 +213,17 @@ export class Conversations {
         // The replied-to message is in the same channel, so its images may be shown here too.
         images: [...imageRefs(message), ...(message.referenced_message ? imageRefs(message.referenced_message) : [])],
         webSearch: this.deps.webSearch,
+        propose: this.deps.propose
+          ? (drafts) =>
+              this.deps.propose!({
+                guildId: message.guild_id,
+                channelId: message.channel_id,
+                replyToId: message.id,
+                actorId: speaker,
+                drafts,
+                shareable: reader.shareable(),
+              })
+          : undefined,
       });
       text = result.text || "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。";
       detail = { ...detail, turns: result.turns, toolCalls: result.toolCalls, messagesRead: reader.messagesRead };

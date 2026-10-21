@@ -12,7 +12,7 @@ import type { ChannelState, GuildState, MemberState, OverwriteState, RoleState }
 // Each guild has its own cache, and a Reader is bound to one, so nothing read
 // for one server can reach a conversation in another.
 
-function toRole(role: APIRole): RoleState {
+export function toRole(role: APIRole): RoleState {
   return { id: role.id, permissions: BigInt(role.permissions), position: role.position };
 }
 
