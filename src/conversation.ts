@@ -23,7 +23,6 @@ export interface ConversationDeps {
   selfId: () => string;
   botName: () => string;
   now: () => number;
-  guildId: string;
   webSearch: boolean;
   fetchBefore: (channelId: string, beforeId: string, limit: number) => Promise<APIMessage[]>;
   sendReply: (channelId: string, replyToId: string, content: string) => Promise<void>;
@@ -34,6 +33,9 @@ export interface ConversationDeps {
   judge: (input: { model: JudgeModel; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
   log: (message: string, error?: unknown) => void;
 }
+
+/** A message from a server channel; the Gateway adds the guild it came from. */
+export type GuildMessage = APIMessage & { guild_id: string };
 
 export type Decision =
   | { kind: "ignore" }
@@ -93,7 +95,7 @@ export class Conversations {
     return { kind: "judge", judgeUserId: conv!.startedBy };
   }
 
-  handle(message: APIMessage): Promise<void> {
+  handle(message: GuildMessage): Promise<void> {
     const channelId = message.channel_id;
     const next = (this.#queues.get(channelId) ?? Promise.resolve())
       .then(() => this.#process(message))
@@ -105,7 +107,7 @@ export class Conversations {
     return next;
   }
 
-  async #process(message: APIMessage): Promise<void> {
+  async #process(message: GuildMessage): Promise<void> {
     const decision = this.decide(message);
     switch (decision.kind) {
       case "ignore":
@@ -128,12 +130,12 @@ export class Conversations {
     }
   }
 
-  async #transcript(message: APIMessage): Promise<string[]> {
+  async #transcript(message: GuildMessage): Promise<string[]> {
     const before = await this.deps.fetchBefore(message.channel_id, message.id, CONTEXT_MESSAGES);
     return before.map(formatMessage).reverse();
   }
 
-  async #addressed(judgeUserId: string, transcript: string[], message: APIMessage): Promise<boolean> {
+  async #addressed(judgeUserId: string, transcript: string[], message: GuildMessage): Promise<boolean> {
     const { store } = this.deps;
     const ref = store.getSettings(judgeUserId).judge;
     const model = ref && findJudgeModel(ref.provider, ref.model);
@@ -149,7 +151,7 @@ export class Conversations {
     return verdict.addressed && verdict.confidence >= CONFIDENCE_THRESHOLD;
   }
 
-  async #reply(message: APIMessage, transcript: string[], wake: boolean): Promise<void> {
+  async #reply(message: GuildMessage, transcript: string[], wake: boolean): Promise<void> {
     const { store } = this.deps;
     const speaker = message.author.id;
     const conv = store.getConversation(message.channel_id);
@@ -162,7 +164,7 @@ export class Conversations {
     const ref = store.getSettings(speaker).response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
-    const reader = this.deps.makeReader({ channelId: message.channel_id, speakerId: speaker });
+    const reader = this.deps.makeReader({ guildId: message.guild_id, channelId: message.channel_id, speakerId: speaker });
 
     await this.deps.typing(message.channel_id).catch(() => undefined);
     const typing = setInterval(() => void this.deps.typing(message.channel_id).catch(() => undefined), 8000);

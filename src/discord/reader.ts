@@ -13,6 +13,7 @@ import type { GuildState, MemberState } from "./permissions.ts";
 export class ReadDenied extends Error {}
 
 export interface ReadScope {
+  guildId: string;
   channelId: string;
   speakerId: string;
 }
@@ -103,8 +104,9 @@ export class Reader {
    */
   async assertChannel(channelId: string): Promise<void> {
     if (!this.shareable().has(channelId) && !this.guild.channels.has(channelId)) {
-      const fetched = toChannel((await this.rest.get(`/channels/${channelId}`)) as APIChannel);
-      if (fetched.type !== ChannelType.PrivateThread && fetched.parentId && this.shareable().has(fetched.parentId)) {
+      const raw = (await this.rest.get(`/channels/${channelId}`)) as APIChannel & { guild_id?: string };
+      const fetched = toChannel(raw);
+      if (raw.guild_id === this.guild.id && fetched.type !== ChannelType.PrivateThread && fetched.parentId && this.shareable().has(fetched.parentId)) {
         this.shareable().add(fetched.id);
       }
     }

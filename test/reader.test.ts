@@ -20,7 +20,7 @@ function fakeRest(responses: Record<string, unknown>) {
 function makeReader(rest: REST, channelId: string, speakerId: string) {
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
-  return new Reader(rest, cache, SELF, { channelId, speakerId }, { maxMessages: 150 });
+  return new Reader(rest, cache, SELF, { guildId: GUILD, channelId, speakerId }, { maxMessages: 150 });
 }
 
 const msg = (id: string, channel: string) => ({
@@ -90,9 +90,17 @@ test("the per-reply message budget is enforced", async () => {
 
 test("archived public threads under a shareable channel become readable", async () => {
   const { rest } = fakeRest({
-    "/channels/77": { id: "77", type: 11, name: "old", parent_id: "10" },
+    "/channels/77": { id: "77", type: 11, name: "old", parent_id: "10", guild_id: GUILD },
     "/channels/77/messages": [msg("1", "77")],
   });
   const reader = makeReader(rest, "10", "3");
   assert.equal(((await reader.get("/channels/77/messages")) as unknown[]).length, 1);
+});
+
+test("a thread from another server is refused even if its parent id looks shareable", async () => {
+  const { rest } = fakeRest({
+    "/channels/78": { id: "78", type: 11, name: "elsewhere", parent_id: "10", guild_id: "555" },
+    "/channels/78/messages": [msg("1", "78")],
+  });
+  await assert.rejects(makeReader(rest, "10", "3").get("/channels/78/messages"), /この場所では扱えません/);
 });

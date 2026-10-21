@@ -1,7 +1,8 @@
 export interface Config {
   discordToken: string;
   applicationId: string;
-  guildId: string;
+  /** Servers the bot may serve. Empty means every server it is invited to. */
+  allowedGuildIds: Set<string>;
   /** 32-byte key that wraps every per-key DEK. */
   masterKey: Buffer;
   dbPath: string;
@@ -21,7 +22,7 @@ export function loadConfig(): Config {
   return {
     discordToken: required("DISCORD_TOKEN"),
     applicationId: required("DISCORD_APPLICATION_ID"),
-    guildId: required("DISCORD_GUILD_ID"),
+    allowedGuildIds: new Set((process.env.DISCORD_GUILD_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean)),
     masterKey,
     dbPath: process.env.DB_PATH ?? "data/bot.db",
   };

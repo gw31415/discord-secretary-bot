@@ -18,8 +18,9 @@ export const COMMANDS: RESTPutAPIApplicationGuildCommandsJSONBody = [
 
 export async function registerCommands(api: API, store: Store, applicationId: string, guildId: string): Promise<boolean> {
   const hash = createHash("sha256").update(JSON.stringify({ guildId, COMMANDS })).digest("hex");
-  if (store.getMeta("commands_hash") === hash) return false;
+  const key = `commands_hash:${guildId}`;
+  if (store.getMeta(key) === hash) return false;
   await api.applicationCommands.bulkOverwriteGuildCommands(applicationId, guildId, COMMANDS);
-  store.setMeta("commands_hash", hash);
+  store.setMeta(key, hash);
   return true;
 }

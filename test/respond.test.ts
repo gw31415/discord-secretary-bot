@@ -25,7 +25,7 @@ test("the agent calls read tools through the reader and returns its final text",
     } as unknown as REST;
     const cache = new GuildCache(GUILD);
     cache.guild = makeGuild();
-    const reader = new Reader(rest, cache, SELF, { channelId: "10", speakerId: "2" }, { maxMessages: 500 });
+    const reader = new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "2" }, { maxMessages: 500 });
     const result = await respond({
       model: faux.getModel(), apiKey: "k", reader, botName: "bot",
       transcript: [], target: "[1] user: チャンネルを教えて", webSearch: false,

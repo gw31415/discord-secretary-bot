@@ -3,20 +3,20 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import type { APIMessage } from "discord-api-types/v10";
 import { Conversations, SESSION_MS, SETUP_NOTICE, splitForDiscord } from "../src/conversation.ts";
-import type { ConversationDeps } from "../src/conversation.ts";
+import type { ConversationDeps, GuildMessage } from "../src/conversation.ts";
 import { Store } from "../src/db.ts";
 import { parseJudgement } from "../src/agent/judge.ts";
 import type { Reader } from "../src/discord/reader.ts";
 
 const SELF = "999";
 
-function message(id: string, author: string, content: string, extra: Partial<APIMessage> = {}): APIMessage {
+function message(id: string, author: string, content: string, extra: Partial<APIMessage> = {}): GuildMessage {
   return {
-    id, channel_id: "10", content, timestamp: "2026-10-21T00:00:00Z",
+    id, channel_id: "10", guild_id: "100", content, timestamp: "2026-10-21T00:00:00Z",
     author: { id: author, username: `user${author}`, discriminator: "0", global_name: null, avatar: null },
     attachments: [], embeds: [], mentions: [], mention_roles: [], mention_everyone: false, pinned: false, tts: false, type: 0,
     ...extra,
-  } as APIMessage;
+  } as GuildMessage;
 }
 
 const mention = { id: SELF, username: "bot", discriminator: "0", global_name: null, avatar: null };
@@ -34,7 +34,7 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number } } = {}
   const responded: Array<{ apiKey: string; target: string }> = [];
   const judged: string[] = [];
   const deps: ConversationDeps = {
-    store, guildId: "100", webSearch: false,
+    store, webSearch: false,
     selfId: () => SELF, botName: () => "bot", now: () => now,
     fetchBefore: async () => [],
     sendReply: async (_c, _r, content) => void replies.push(content),

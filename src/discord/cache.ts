@@ -7,8 +7,10 @@ import type {
 } from "discord-api-types/v10";
 import type { ChannelState, GuildState, MemberState, OverwriteState, RoleState } from "./permissions.ts";
 
-// In-memory mirror of the one guild this bot serves, kept current from Gateway
+// In-memory mirror of each guild the bot serves, kept current from Gateway
 // events. Permission checks read from here; writes (Phase 2) re-verify via REST.
+// Each guild has its own cache, and a Reader is bound to one, so nothing read
+// for one server can reach a conversation in another.
 
 function toRole(role: APIRole): RoleState {
   return { id: role.id, permissions: BigInt(role.permissions), position: role.position };
@@ -87,5 +89,29 @@ export class GuildCache {
 
   member(userId: string): MemberState | undefined {
     return this.guild?.members.get(userId);
+  }
+}
+
+/** One cache per served guild. */
+export class GuildCaches {
+  readonly #caches = new Map<string, GuildCache>();
+
+  get(guildId: string | undefined): GuildCache | undefined {
+    return guildId ? this.#caches.get(guildId) : undefined;
+  }
+
+  load(data: GatewayGuildCreateDispatchData): GuildCache {
+    const cache = this.#caches.get(data.id) ?? new GuildCache(data.id);
+    cache.loadGuild(data);
+    this.#caches.set(data.id, cache);
+    return cache;
+  }
+
+  delete(guildId: string): void {
+    this.#caches.delete(guildId);
+  }
+
+  get size(): number {
+    return this.#caches.size;
   }
 }

@@ -25,7 +25,7 @@
 |---|---|
 | `DISCORD_TOKEN` | Botトークン |
 | `DISCORD_APPLICATION_ID` | アプリケーションID |
-| `DISCORD_GUILD_ID` | 対象サーバーのID |
+| `DISCORD_GUILD_IDS` | 任意。使うサーバーのIDをカンマ区切りで。空なら招待されたすべてのサーバーで動きます。会話・権限・読み取りはサーバーごとに分かれ、`/llm` の設定は人ごとに全サーバー共通です |
 | `MASTER_KEY` | APIキーの暗号化に使う32バイトの鍵(`openssl rand -base64 32`)。失うと登録済みのキーは復号できません |
 | `DB_PATH` | SQLiteのパス(既定 `data/bot.db`) |
 | `WEB_SEARCH` | `off` でClaudeのWeb検索を無効にする |

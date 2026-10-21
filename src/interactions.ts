@@ -24,8 +24,8 @@ function panelUpdate(store: Store, userId: string, notice?: string) {
   return { ...panel, flags: MessageFlags.IsComponentsV2 };
 }
 
-export async function handleInteraction(api: API, store: Store, guildId: string, interaction: APIInteraction): Promise<void> {
-  if (interaction.guild_id !== guildId) return;
+// LLM settings belong to the person, not the server, so the panel is the same in every server.
+export async function handleInteraction(api: API, store: Store, interaction: APIInteraction): Promise<void> {
   const userId = interaction.member?.user.id;
   if (!userId) return;
   const actor = { kind: "user" as const, userId, via: "panel" as const };
