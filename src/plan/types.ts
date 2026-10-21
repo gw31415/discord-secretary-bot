@@ -63,6 +63,10 @@ export interface Plan {
   /** Display names of every id the plan mentions, fixed at proposal so the preview is deterministic. */
   labels: Record<string, string>;
   risk: Risk;
+  /** The plan this one replaced (revised, or proposed again after it expired). */
+  revises?: string;
+  /** The plan this one undoes. */
+  undoOf?: string;
   hash: string;
   createdAt: string;
   expiresAt: string;

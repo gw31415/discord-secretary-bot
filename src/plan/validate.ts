@@ -212,6 +212,18 @@ export function resolveRefs<T>(value: T, results: Map<string, unknown>): T {
   }) as T;
 }
 
+/** The step's inverse restores everything it changes. */
+export function isUndoable(step: Step): boolean {
+  const spec = specOf(step);
+  if (!spec.inverse) return false;
+  return spec.undoable?.(step.body as Body) ?? true;
+}
+
+/** Steps that cannot be taken back; a plan with any of them asks for typed confirmation. */
+export function irreversibleSteps(steps: Step[]): Step[] {
+  return steps.filter((s) => !isUndoable(s));
+}
+
 export function specOf(step: Step): OpSpec {
   return CATALOG.get(step.op)!;
 }

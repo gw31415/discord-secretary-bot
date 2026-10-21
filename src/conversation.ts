@@ -2,6 +2,7 @@ import type { APIMessage } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
 import { formatMessage } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
+import type { ImageRef } from "./agent/images.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
@@ -127,15 +128,9 @@ export class Conversations {
   }
 
   handle(message: GuildMessage): Promise<void> {
-    const channelId = message.channel_id;
-    const next = (this.#queues.get(channelId) ?? Promise.resolve())
-      .then(() => this.#process(message))
-      .catch((e) => this.deps.log(`メッセージ ${message.id} の処理に失敗`, e));
-    this.#queues.set(channelId, next);
-    void next.finally(() => {
-      if (this.#queues.get(channelId) === next) this.#queues.delete(channelId);
-    });
-    return next;
+    return this.#enqueue(message.channel_id, () => this.#process(message)).catch((e) =>
+      this.deps.log(`メッセージ ${message.id} の処理に失敗`, e),
+    );
   }
 
   async #process(message: GuildMessage): Promise<void> {
@@ -182,7 +177,7 @@ export class Conversations {
     return verdict.addressed && verdict.confidence >= CONFIDENCE_THRESHOLD;
   }
 
-  async #reply(message: GuildMessage, { transcript, styleSamples }: ChannelContext, wake: boolean): Promise<void> {
+  async #reply(message: GuildMessage, context: ChannelContext, wake: boolean): Promise<void> {
     const { store } = this.deps;
     const speaker = message.author.id;
     const conv = store.getConversation(message.channel_id);
@@ -191,37 +186,110 @@ export class Conversations {
       startedBy: wake || !conv ? speaker : conv.startedBy,
       awakeUntil: this.deps.now() + SESSION_MS,
     });
+    await this.#answer({
+      guildId: message.guild_id,
+      channelId: message.channel_id,
+      replyToId: message.id,
+      speaker,
+      context,
+      target: formatMessage(message),
+      // The replied-to message is in the same channel, so its images may be shown here too.
+      images: [...imageRefs(message), ...(message.referenced_message ? imageRefs(message.referenced_message) : [])],
+      audit: { channelId: message.channel_id, messageId: message.id },
+    });
 
+    // Extend the session from the moment the reply went out.
+    const latest = store.getConversation(message.channel_id);
+    if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
+  }
+
+  /**
+   * The dialog's 修正 button: the agent reworks the plan from the person's
+   * instruction, and its new proposal takes over the same dialog.
+   */
+  revise(input: { plan: Plan; channelId: string; messageId: string; instruction: string }): Promise<void> {
+    const { plan } = input;
+    const speaker = plan.actor.userId;
+    if (!setupStatus(this.deps.store, speaker).complete) {
+      return Promise.reject(new Error("/llm の設定が終わっていないため修正できません"));
+    }
+    const run = async () => {
+      const before = await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES);
+      const context = { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
+      const current = plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) }));
+      const name = plan.labels[speaker] ?? speaker;
+      await this.#answer({
+        guildId: plan.guildId,
+        channelId: input.channelId,
+        replyToId: input.messageId,
+        speaker,
+        context,
+        target: [
+          `[修正依頼] ${name}(${speaker}): 承認待ちの変更案 ${plan.id} を次のとおり直して、propose_plan で出し直してください。`,
+          `直してほしいこと: ${input.instruction}`,
+          `今の案: ${JSON.stringify(current)}`,
+        ].join("\n"),
+        images: [],
+        replaces: plan.id,
+        audit: { channelId: input.channelId, messageId: input.messageId, revises: plan.id },
+      });
+    };
+    return this.#enqueue(input.channelId, run);
+  }
+
+  #enqueue(channelId: string, task: () => Promise<void>): Promise<void> {
+    const next = (this.#queues.get(channelId) ?? Promise.resolve()).then(task);
+    const settled = next.catch(() => undefined);
+    this.#queues.set(channelId, settled);
+    void settled.finally(() => {
+      if (this.#queues.get(channelId) === settled) this.#queues.delete(channelId);
+    });
+    return next;
+  }
+
+  async #answer(input: {
+    guildId: string;
+    channelId: string;
+    replyToId: string;
+    speaker: string;
+    context: ChannelContext;
+    target: string;
+    images: ImageRef[];
+    replaces?: string;
+    audit: Record<string, unknown>;
+  }): Promise<void> {
+    const { store } = this.deps;
+    const { speaker, channelId } = input;
     const ref = store.getSettings(speaker).response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
-    const reader = this.deps.makeReader({ guildId: message.guild_id, channelId: message.channel_id, speakerId: speaker });
+    const reader = this.deps.makeReader({ guildId: input.guildId, channelId, speakerId: speaker });
 
-    await this.deps.typing(message.channel_id).catch(() => undefined);
-    const typing = setInterval(() => void this.deps.typing(message.channel_id).catch(() => undefined), 8000);
+    await this.deps.typing(channelId).catch(() => undefined);
+    const typing = setInterval(() => void this.deps.typing(channelId).catch(() => undefined), 8000);
     let text: string;
-    let detail: Record<string, unknown> = { channelId: message.channel_id, messageId: message.id, model: `${ref.provider}/${ref.model}` };
+    let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}` };
     try {
       const result = await this.deps.respond({
         model,
         apiKey,
         reader,
         botName: this.deps.botName(),
-        transcript,
-        styleSamples,
-        target: formatMessage(message),
-        // The replied-to message is in the same channel, so its images may be shown here too.
-        images: [...imageRefs(message), ...(message.referenced_message ? imageRefs(message.referenced_message) : [])],
+        transcript: input.context.transcript,
+        styleSamples: input.context.styleSamples,
+        target: input.target,
+        images: input.images,
         webSearch: this.deps.webSearch,
         propose: this.deps.propose
           ? (drafts) =>
               this.deps.propose!({
-                guildId: message.guild_id,
-                channelId: message.channel_id,
-                replyToId: message.id,
+                guildId: input.guildId,
+                channelId,
+                replyToId: input.replyToId,
                 actorId: speaker,
                 drafts,
                 shareable: reader.shareable(),
+                ...(input.replaces ? { replaces: input.replaces } : {}),
               })
           : undefined,
       });
@@ -229,7 +297,7 @@ export class Conversations {
       detail = { ...detail, turns: result.turns, toolCalls: result.toolCalls, messagesRead: reader.messagesRead };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
-      this.deps.log(`応答の生成に失敗 (${message.id})`, e);
+      this.deps.log(`応答の生成に失敗 (${input.replyToId})`, e);
       text = `応答の生成に失敗しました: ${reason.slice(0, 300)}`;
       detail = { ...detail, error: reason.slice(0, 500) };
     } finally {
@@ -237,12 +305,8 @@ export class Conversations {
     }
 
     const posts = splitForDiscord(text);
-    for (const [i, post] of posts.entries()) await this.deps.sendReply(message.channel_id, i === 0 ? message.id : null, post);
+    for (const [i, post] of posts.entries()) await this.deps.sendReply(channelId, i === 0 ? input.replyToId : null, post);
     store.audit({ kind: "user", userId: speaker, via: "conversation" }, "conversation.reply", detail);
-
-    // Extend the session from the moment the reply went out.
-    const latest = store.getConversation(message.channel_id);
-    if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
   }
 
   sweep(): void {

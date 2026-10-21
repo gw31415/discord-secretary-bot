@@ -87,6 +87,11 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX snapshots_taken ON snapshots (taken_at);
   `,
+  `
+  ALTER TABLE plans ADD COLUMN undo_until TEXT;
+  ALTER TABLE plans ADD COLUMN undo_of TEXT;
+  CREATE INDEX plans_undo_of ON plans (undo_of);
+  `,
 ];
 
 export interface ModelRef {
@@ -119,6 +124,8 @@ export interface PlanRow {
   messageId: string | null;
   reason: string | null;
   approvedBy: string | null;
+  /** Until when "元に戻す" is offered; null when it is not (or no longer) offered. */
+  undoUntil: string | null;
 }
 
 export interface StepRow {
@@ -238,10 +245,10 @@ export class Store {
     this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO plans (id, guild_id, actor_json, plan_json, hash, risk, status, created_at, expires_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?)`,
+          `INSERT INTO plans (id, guild_id, actor_json, plan_json, hash, risk, status, created_at, expires_at, updated_at, undo_of)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending_approval', ?, ?, ?, ?)`,
         )
-        .run(plan.id, plan.guildId, JSON.stringify(plan.actor), JSON.stringify(plan), plan.hash, plan.risk, plan.createdAt, plan.expiresAt, now);
+        .run(plan.id, plan.guildId, JSON.stringify(plan.actor), JSON.stringify(plan), plan.hash, plan.risk, plan.createdAt, plan.expiresAt, now, plan.undoOf ?? null);
       const step = this.db.prepare(
         "INSERT INTO plan_steps (plan_id, step_id, position, state, updated_at) VALUES (?, ?, ?, 'pending', ?)",
       );
@@ -251,7 +258,7 @@ export class Store {
 
   getPlan(id: string): PlanRow | undefined {
     const row = this.db.prepare("SELECT * FROM plans WHERE id = ?").get(id) as
-      | { plan_json: string; status: PlanStatus; channel_id: string | null; message_id: string | null; reason: string | null; approved_by: string | null }
+      | { plan_json: string; status: PlanStatus; channel_id: string | null; message_id: string | null; reason: string | null; approved_by: string | null; undo_until: string | null }
       | undefined;
     if (!row) return undefined;
     return {
@@ -261,6 +268,7 @@ export class Store {
       messageId: row.message_id,
       reason: row.reason,
       approvedBy: row.approved_by,
+      undoUntil: row.undo_until,
     };
   }
 
@@ -282,6 +290,20 @@ export class Store {
       )
       .run(to, now, "reason" in extra ? 1 : 0, extra.reason ?? null, extra.approvedBy ?? null, extra.approvedBy ?? null, now, id, ...from);
     return result.changes > 0;
+  }
+
+  setUndoUntil(id: string, until: string | null): void {
+    this.db.prepare("UPDATE plans SET undo_until = ? WHERE id = ?").run(until, id);
+  }
+
+  /** Succeeded plans whose "元に戻す" window has passed. */
+  undoWindowsPassed(now: Date): string[] {
+    return (this.db.prepare("SELECT id FROM plans WHERE undo_until IS NOT NULL AND undo_until <= ?").all(now.toISOString()) as { id: string }[]).map((r) => r.id);
+  }
+
+  /** The plan that undid `planId`, if any. */
+  undoneBy(planId: string): string | undefined {
+    return (this.db.prepare("SELECT id FROM plans WHERE undo_of = ? LIMIT 1").get(planId) as { id: string } | undefined)?.id;
   }
 
   /** Pending plans whose approval window has passed. */

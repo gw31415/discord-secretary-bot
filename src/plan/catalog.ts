@@ -51,6 +51,11 @@ export interface OpSpec {
   /** Ids to label in the preview. */
   mentions?: (p: Params, body: Body) => Array<{ id: unknown; kind: "channel" | "role" | "user" }>;
   describe: (p: Params, body: Body, before: Record<string, unknown> | null, label: (id: unknown) => string) => { target: string; change: string };
+  /**
+   * Whether the inverse brings back everything. Defaults to "has an inverse".
+   * A recreated channel lacks its messages, so deleting one is not undoable.
+   */
+  undoable?: (body: Body) => boolean;
   /** The step that undoes this one, from the snapshot taken before it ran and its response. */
   inverse?: (p: Params, body: Body, snapshot: Record<string, unknown> | null, result: Record<string, unknown> | null) => StepDraft | null;
 }
@@ -228,6 +233,7 @@ const ops: OpSpec[] = [
     target: (p) => `channel:${p.channel}`,
     channels: (p) => [p.channel],
     describe: (p, _b, _before, l) => ({ target: l(p.channel), change: "削除(メッセージは戻せません)" }),
+    undoable: () => false,
     // Recreates the channel with the same settings; its messages are gone for good.
     inverse: (_p, _b, snapshot) => {
       const body = pick(snapshot, CHANNEL_RESTORE_KEYS);
@@ -392,6 +398,8 @@ const ops: OpSpec[] = [
     channels: (_p, b) => [b?.channel_id],
     mentions: (p) => [{ id: p.user, kind: "user" }],
     describe: (p, b, before, l) => ({ target: l(p.user), change: diff(b, before) }),
+    // The voice channel someone was in is not on the member object.
+    undoable: (b) => !Object.hasOwn(b ?? {}, "channel_id"),
     inverse: (p, b, snapshot) => {
       const restore = pick(snapshot, Object.keys(b ?? {}).filter((k) => MEMBER_FIELDS.includes(k)));
       if (restore && Object.keys(b ?? {}).includes("communication_disabled_until") && restore.communication_disabled_until === undefined) {
@@ -422,6 +430,8 @@ const ops: OpSpec[] = [
       target: l(p.user),
       change: b?.delete_message_seconds ? `BAN(直近${Math.round(Number(b.delete_message_seconds) / 3600)}時間の発言も削除)` : "BAN",
     }),
+    // Unbanning does not bring deleted messages back.
+    undoable: (b) => !b?.delete_message_seconds,
     inverse: (p) => ({ op: "DELETE /guilds/{guild}/bans/{user}", path: { user: p.user } }),
   },
   {

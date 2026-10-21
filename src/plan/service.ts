@@ -11,17 +11,18 @@ import { shareableChannels } from "../discord/permissions.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
-import { confirmModal, confirmPhrase, label, parsePlanCustomId, renderDialog } from "./dialog.ts";
+import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal, UNDO_WINDOW_MS } from "./dialog.ts";
 import type { DialogState } from "./dialog.ts";
 import { isRef } from "./types.ts";
 import type { Plan, Precondition, Step, StepDraft } from "./types.ts";
-import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
+import { isUndoable, normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
 // bot makes on someone's behalf goes through here.
 
 export const APPROVAL_MS = 5 * 60_000;
 export const SNAPSHOT_RETENTION_MS = 90 * 24 * 60 * 60_000;
+const PROGRESS_INTERVAL_MS = 2000;
 
 export interface PlannerDeps {
   api: API;
@@ -31,6 +32,15 @@ export interface PlannerDeps {
   now: () => number;
   log: (message: string, error?: unknown) => void;
   sleep?: (ms: number) => Promise<void>;
+  /** Asks the agent to rework a pending plan; it proposes the new version with `replaces`. */
+  revise?: (input: ReviseInput) => Promise<void>;
+}
+
+export interface ReviseInput {
+  plan: Plan;
+  channelId: string;
+  messageId: string;
+  instruction: string;
 }
 
 export interface ProposeInput {
@@ -42,6 +52,10 @@ export interface ProposeInput {
   drafts: StepDraft[];
   /** Channels this conversation may show; the preview must stay within them. */
   shareable: Set<string>;
+  /** A plan whose dialog this one takes over (a revision, or the same plan proposed again). */
+  replaces?: string;
+  /** Set when this plan undoes another; it runs at once, approved by the click that asked for it. */
+  undoOf?: string;
 }
 
 type Resource = Record<string, unknown> | null;
@@ -64,8 +78,8 @@ export function fingerprint(resource: Resource, fields: string[]): string {
 }
 
 export function planHash(plan: Omit<Plan, "hash">): string {
-  const { id, guildId, actor, preconditions, steps, labels, risk, createdAt, expiresAt } = plan;
-  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, createdAt, expiresAt }));
+  const { id, guildId, actor, preconditions, steps, labels, risk, revises, undoOf, createdAt, expiresAt } = plan;
+  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, undoOf, createdAt, expiresAt }));
 }
 
 /** Fields shown as "before" in the preview, on top of the ones the step depends on. */
@@ -157,6 +171,8 @@ export class Planner {
         steps,
         labels,
         risk: planRisk(steps),
+        ...(input.replaces ? { revises: input.replaces } : {}),
+        ...(input.undoOf ? { undoOf: input.undoOf } : {}),
         createdAt: createdAt.toISOString(),
         expiresAt: new Date(createdAt.getTime() + APPROVAL_MS).toISOString(),
       };
@@ -164,6 +180,19 @@ export class Planner {
       this.deps.store.insertPlan(plan);
       this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op) }, plan.id);
 
+      const old = input.replaces ?? input.undoOf;
+      const oldRow = old ? this.deps.store.getPlan(old) : undefined;
+      if (oldRow?.channelId && oldRow.messageId) {
+        // Takes over the earlier dialog, so the channel keeps one message per request.
+        this.deps.store.setPlanMessage(plan.id, oldRow.channelId, oldRow.messageId);
+        if (input.replaces) {
+          this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更 \`${plan.id}\` に置き換えました` });
+          this.deps.store.audit(plan.actor, "plan.replace", { by: plan.id }, oldRow.plan.id);
+        }
+        if (input.undoOf) return plan; // the caller approves and runs it, then redraws
+        await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, renderDialog(plan, { status: "pending_approval" }));
+        return plan;
+      }
       const message = await this.deps.api.channels.createMessage(input.channelId, {
         ...renderDialog(plan, { status: "pending_approval" }),
         allowed_mentions: { parse: [] },
@@ -271,6 +300,9 @@ export class Planner {
     }
     const update = (state: DialogState) => api.interactions.updateMessage(interaction.id, interaction.token, renderDialog(plan, state));
     const expired = () => Date.parse(plan.expiresAt) <= this.deps.now();
+    const followUp = (content: string) =>
+      api.interactions.followUp(interaction.application_id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+    const why = (e: unknown) => (e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e)).slice(0, 1800);
 
     switch (parsed.action) {
       case "cancel": {
@@ -293,7 +325,7 @@ export class Planner {
           await update({ status: "cancelled", reason: "期限切れになりました(5分)。もう一度頼んでください。" });
           return true;
         }
-        if (parsed.action === "run" && plan.risk === "destructive") {
+        if (parsed.action === "run" && needsTypedConfirm(plan)) {
           await api.interactions.createModal(interaction.id, interaction.token, confirmModal(plan));
           return true;
         }
@@ -329,24 +361,86 @@ export class Planner {
           return true;
         }
         await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
-        const followUp = (content: string) =>
-          api.interactions.followUp(interaction.application_id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
         const { drafts, skipped } = this.restoreDrafts(row);
         if (drafts.length === 0) {
           await followUp(`戻せる変更がありません。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
           return true;
         }
         try {
-          const cache = this.deps.caches.get(plan.guildId);
-          const actor = cache?.member(plan.actor.userId);
-          if (!cache?.guild || !actor) throw new Error("サーバーの情報を読み込めていません");
-          const shareable = shareableChannels(cache.guild, row.channelId, actor, this.deps.selfId());
+          const shareable = this.#shareable(plan, row.channelId);
           const restore = await this.propose({ guildId: plan.guildId, channelId: row.channelId, replyToId: row.messageId, actorId: plan.actor.userId, drafts, shareable });
           store.audit(plan.actor, "plan.restore", { restorePlan: restore.id, skipped }, plan.id);
           await this.#refresh(plan.id, false, `復元の変更 \`${restore.id}\` を提案しました。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
         } catch (e) {
-          const reasons = e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e);
-          await followUp(`復元の変更を作れませんでした:\n${reasons.slice(0, 1800)}`);
+          await followUp(`復元の変更を作れませんでした:\n${why(e)}`);
+        }
+        return true;
+      }
+      case "revise": {
+        if (row.status !== "pending_approval" || expired() || !this.deps.revise) {
+          await ephemeral("この変更はもう修正できません");
+          return true;
+        }
+        await api.interactions.createModal(interaction.id, interaction.token, reviseModal(plan));
+        return true;
+      }
+      case "revisetext": {
+        const instruction = interaction.type === InteractionType.ModalSubmit ? modalValue(interaction, "instruction")?.trim() : undefined;
+        if (row.status !== "pending_approval" || !instruction || !row.channelId || !row.messageId || !this.deps.revise) {
+          await ephemeral("この変更はもう修正できません");
+          return true;
+        }
+        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        store.audit(plan.actor, "plan.revise", { instruction: instruction.slice(0, 500) }, plan.id);
+        // The agent answers in the channel; it replaces this dialog when it proposes the new version.
+        void this.deps.revise({ plan, channelId: row.channelId, messageId: row.messageId, instruction }).catch((e) => {
+          this.deps.log(`変更 ${plan.id} の修正に失敗`, e);
+          void followUp(`修正版を作れませんでした: ${why(e)}`).catch(() => undefined);
+        });
+        return true;
+      }
+      case "redo": {
+        if ((row.status !== "cancelled" && row.status !== "aborted") || !row.channelId) {
+          await ephemeral("この変更は出し直せません");
+          return true;
+        }
+        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        try {
+          const drafts: StepDraft[] = plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) }));
+          await this.propose({
+            guildId: plan.guildId, channelId: row.channelId, replyToId: null, actorId: plan.actor.userId, drafts,
+            shareable: this.#shareable(plan, row.channelId), replaces: plan.id,
+          });
+        } catch (e) {
+          await followUp(`出し直せませんでした:\n${why(e)}`);
+        }
+        return true;
+      }
+      case "undo": {
+        if (row.status !== "succeeded" || !row.undoUntil || Date.parse(row.undoUntil) <= this.deps.now() || !row.channelId) {
+          await ephemeral("元に戻せる期限が過ぎています");
+          return true;
+        }
+        if (store.undoneBy(plan.id)) {
+          await ephemeral("この変更はもう元に戻しています");
+          return true;
+        }
+        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        try {
+          const { drafts } = this.restoreDrafts(row);
+          const undo = await this.propose({
+            guildId: plan.guildId, channelId: row.channelId, replyToId: null, actorId: plan.actor.userId, drafts,
+            shareable: this.#shareable(plan, row.channelId), undoOf: plan.id,
+          });
+          store.setUndoUntil(plan.id, null);
+          // The click is the approval; the undo still goes through re-verification.
+          store.transitionPlan(undo.id, ["pending_approval"], "approved", { approvedBy: userId });
+          store.audit(plan.actor, "plan.undo", { undoPlan: undo.id }, plan.id);
+          await this.#refresh(undo.id);
+          await this.execute(undo.id);
+        } catch (e) {
+          await followUp(`元に戻せませんでした:\n${why(e)}`);
+          await this.#refresh(plan.id).catch(() => undefined);
         }
         return true;
       }
@@ -362,7 +456,15 @@ export class Planner {
     }
   }
 
-  /** Steps that undo what a failed plan already did, newest first. */
+  /** Channels the actor may be shown in the plan's channel, from the cache. */
+  #shareable(plan: Plan, channelId: string): Set<string> {
+    const cache = this.deps.caches.get(plan.guildId);
+    const actor = cache?.member(plan.actor.userId);
+    if (!cache?.guild || !actor) throw new Error("サーバーの情報を読み込めていません");
+    return shareableChannels(cache.guild, channelId, actor, this.deps.selfId());
+  }
+
+  /** Steps that undo what a plan already did, newest first. */
   restoreDrafts(row: PlanRow): { drafts: StepDraft[]; skipped: string[] } {
     const { plan } = row;
     const rows = new Map(this.deps.store.getSteps(plan.id).map((s) => [s.stepId, s]));
@@ -467,6 +569,7 @@ export class Planner {
         if (problems.length > 0) throw new Aborted(`権限が足りなくなりました: ${problems.join(" / ")}`);
 
         let lastDm = 0;
+        let lastRefresh = this.deps.now();
         for (const step of remaining) {
           current = step;
           const resolved: Step = { ...step, pathParams: resolveRefs(step.pathParams, results), ...(step.body !== undefined ? { body: resolveRefs(step.body, results) } : {}) };
@@ -488,8 +591,16 @@ export class Planner {
           const resultId = (response as { id?: string } | undefined)?.id ?? null;
           store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
           results.set(step.id, response ?? null);
+          // Progress on long plans, without editing the dialog on every step.
+          if (plan.steps.length > 1 && this.deps.now() - lastRefresh >= PROGRESS_INTERVAL_MS) {
+            lastRefresh = this.deps.now();
+            await this.#refresh(plan.id).catch(() => undefined);
+          }
         }
         store.transitionPlan(plan.id, ["executing"], "succeeded", { reason: null });
+        if (!plan.undoOf && plan.steps.every(isUndoable)) {
+          store.setUndoUntil(plan.id, new Date(this.deps.now() + UNDO_WINDOW_MS).toISOString());
+        }
         store.audit(plan.actor, "plan.succeeded", { steps: plan.steps.length }, plan.id);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -537,7 +648,11 @@ export class Planner {
     if (!row?.channelId || !row.messageId) return;
     const steps: StepRow[] = this.deps.store.getSteps(planId);
     const reason = note ? `${row.reason ?? ""}\n${note}` : row.reason;
-    await this.deps.api.channels.editMessage(row.channelId, row.messageId, renderDialog(row.plan, { status: row.status, steps, reason, actions }));
+    await this.deps.api.channels.editMessage(
+      row.channelId,
+      row.messageId,
+      renderDialog(row.plan, { status: row.status, steps, reason, actions, undoUntil: row.undoUntil }),
+    );
   }
 
   /** Expires unanswered dialogs and drops old snapshots. Called every minute. */
@@ -545,6 +660,10 @@ export class Planner {
     const now = this.deps.now();
     for (const row of this.deps.store.expiredPlans(new Date(now))) {
       if (await this.#expire(row.plan.id)) await this.#refresh(row.plan.id).catch((e) => this.deps.log(`変更 ${row.plan.id} の表示更新に失敗`, e));
+    }
+    for (const id of this.deps.store.undoWindowsPassed(new Date(now))) {
+      this.deps.store.setUndoUntil(id, null);
+      await this.#refresh(id).catch((e) => this.deps.log(`変更 ${id} の表示更新に失敗`, e));
     }
     this.deps.store.deleteSnapshotsBefore(new Date(now - SNAPSHOT_RETENTION_MS));
   }

@@ -7,7 +7,7 @@ import { InteractionType, ComponentType, PermissionFlagsBits as P } from "discor
 import type { APIInteraction } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
-import { confirmPhrase, parsePlanCustomId, renderDialog } from "../src/plan/dialog.ts";
+import { confirmPhrase, dialogButtons, dialogText, parsePlanCustomId, renderDialog } from "../src/plan/dialog.ts";
 import { Planner } from "../src/plan/service.ts";
 import type { Plan } from "../src/plan/types.ts";
 import { normalizeSteps, permissionProblems, PlanRejected, planRisk, visibilityProblems } from "../src/plan/validate.ts";
@@ -220,7 +220,8 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
   const dialog = replies.find((r) => r.kind === "createMessage")!.body;
   assert.equal(dialog.message_reference.message_id, "400");
   assert.deepEqual(dialog.allowed_mentions, { parse: [] });
-  assert.match(dialog.components[0].content, /チャンネル作成.*#new/);
+  assert.match(dialogText(dialog), /チャンネル作成.*#new/);
+  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "JSONを見る"]);
 
   // Someone else cannot approve.
   await planner.handleInteraction(click(plan, "run", "3"));
@@ -236,7 +237,8 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
   const post = calls[1]!.options!.body as Record<string, unknown>;
   assert.equal(post.enforce_nonce, true);
   assert.deepEqual(post.allowed_mentions, { parse: ["users"] });
-  assert.match(replies.at(-1)!.body.components[0].content, /✅ 実行しました/);
+  assert.match(dialogText(replies.at(-1)!.body), /✅ 実行しました/);
+  assert.ok(dialogButtons(replies.at(-1)!.body).includes("元に戻す"));
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "done"]);
 });
 
@@ -268,7 +270,7 @@ test("a message deletion asks for the count, since a message has no name", async
     drafts: [{ op: "DELETE /channels/{channel}/messages/{message}", path: { channel: "10", message: "500" } }],
   });
   assert.equal(confirmPhrase(plan), "1");
-  assert.match(renderDialog(plan, { status: "pending_approval" }).components[0]!.type === ComponentType.TextDisplay ? (renderDialog(plan, { status: "pending_approval" }).components[0] as { content: string }).content : "", /alice「spam spam」を削除/);
+  assert.match(dialogText(renderDialog(plan, { status: "pending_approval" })), /alice「spam spam」を削除/);
 });
 
 test("a plan is aborted when its target changed after the proposal", async () => {
@@ -277,7 +279,7 @@ test("a plan is aborted when its target changed after the proposal", async () =>
     guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
     drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { name: "chat" } }],
   });
-  assert.match(renderDialog(plan, { status: "pending_approval" }).components.map((c) => (c as { content?: string }).content ?? "").join(), /name: "general" → "chat"/);
+  assert.match(dialogText(renderDialog(plan, { status: "pending_approval" })), /name: "general" → "chat"/);
   channels["10"].name = "renamed";
   await planner.handleInteraction(click(plan, "run", "1"));
   await settle(() => store.getPlan(plan.id)!.status === "aborted");
@@ -312,8 +314,8 @@ test("a failed step stops the plan; restore proposes the inverse of what was don
   await planner.handleInteraction(click(plan, "run", "1"));
   await settle(() => store.getPlan(plan.id)!.status === "failed");
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "failed", "pending"]);
-  assert.match(replies.at(-1)!.body.components[0].content, /途中で失敗/);
-  assert.deepEqual(replies.at(-1)!.body.components[1].components.map((b: { label: string }) => b.label), ["再開", "復元", "そのまま", "JSONを見る"]);
+  assert.match(dialogText(replies.at(-1)!.body), /途中で失敗しました\(1\/3件完了\)/);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["再開", "復元", "そのまま", "JSONを見る"]);
 
   const { drafts, skipped } = planner.restoreDrafts(store.getPlan(plan.id)!);
   assert.deepEqual(drafts, [{ op: "DELETE /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } }]);
@@ -347,7 +349,8 @@ test("unanswered dialogs expire after five minutes", async () => {
   now.t += 2 * 60_000;
   await planner.sweep();
   assert.equal(store.getPlan(plan.id)!.status, "cancelled");
-  assert.match(replies.at(-1)!.body.components[0].content, /期限切れ/);
+  assert.match(dialogText(replies.at(-1)!.body), /期限切れ/);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["出し直す", "JSONを見る"]);
   // A late click does nothing.
   await planner.handleInteraction(click(plan, "run", "1"));
   assert.match(replies.at(-1)!.body.content, /もう承認待ちではありません/);
@@ -383,4 +386,133 @@ test("proposals outside the conversation's visible channels are rejected before 
     PlanRejected,
   );
   assert.equal(replies.length, 0);
+});
+
+test("only irreversible steps ask for typed confirmation; reversible plans run on one click", async () => {
+  const { planner, store, replies } = setup();
+  const reversible = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    // Overwrites are destructive (a permission change) but can be put back.
+    drafts: [{ op: "PUT /channels/{channel}/permissions/{overwrite}", path: { channel: "10", overwrite: "3" }, body: { type: 1, deny: String(P.SendMessages) } }],
+  });
+  assert.equal(reversible.risk, "destructive");
+  await planner.handleInteraction(click(reversible, "run", "1"));
+  assert.notEqual(replies.at(-1)!.kind, "modal");
+  await settle(() => store.getPlan(reversible.id)!.status === "succeeded");
+
+  const ban = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "PUT /guilds/{guild}/bans/{user}", path: { user: "3" }, body: { delete_message_seconds: 3600 } }],
+  });
+  await planner.handleInteraction(click(ban, "run", "1"));
+  assert.equal(replies.at(-1)!.kind, "modal");
+  assert.equal(confirmPhrase(ban), "alice");
+});
+
+test("元に戻す runs the inverse right away, in the same dialog, within ten minutes", async () => {
+  const now = { t: Date.parse("2026-10-21T00:00:00Z") };
+  const { planner, store, calls, replies } = setup(now);
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [
+      { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } },
+      { op: "PATCH /guilds/{guild}/members/{user}", path: { user: "3" }, body: { nick: "A" } },
+    ],
+  });
+  await planner.handleInteraction(click(plan, "run", "1"));
+  await settle(() => store.getPlan(plan.id)!.status === "succeeded");
+  assert.ok(store.getPlan(plan.id)!.undoUntil);
+
+  // Someone else cannot undo it.
+  await planner.handleInteraction(click(plan, "undo", "2"));
+  assert.match(replies.at(-1)!.body.content, /依頼した本人だけ/);
+
+  calls.length = 0;
+  await planner.handleInteraction(click(plan, "undo", "1"));
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`PATCH /guilds/${GUILD}/members/3`, `DELETE /guilds/${GUILD}/members/3/roles/${MOD_ROLE}`]);
+  assert.deepEqual(calls[0]!.options!.body, { nick: null });
+  assert.match(dialogText(replies.at(-1)!.body), /元に戻す\(変更 `[0-9a-f]+`\)[\s\S]*✅ 実行しました/);
+  assert.equal(store.getPlan(plan.id)!.undoUntil, null);
+  await planner.handleInteraction(click(plan, "undo", "1"));
+  assert.match(replies.at(-1)!.body.content, /期限が過ぎています|もう元に戻しています/);
+});
+
+test("the undo button goes away when its window passes", async () => {
+  const now = { t: Date.parse("2026-10-21T00:00:00Z") };
+  const { planner, store, replies } = setup(now);
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x" } }],
+  });
+  await planner.handleInteraction(click(plan, "run", "1"));
+  await settle(() => store.getPlan(plan.id)!.status === "succeeded");
+  now.t += 11 * 60_000;
+  await planner.sweep();
+  assert.equal(store.getPlan(plan.id)!.undoUntil, null);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["JSONを見る"]);
+  await planner.handleInteraction(click(plan, "undo", "1"));
+  assert.match(replies.at(-1)!.body.content, /期限が過ぎています/);
+});
+
+test("出し直す re-validates an expired plan and takes over the same dialog", async () => {
+  const now = { t: Date.parse("2026-10-21T00:00:00Z") };
+  const { planner, store, replies } = setup(now);
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x" } }],
+  });
+  const messageId = store.getPlan(plan.id)!.messageId;
+  now.t += 6 * 60_000;
+  await planner.sweep();
+  await planner.handleInteraction(click(plan, "redo", "1"));
+  const edited = replies.at(-1)!;
+  assert.equal(edited.kind, "editMessage");
+  assert.match(dialogText(edited.body), /依頼者が「実行」を押すと実行します/);
+  assert.equal(replies.filter((r) => r.kind === "createMessage").length, 1);
+  const newId = /`([0-9a-f]{12})`/.exec(dialogText(edited.body))![1]!;
+  const fresh = store.getPlan(newId)!;
+  assert.equal(fresh.plan.revises, plan.id);
+  assert.equal(fresh.messageId, messageId);
+  assert.equal(fresh.status, "pending_approval");
+});
+
+test("修正 opens a modal and hands the instruction to the agent", async () => {
+  const revisions: Array<{ instruction: string; messageId: string }> = [];
+  const { planner, replies } = setup();
+  (planner.deps as { revise?: unknown }).revise = async (input: { instruction: string; messageId: string }) => void revisions.push(input);
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /guilds/{guild}/channels", body: { name: "new" } }],
+  });
+  await planner.handleInteraction(click(plan, "revise", "1"));
+  assert.equal(replies.at(-1)!.kind, "modal");
+  await planner.handleInteraction({
+    id: "i", token: "t", application_id: "app", type: InteractionType.ModalSubmit, member: { user: { id: "1" } },
+    data: {
+      custom_id: `plan:revisetext:${plan.id}:${plan.hash.slice(0, 8)}`,
+      components: [{ type: ComponentType.ActionRow, components: [{ type: ComponentType.TextInput, custom_id: "instruction", value: "名前は news に" }] }],
+    },
+  } as unknown as APIInteraction);
+  await settle(() => revisions.length === 1);
+  assert.equal(revisions[0]!.instruction, "名前は news に");
+
+  // The revised proposal replaces the old one in the same message.
+  const revised = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /guilds/{guild}/channels", body: { name: "news" } }], replaces: plan.id,
+  });
+  assert.equal(planner.deps.store.getPlan(plan.id)!.status, "cancelled");
+  assert.match(dialogText(replies.at(-1)!.body), /#news/);
+  assert.equal(revised.revises, plan.id);
+});
+
+test("the same change to many targets is shown as one line", async () => {
+  const { planner } = setup();
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: ["1", "2", "3"].map((user) => ({ op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user, role: MOD_ROLE } })),
+  });
+  const text = dialogText(renderDialog(plan, { status: "pending_approval" }));
+  assert.match(text, /1\. \*\*ロール付与\*\* \(3件\) owner、モデ、alice — @Mod を付与/);
+  assert.doesNotMatch(text, /^2\./m);
 });

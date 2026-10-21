@@ -42,7 +42,15 @@ function log(message: string, error?: unknown): void {
   else console.log(`${time} ${message}`);
 }
 
-const planner = new Planner({ api: client.api, store, caches, selfId: () => selfId, now: () => Date.now(), log });
+const planner = new Planner({
+  api: client.api,
+  store,
+  caches,
+  selfId: () => selfId,
+  now: () => Date.now(),
+  log,
+  revise: (input) => conversations.revise(input),
+});
 
 const conversations = new Conversations({
   store,
