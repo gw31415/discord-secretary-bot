@@ -4,6 +4,7 @@ import type { GuildState } from "../src/discord/permissions.ts";
 export const GUILD = "100";
 export const SELF = "999";
 export const MOD_ROLE = "200";
+export const BOT_ROLE = "300";
 
 /**
  * general: everyone. staff: hidden from @everyone, visible to MOD_ROLE.
@@ -12,10 +13,12 @@ export const MOD_ROLE = "200";
 export function makeGuild(): GuildState {
   const everyone = { id: GUILD, permissions: P.ViewChannel | P.ReadMessageHistory | P.SendMessages, position: 0 };
   const mod = { id: MOD_ROLE, permissions: P.ViewAuditLog | P.ManageMessages, position: 1 };
+  // The bot's own role; tests that model a server without Administrator replace it.
+  const bot = { id: BOT_ROLE, permissions: P.Administrator, position: 2 };
   return {
     id: GUILD,
     ownerId: "1",
-    roles: new Map([[everyone.id, everyone], [mod.id, mod]]),
+    roles: new Map([[everyone.id, everyone], [mod.id, mod], [bot.id, bot]]),
     channels: new Map([
       ["10", { id: "10", type: ChannelType.GuildText, name: "general", parentId: null, overwrites: [] }],
       ["11", {
@@ -36,7 +39,7 @@ export function makeGuild(): GuildState {
       ["1", { userId: "1", roleIds: [], bot: false }], // owner
       ["2", { userId: "2", roleIds: [MOD_ROLE], bot: false }], // moderator
       ["3", { userId: "3", roleIds: [], bot: false }], // regular member
-      [SELF, { userId: SELF, roleIds: [], bot: true }],
+      [SELF, { userId: SELF, roleIds: [BOT_ROLE], bot: true }],
     ]),
   };
 }

@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PermissionFlagsBits as P } from "discord-api-types/v10";
+import { OverwriteType, PermissionFlagsBits as P } from "discord-api-types/v10";
 import { ALL_PERMISSIONS, audienceHasGuildPermission, canReadHistory, canView, channelPermissions, shareableChannels, viewersOf } from "../src/discord/permissions.ts";
-import { makeGuild, SELF } from "./helpers.ts";
+import { BOT_ROLE, makeGuild, SELF } from "./helpers.ts";
 
 test("owner and administrators get every permission", () => {
   const g = makeGuild();
@@ -66,4 +66,30 @@ test("guild permissions must be held by the whole audience", () => {
   const g = makeGuild();
   assert.equal(audienceHasGuildPermission(g, "10", g.members.get("2")!, SELF, P.ViewAuditLog), false);
   assert.equal(audienceHasGuildPermission(g, "11", g.members.get("2")!, SELF, P.ViewAuditLog), true);
+});
+
+test("without Administrator the bot's own permissions narrow what is shareable", () => {
+  const g = makeGuild();
+  // A server that gives the bot only @everyone-level access: it cannot see the staff channel.
+  g.roles.get(BOT_ROLE)!.permissions = 0n;
+  const shareable = shareableChannels(g, "11", g.members.get("2")!, SELF);
+  assert.ok(shareable.has("10"), "general is readable by the bot through @everyone");
+  assert.ok(!shareable.has("12"), "nobody, the bot included, can read readonly's history");
+  // Letting the bot read staff through a member overwrite brings it back.
+  g.channels.get("11")!.overwrites.push({ id: SELF, type: OverwriteType.Member, allow: P.ViewChannel | P.ReadMessageHistory, deny: 0n });
+  assert.ok(shareableChannels(g, "11", g.members.get("2")!, SELF).has("11"));
+});
+
+test("without the permission itself the bot cannot read guild-level data even for an entitled audience", () => {
+  const g = makeGuild();
+  g.roles.get(BOT_ROLE)!.permissions = 0n;
+  assert.equal(audienceHasGuildPermission(g, "11", g.members.get("2")!, SELF, P.ViewAuditLog), false);
+  g.roles.get(BOT_ROLE)!.permissions = P.ViewAuditLog;
+  assert.equal(audienceHasGuildPermission(g, "11", g.members.get("2")!, SELF, P.ViewAuditLog), true);
+});
+
+test("before the bot's own member is cached, nothing outside the current channel is shared", () => {
+  const g = makeGuild();
+  g.members.delete(SELF);
+  assert.deepEqual([...shareableChannels(g, "11", g.members.get("2")!, SELF)], ["11"]);
 });

@@ -116,9 +116,18 @@ export function viewersOf(guild: GuildState, channelId: string, selfId: string):
 }
 
 /**
+ * The bot itself, from the cache. Without Administrator it reads only what its
+ * roles allow, so every check below also requires the bot to hold the permission.
+ * Unknown (not cached yet) means no access.
+ */
+function self(guild: GuildState, selfId: string): MemberState | undefined {
+  return guild.members.get(selfId);
+}
+
+/**
  * Channels whose contents may appear in a reply posted in `currentChannelId`:
- * the speaker can read their history, and everyone who can see the current
- * channel can also read them. Private threads are only allowed when they are the
+ * the bot and the speaker can read their history, and everyone who can see the
+ * current channel can also read them. Private threads are only allowed when they are the
  * current channel, because their membership is not tracked.
  */
 export function shareableChannels(
@@ -128,17 +137,20 @@ export function shareableChannels(
   selfId: string,
 ): Set<string> {
   const audience = viewersOf(guild, currentChannelId, selfId);
+  const bot = self(guild, selfId);
   const result = new Set<string>([currentChannelId]);
+  if (!bot) return result;
   for (const channel of guild.channels.values()) {
     if (channel.id === currentChannelId) continue;
     if (channel.type === ChannelType.PrivateThread) continue;
+    if (!canReadHistory(guild, bot, channel.id)) continue;
     if (!canReadHistory(guild, speaker, channel.id)) continue;
     if (audience.every((m) => canReadHistory(guild, m, channel.id))) result.add(channel.id);
   }
   return result;
 }
 
-/** True when the speaker and every viewer of the current channel hold all `bits` guild-wide. */
+/** True when the bot, the speaker and every viewer of the current channel hold all `bits` guild-wide. */
 export function audienceHasGuildPermission(
   guild: GuildState,
   currentChannelId: string,
@@ -146,6 +158,8 @@ export function audienceHasGuildPermission(
   selfId: string,
   bits: bigint,
 ): boolean {
-  const people = [speaker, ...viewersOf(guild, currentChannelId, selfId)];
+  const bot = self(guild, selfId);
+  if (!bot) return false;
+  const people = [bot, speaker, ...viewersOf(guild, currentChannelId, selfId)];
   return people.every((m) => has(basePermissions(guild, m), bits));
 }
