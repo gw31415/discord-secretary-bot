@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
-import { findChatModel, lightestThinking, llm, selectableModels } from "../src/llm/models.ts";
+import { findChatModel, lightestThinking, selectableModels } from "../src/llm/models.ts";
 import { parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
 
 const master = randomBytes(32);
@@ -54,7 +54,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   const store = new Store(":memory:", master);
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "typesafe", "ts-abcdefgh5678");
-  store.setApiKey("u1", "glm", "glm-abcdefgh9012");
+  store.setApiKey("u1", "zai", "glm-abcdefgh9012");
   const panel = renderPanel(store, "u1");
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
@@ -73,7 +73,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   const offered = (role: string) =>
     new Set(selects.filter((s) => s.custom_id.startsWith(`llm:model:${role}:`)).flatMap((s) => s.options.map((o) => o.value)));
   for (const role of ["response", "judge"] as const) {
-    for (const provider of ["anthropic", "typesafe", "glm"] as const) {
+    for (const provider of ["anthropic", "typesafe", "zai"] as const) {
       for (const m of selectableModels(provider, role)) assert.ok(offered(role).has(`${provider}/${m.id}`), `${role} ${provider}/${m.id}`);
     }
   }
@@ -113,23 +113,9 @@ test("models that cannot turn thinking off get their lightest level", () => {
 test("keys and settings of providers the bot dropped are ignored", () => {
   const store = new Store(":memory:", master);
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
-  store.db.prepare("INSERT INTO api_keys (user_id, provider, ciphertext, wrapped_dek, last4, created_at) VALUES ('u1', 'zai', x'00', x'00', 'abcd', 0)").run();
-  store.db.prepare("INSERT INTO user_settings (user_id, default_provider, default_model) VALUES ('u1', 'zai', 'glm-5.3')").run();
+  store.db.prepare("INSERT INTO api_keys (user_id, provider, ciphertext, wrapped_dek, last4, created_at) VALUES ('u1', 'opencode-go', x'00', x'00', 'abcd', 0)").run();
+  store.db.prepare("INSERT INTO user_settings (user_id, default_provider, default_model) VALUES ('u1', 'opencode-go', 'glm-5.3')").run();
   assert.deepEqual(store.listKeys("u1").map((k) => k.provider), ["anthropic"]);
   assert.equal(store.getSettings("u1").response, null);
   assert.doesNotThrow(() => renderPanel(store, "u1"));
-});
-
-test("GLM Coding Plan goes to Z.AI's Anthropic endpoint with the key as a Bearer token", async () => {
-  const model = findChatModel("glm", "glm-5.3")!;
-  assert.equal(model.api, "anthropic-messages");
-  let seen: { url: string; headers: Headers } | undefined;
-  const fetchStub = (async (url: string | URL | Request, init?: RequestInit) => {
-    seen = { url: String(url), headers: new Headers(init?.headers) };
-    return new Response(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "stub" } }), { status: 401 });
-  }) as typeof fetch;
-  await llm.completeSimple(model, { messages: [{ role: "user", content: "hi", timestamp: 0 }] }, { apiKey: "glm-key", fetch: fetchStub, maxRetries: 0 } as never);
-  assert.ok(seen, "request was sent");
-  assert.ok(seen.url.startsWith("https://api.z.ai/api/anthropic/v1/messages"), seen.url);
-  assert.equal(seen.headers.get("authorization"), "Bearer glm-key");
 });
