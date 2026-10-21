@@ -238,7 +238,7 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
   assert.equal(post.enforce_nonce, true);
   assert.deepEqual(post.allowed_mentions, { parse: ["users"] });
   assert.match(dialogText(replies.at(-1)!.body), /✅ 実行しました/);
-  assert.ok(dialogButtons(replies.at(-1)!.body).includes("元に戻す"));
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["JSONを見る"]);
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "done"]);
 });
 
@@ -407,51 +407,6 @@ test("only irreversible steps ask for typed confirmation; reversible plans run o
   await planner.handleInteraction(click(ban, "run", "1"));
   assert.equal(replies.at(-1)!.kind, "modal");
   assert.equal(confirmPhrase(ban), "alice");
-});
-
-test("元に戻す runs the inverse right away, in the same dialog, within ten minutes", async () => {
-  const now = { t: Date.parse("2026-10-21T00:00:00Z") };
-  const { planner, store, calls, replies } = setup(now);
-  const plan = await planner.propose({
-    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
-    drafts: [
-      { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } },
-      { op: "PATCH /guilds/{guild}/members/{user}", path: { user: "3" }, body: { nick: "A" } },
-    ],
-  });
-  await planner.handleInteraction(click(plan, "run", "1"));
-  await settle(() => store.getPlan(plan.id)!.status === "succeeded");
-  assert.ok(store.getPlan(plan.id)!.undoUntil);
-
-  // Someone else cannot undo it.
-  await planner.handleInteraction(click(plan, "undo", "2"));
-  assert.match(replies.at(-1)!.body.content, /依頼した本人だけ/);
-
-  calls.length = 0;
-  await planner.handleInteraction(click(plan, "undo", "1"));
-  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`PATCH /guilds/${GUILD}/members/3`, `DELETE /guilds/${GUILD}/members/3/roles/${MOD_ROLE}`]);
-  assert.deepEqual(calls[0]!.options!.body, { nick: null });
-  assert.match(dialogText(replies.at(-1)!.body), /元に戻す\(変更 `[0-9a-f]+`\)[\s\S]*✅ 実行しました/);
-  assert.equal(store.getPlan(plan.id)!.undoUntil, null);
-  await planner.handleInteraction(click(plan, "undo", "1"));
-  assert.match(replies.at(-1)!.body.content, /期限が過ぎています|もう元に戻しています/);
-});
-
-test("the undo button goes away when its window passes", async () => {
-  const now = { t: Date.parse("2026-10-21T00:00:00Z") };
-  const { planner, store, replies } = setup(now);
-  const plan = await planner.propose({
-    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
-    drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x" } }],
-  });
-  await planner.handleInteraction(click(plan, "run", "1"));
-  await settle(() => store.getPlan(plan.id)!.status === "succeeded");
-  now.t += 11 * 60_000;
-  await planner.sweep();
-  assert.equal(store.getPlan(plan.id)!.undoUntil, null);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["JSONを見る"]);
-  await planner.handleInteraction(click(plan, "undo", "1"));
-  assert.match(replies.at(-1)!.body.content, /期限が過ぎています/);
 });
 
 test("出し直す re-validates an expired plan and takes over the same dialog", async () => {

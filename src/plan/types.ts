@@ -65,11 +65,17 @@ export interface Plan {
   risk: Risk;
   /** The plan this one replaced (revised, or proposed again after it expired). */
   revises?: string;
-  /** The plan this one undoes. */
-  undoOf?: string;
+  /** The code that produced the steps, and an explanation written from the code alone. */
+  source?: PlanSource;
   hash: string;
   createdAt: string;
   expiresAt: string;
+}
+
+export interface PlanSource {
+  code: string;
+  /** Null when the explainer failed; the dialog says so instead of guessing. */
+  summary: string | null;
 }
 
 export type PlanStatus =

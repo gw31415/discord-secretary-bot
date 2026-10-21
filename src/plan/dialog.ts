@@ -22,11 +22,10 @@ export type PlanAction =
   | "revise"
   | "revisetext"
   | "redo"
-  | "undo"
   | "resume"
   | "restore"
   | "keep";
-const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "undo", "resume", "restore", "keep"]);
+const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep"]);
 
 export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">): string {
   return `plan:${action}:${plan.id}:${plan.hash.slice(0, 8)}`;
@@ -38,7 +37,6 @@ export function parsePlanCustomId(id: string): { action: PlanAction; planId: str
   return { action: m[1] as PlanAction, planId: m[2]!, hash8: m[3]! };
 }
 
-export const UNDO_WINDOW_MS = 10 * 60_000;
 const MAX_LISTED = 15;
 const MAX_TARGETS_SHOWN = 5;
 
@@ -141,8 +139,6 @@ export interface DialogState {
   reason?: string | null;
   /** Show the buttons for the current status (false once someone chose to leave it). */
   actions?: boolean;
-  /** "元に戻す" is offered until this time. */
-  undoUntil?: string | null;
 }
 
 function unix(iso: string): number {
@@ -153,16 +149,14 @@ function statusLine(plan: Plan, state: DialogState): string {
   const done = state.steps?.filter((s) => s.state === "done").length ?? 0;
   switch (state.status) {
     case "pending_approval": {
-      const how = needsTypedConfirm(plan)
-        ? "戻せない操作を含むため、実行時に確認の入力があります。"
-        : "実行後10分間は「元に戻す」で戻せます。";
+      const how = needsTypedConfirm(plan) ? "戻せない操作を含むため、実行時に確認の入力があります。" : "";
       return `依頼者が「実行」を押すと実行します。${how}違うところがあれば「修正」から直せます。期限 <t:${unix(plan.expiresAt)}:R>`;
     }
     case "approved":
     case "executing":
       return plan.steps.length > 1 ? `実行中… ${done}/${plan.steps.length}` : "実行中…";
     case "succeeded":
-      return state.undoUntil ? `✅ 実行しました。<t:${unix(state.undoUntil)}:R>まで「元に戻す」で戻せます。` : "✅ 実行しました";
+      return "✅ 実行しました";
     case "failed":
       return `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)。${state.reason ?? ""}${state.actions === false ? "" : "\n「再開」で残りを実行、「復元」で済んだ変更を戻す変更を提案、「そのまま」で終了します。"}`;
     case "cancelled":
@@ -199,9 +193,6 @@ function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
         out.push(button(customId("revise", plan), "修正", ButtonStyle.Secondary));
         out.push(button(customId("cancel", plan), "取り消し", ButtonStyle.Secondary));
         break;
-      case "succeeded":
-        if (state.undoUntil) out.push(button(customId("undo", plan), "元に戻す", ButtonStyle.Secondary));
-        break;
       case "failed":
         out.push(button(customId("resume", plan), "再開", ButtonStyle.Primary));
         out.push(button(customId("restore", plan), "復元", ButtonStyle.Secondary));
@@ -221,7 +212,7 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
   const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps);
   const listed = lines.slice(0, MAX_LISTED);
   if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「JSONを見る」)`);
-  const title = plan.undoOf ? `### 元に戻す(変更 \`${plan.undoOf}\`)` : "### 変更の確認";
+  const title = "### 変更の確認";
   const header = `${title}\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${plan.steps.length}件 · \`${plan.id}\``;
   const text = [header, ...listed, "", statusLine(plan, state)].join("\n").slice(0, 3900);
   const row: APIActionRowComponent<APIButtonComponent> = { type: ComponentType.ActionRow, components: buttons(plan, state) };
