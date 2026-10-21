@@ -160,6 +160,7 @@ function setup(now = { t: Date.parse("2026-10-21T00:00:00Z") }) {
   const store = new Store(":memory:", randomBytes(32));
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
+  const summarized: string[] = [];
   const planner = new Planner({
     api: discord.api,
     store,
@@ -168,8 +169,12 @@ function setup(now = { t: Date.parse("2026-10-21T00:00:00Z") }) {
     now: () => now.t,
     log: () => {},
     sleep: async () => {},
+    summarize: async (code) => {
+      summarized.push(code);
+      return "全員に @Mod を付けます。";
+    },
   });
-  return { ...discord, store, planner, now };
+  return { ...discord, store, planner, now, summarized };
 }
 
 function click(plan: Plan, action: string, userId: string, extra: Partial<APIInteraction> = {}): APIInteraction {
@@ -470,4 +475,39 @@ test("the same change to many targets is shown as one line", async () => {
   const text = dialogText(renderDialog(plan, { status: "pending_approval" }));
   assert.match(text, /1\. \*\*ロール付与\*\* \(3件\) owner、モデ、alice — @Mod を付与/);
   assert.doesNotMatch(text, /^2\./m);
+});
+
+test("a plan made from code opens on the code and its explanation, and switches to the steps", async () => {
+  const { planner, store, replies, summarized } = setup();
+  const code = 'const ids = ["3"];\nreturn plan(ids.map((u) => call("PUT /guilds/{guild}/members/{user}/roles/{role}", { path: { user: u, role: "' + MOD_ROLE + '" } })));';
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), code,
+    drafts: [{ op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } }],
+  });
+  // The explainer is given the code and nothing else.
+  assert.deepEqual(summarized, [code]);
+  assert.deepEqual(plan.source, { code, summary: "全員に @Mod を付けます。" });
+  const opened = replies.at(-1)!.body;
+  assert.match(dialogText(opened), /コードだけを読んで[\s\S]*全員に @Mod を付けます。[\s\S]*```js\nconst ids/);
+  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "結果を見る", "JSONを見る"]);
+
+  // Anyone may switch the view; it stays switched when the dialog is redrawn.
+  await planner.handleInteraction(click(plan, "result", "2"));
+  const result = replies.at(-1)!.body;
+  assert.doesNotMatch(dialogText(result), /```js\n/);
+  assert.match(dialogText(result), /ロール付与[\s\S]*```json\n\[\{"id":"s1"/);
+  assert.ok(dialogButtons(result).includes("コードを見る"));
+  await planner.handleInteraction(click(plan, "cancel", "1"));
+  assert.doesNotMatch(dialogText(replies.at(-1)!.body), /```js\n/);
+  assert.equal(store.getPlan(plan.id)!.status, "cancelled");
+});
+
+test("a plan made from steps has no code view", async () => {
+  const { planner, replies, summarized } = setup();
+  await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x" } }],
+  });
+  assert.equal(summarized.length, 0);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["実行", "修正", "取り消し", "JSONを見る"]);
 });

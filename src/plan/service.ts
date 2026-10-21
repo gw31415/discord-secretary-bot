@@ -12,7 +12,7 @@ import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
 import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
-import type { DialogState } from "./dialog.ts";
+import type { DialogState, DialogView } from "./dialog.ts";
 import { isRef } from "./types.ts";
 import type { Plan, Precondition, Step, StepDraft } from "./types.ts";
 import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
@@ -108,9 +108,16 @@ class Aborted extends Error {}
 
 export class Planner {
   readonly deps: PlannerDeps;
+  /** How each dialog is shown now, so a refresh keeps it. Lost on restart, which only resets the view. */
+  readonly #shown = new Map<string, { view?: DialogView; closed?: boolean }>();
 
   constructor(deps: PlannerDeps) {
     this.deps = deps;
+  }
+
+  #render(plan: Plan, state: DialogState): ReturnType<typeof renderDialog> {
+    const shown = this.#shown.get(plan.id);
+    return renderDialog(plan, { ...state, view: state.view ?? shown?.view, actions: state.actions ?? !shown?.closed });
   }
 
   get #rest() {
@@ -191,11 +198,11 @@ export class Planner {
         this.deps.store.setPlanMessage(plan.id, oldRow.channelId, oldRow.messageId);
         this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更 \`${plan.id}\` に置き換えました` });
         this.deps.store.audit(plan.actor, "plan.replace", { by: plan.id }, oldRow.plan.id);
-        await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, renderDialog(plan, { status: "pending_approval" }));
+        await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, this.#render(plan, { status: "pending_approval" }));
         return plan;
       }
       const message = await this.deps.api.channels.createMessage(input.channelId, {
-        ...renderDialog(plan, { status: "pending_approval" }),
+        ...this.#render(plan, { status: "pending_approval" }),
         allowed_mentions: { parse: [] },
         ...(input.replyToId ? { message_reference: { message_id: input.replyToId, fail_if_not_exists: false } } : {}),
       });
@@ -305,11 +312,18 @@ export class Planner {
       });
       return true;
     }
+    if (parsed.action === "code" || parsed.action === "result") {
+      // Anyone who sees the dialog may switch what it shows.
+      this.#shown.set(plan.id, { ...this.#shown.get(plan.id), view: parsed.action });
+      const steps = row.status === "pending_approval" ? undefined : store.getSteps(plan.id);
+      await api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, { status: row.status, steps, reason: row.reason }));
+      return true;
+    }
     if (userId !== plan.actor.userId) {
       await ephemeral("この変更を操作できるのは依頼した本人だけです");
       return true;
     }
-    const update = (state: DialogState) => api.interactions.updateMessage(interaction.id, interaction.token, renderDialog(plan, state));
+    const update = (state: DialogState) => api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, state));
     const expired = () => Date.parse(plan.expiresAt) <= this.deps.now();
     const followUp = (content: string) =>
       api.interactions.followUp(interaction.application_id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
@@ -381,7 +395,10 @@ export class Planner {
           const shareable = this.#shareable(plan, row.channelId);
           const restore = await this.propose({ guildId: plan.guildId, channelId: row.channelId, replyToId: row.messageId, actorId: plan.actor.userId, drafts, shareable });
           store.audit(plan.actor, "plan.restore", { restorePlan: restore.id, skipped }, plan.id);
-          await this.#refresh(plan.id, false, `復元の変更 \`${restore.id}\` を提案しました。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
+          const note = `復元の変更 \`${restore.id}\` を提案しました。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`;
+          store.transitionPlan(plan.id, ["failed"], "failed", { reason: `${row.reason ?? ""}\n${note}` });
+          this.#shown.set(plan.id, { ...this.#shown.get(plan.id), closed: true });
+          await this.#refresh(plan.id);
         } catch (e) {
           await followUp(`復元の変更を作れませんでした:\n${why(e)}`);
         }
@@ -434,7 +451,10 @@ export class Planner {
           return true;
         }
         store.audit(plan.actor, "plan.keep", {}, plan.id);
-        await update({ status: "failed", steps: store.getSteps(plan.id), reason: `${row.reason ?? ""}\nそのままにしました。`, actions: false });
+        const reason = `${row.reason ?? ""}\nそのままにしました。`;
+        store.transitionPlan(plan.id, ["failed"], "failed", { reason });
+        this.#shown.set(plan.id, { ...this.#shown.get(plan.id), closed: true });
+        await update({ status: "failed", steps: store.getSteps(plan.id), reason });
         return true;
       }
     }
@@ -624,16 +644,11 @@ export class Planner {
   }
 
   /** Redraws a plan's dialog from the database. */
-  async #refresh(planId: string, actions = true, note?: string): Promise<void> {
+  async #refresh(planId: string): Promise<void> {
     const row = this.deps.store.getPlan(planId);
     if (!row?.channelId || !row.messageId) return;
     const steps: StepRow[] = this.deps.store.getSteps(planId);
-    const reason = note ? `${row.reason ?? ""}\n${note}` : row.reason;
-    await this.deps.api.channels.editMessage(
-      row.channelId,
-      row.messageId,
-      renderDialog(row.plan, { status: row.status, steps, reason, actions }),
-    );
+    await this.deps.api.channels.editMessage(row.channelId, row.messageId, this.#render(row.plan, { status: row.status, steps, reason: row.reason }));
   }
 
   /** Expires unanswered dialogs and drops old snapshots. Called every minute. */

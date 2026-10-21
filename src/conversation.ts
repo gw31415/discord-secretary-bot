@@ -281,7 +281,7 @@ export class Conversations {
         images: input.images,
         webSearch: this.deps.webSearch,
         propose: this.deps.propose
-          ? (drafts) =>
+          ? (drafts, code) =>
               this.deps.propose!({
                 guildId: input.guildId,
                 channelId,
@@ -289,6 +289,7 @@ export class Conversations {
                 actorId: speaker,
                 drafts,
                 shareable: reader.shareable(),
+                ...(code ? { code } : {}),
                 ...(input.replaces ? { replaces: input.replaces } : {}),
               })
           : undefined,

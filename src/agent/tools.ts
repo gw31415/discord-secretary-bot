@@ -62,7 +62,7 @@ export interface ToolOptions {
   images: boolean;
   fetch?: typeof fetch;
   /** Posts an approval dialog for the steps. Present when writes are allowed. */
-  propose?: (drafts: StepDraft[]) => Promise<Plan>;
+  propose?: (drafts: StepDraft[], code?: string) => Promise<Plan>;
 }
 
 export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
@@ -194,15 +194,15 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   return tools;
 }
 
-function proposePlan(reader: Reader, propose: (drafts: StepDraft[]) => Promise<Plan>): AgentTool<any> {
+function proposePlan(reader: Reader, propose: (drafts: StepDraft[], code?: string) => Promise<Plan>): AgentTool<any> {
   return tool({
     name: "propose_plan",
     label: "変更を提案",
     description: [
       "書き込み操作の変更案を出し、チャンネルに承認ダイアログを投稿します。依頼者が「実行」を押したときだけ実行されます。",
-      "steps か code のどちらかを渡します。",
+      "steps か code のどちらかを渡します。基本は steps です。code は対象が多いときや、条件で対象を選ぶとき(「30日発言していない人全員」など)だけ使います。",
       "steps: [{ id?, op, path, body? }]。op は下の一覧のどれか、path はパスパラメータ(guild は省略可)。前のステップの結果は { \"$ref\": \"steps.<id>.result.id\" } で参照できます。",
-      "code: 多数の対象をまとめるときに使う読み取り専用のJavaScript。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。",
+      "code: 読み取り専用のJavaScript。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。",
       "使える操作(これ以外と、仕様にないフィールドは拒否されます):",
       catalogSummary(),
     ].join("\n"),
@@ -232,7 +232,7 @@ function proposePlan(reader: Reader, propose: (drafts: StepDraft[]) => Promise<P
         throw new Error("steps か code を渡してください");
       }
       try {
-        const plan = await propose(drafts);
+        const plan = await propose(drafts, params.code);
         return text(
           `承認ダイアログを投稿しました(変更 ${plan.id}、${plan.steps.length}件、危険度: ${RISK_LABEL[plan.risk]})。依頼者が「実行」を押すと実行され、結果はダイアログに表示されます。詳細はダイアログにあるので、返答では何を提案したかを一言添えるだけにしてください。`,
         );

@@ -3,6 +3,7 @@ import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { judgeAddressed } from "./agent/judge.ts";
 import { respond } from "./agent/respond.ts";
+import { summarizeCode } from "./agent/summarize.ts";
 import { loadConfig } from "./config.ts";
 import { Conversations, MAX_MESSAGES_PER_REPLY } from "./conversation.ts";
 import type { GuildMessage } from "./conversation.ts";
@@ -11,6 +12,7 @@ import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
 import { Reader } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
+import { findChatModel } from "./llm/models.ts";
 import { Planner } from "./plan/service.ts";
 
 const config = loadConfig();
@@ -50,6 +52,14 @@ const planner = new Planner({
   now: () => Date.now(),
   log,
   revise: (input) => conversations.revise(input),
+  // The actor's own response model and key, as for their conversation.
+  summarize: async (code, actorId) => {
+    const ref = store.getSettings(actorId).response;
+    const model = ref && findChatModel(ref.provider, ref.model);
+    const apiKey = ref && store.getApiKey(actorId, ref.provider);
+    if (!model || !apiKey) return null;
+    return summarizeCode({ model, apiKey, code });
+  },
 });
 
 const conversations = new Conversations({

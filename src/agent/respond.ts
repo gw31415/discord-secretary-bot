@@ -25,7 +25,7 @@ export interface RespondInput {
   webSearch: boolean;
   signal?: AbortSignal;
   /** Posts an approval dialog for a write. Absent means the bot stays read-only. */
-  propose?: (drafts: StepDraft[]) => Promise<Plan>;
+  propose?: (drafts: StepDraft[], code?: string) => Promise<Plan>;
 }
 
 export interface RespondResult {

@@ -12,7 +12,8 @@ import type { Plan, PlanStatus, Risk } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
 
 // The approval dialog, drawn only from the Plan and its step states. Nothing
-// the model wrote as explanation appears here.
+// the conversing model wrote as explanation appears here; a plan made from code
+// shows the code and an explanation written by a model that read only the code.
 
 export type PlanAction =
   | "run"
@@ -24,8 +25,10 @@ export type PlanAction =
   | "redo"
   | "resume"
   | "restore"
-  | "keep";
-const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep"]);
+  | "keep"
+  | "code"
+  | "result";
+const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result"]);
 
 export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">): string {
   return `plan:${action}:${plan.id}:${plan.hash.slice(0, 8)}`;
@@ -38,6 +41,9 @@ export function parsePlanCustomId(id: string): { action: PlanAction; planId: str
 }
 
 const MAX_LISTED = 15;
+const MAX_TEXT = 3900;
+const MAX_CODE = 2500;
+const MAX_STEPS_JSON = 1500;
 const MAX_TARGETS_SHOWN = 5;
 
 const COLORS = {
@@ -133,8 +139,13 @@ export function needsTypedConfirm(plan: Plan): boolean {
   return irreversibleSteps(plan.steps).length > 0;
 }
 
+/** "code": the code and its explanation; "result": the steps it produced. */
+export type DialogView = "code" | "result";
+
 export interface DialogState {
   status: PlanStatus;
+  /** For a plan made from code; it opens on the code. */
+  view?: DialogView;
   steps?: StepRow[];
   reason?: string | null;
   /** Show the buttons for the current status (false once someone chose to leave it). */
@@ -204,17 +215,49 @@ function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
         break;
     }
   }
+  if (plan.source) {
+    out.push(viewOf(plan, state) === "code" ? button(customId("result", plan), "結果を見る", ButtonStyle.Secondary) : button(customId("code", plan), "コードを見る", ButtonStyle.Secondary));
+  }
   out.push(button(customId("json", plan), "JSONを見る", ButtonStyle.Secondary));
   return out;
 }
 
-export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
+function viewOf(plan: Plan, state: DialogState): DialogView {
+  return plan.source ? (state.view ?? "code") : "result";
+}
+
+/** Keeps a code block from being closed by its own content. */
+function fenced(lang: string, body: string): string {
+  return `\`\`\`${lang}\n${body.replaceAll("```", "`\u200b``")}\n\`\`\``;
+}
+
+function codeBody(plan: Plan, room: number): string[] {
+  const { code, summary } = plan.source!;
+  const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
+  const head = [`**コードの説明**(会話を見ていない別のAIがコードだけを読んで書いたものです)\n${explained}`];
+  const limit = Math.max(200, Math.min(MAX_CODE, room - explained.length - 200));
+  const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;
+  return [...head, fenced("js", shown)];
+}
+
+function resultBody(plan: Plan, state: DialogState): string[] {
   const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps);
   const listed = lines.slice(0, MAX_LISTED);
   if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「JSONを見る」)`);
+  if (plan.source) {
+    // The exact calls the code produced, when they fit.
+    const json = JSON.stringify(plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) })));
+    if (json.length <= MAX_STEPS_JSON) listed.push(fenced("json", json));
+  }
+  return listed;
+}
+
+export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
   const title = "### 変更の確認";
   const header = `${title}\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${plan.steps.length}件 · \`${plan.id}\``;
-  const text = [header, ...listed, "", statusLine(plan, state)].join("\n").slice(0, 3900);
+  const status = statusLine(plan, state);
+  const body = viewOf(plan, state) === "code" ? codeBody(plan, MAX_TEXT - header.length - status.length) : resultBody(plan, state);
+  const text = [header, ...body, "", status].join("\n").slice(0, MAX_TEXT);
   const row: APIActionRowComponent<APIButtonComponent> = { type: ComponentType.ActionRow, components: buttons(plan, state) };
   return {
     components: [
