@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
-import { selectableModels } from "../src/llm/models.ts";
+import { findModel, lightestThinking, selectableModels } from "../src/llm/models.ts";
 import { parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
 
 const master = randomBytes(32);
@@ -94,4 +94,10 @@ test("the audit log keeps actions without secrets", () => {
   const row = store.db.prepare("SELECT action, detail_json FROM audit_log").get() as { action: string; detail_json: string };
   assert.equal(row.action, "llm.key.set");
   assert.equal(row.detail_json, '{"provider":"anthropic"}');
+});
+
+test("models that cannot turn thinking off get their lightest level", () => {
+  assert.equal(lightestThinking(findModel("zai", "glm-5.3")!), "low");
+  assert.equal(lightestThinking(findModel("zai", "glm-5.2")!), undefined);
+  assert.equal(lightestThinking(findModel("anthropic", "claude-haiku-5-5")!), undefined);
 });

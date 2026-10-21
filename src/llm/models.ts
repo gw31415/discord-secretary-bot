@@ -1,5 +1,5 @@
 import { createModels } from "@earendil-works/pi-ai";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
@@ -33,4 +33,17 @@ export function selectableModels(provider: ProviderId): Model<Api>[] {
 
 export function findModel(provider: ProviderId, modelId: string): Model<Api> | undefined {
   return llm.getModel(provider, modelId);
+}
+
+const THINKING_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * The bot answers without thinking where it can. Some models (GLM-5.3) reject
+ * requests with thinking off, marked by `off: null` in their level map; those get
+ * their lightest supported level instead.
+ */
+export function lightestThinking(model: Model<Api>): ThinkingLevel | undefined {
+  const map = model.thinkingLevelMap;
+  if (!model.reasoning || !map || map.off !== null) return undefined;
+  return THINKING_LEVELS.find((level) => map[level] !== null);
 }

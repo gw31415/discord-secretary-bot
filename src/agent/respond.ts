@@ -3,7 +3,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { Reader } from "../discord/reader.ts";
-import { llm } from "../llm/models.ts";
+import { lightestThinking, llm } from "../llm/models.ts";
 import { readTools } from "./tools.ts";
 
 export interface RespondInput {
@@ -72,7 +72,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   // OpenCode routes by this id and rejects requests without it; one per reply.
   const sessionId = randomUUID();
   const agent = new Agent({
-    initialState: { systemPrompt: systemPrompt(input.botName), model, tools: readTools(input.reader), thinkingLevel: "off" },
+    initialState: { systemPrompt: systemPrompt(input.botName), model, tools: readTools(input.reader), thinkingLevel: lightestThinking(model) ?? "off" },
     getApiKey: () => apiKey,
     toolExecution: "sequential",
     streamFn: (m, context, options) =>

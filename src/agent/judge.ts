@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { Api, Model } from "@earendil-works/pi-ai";
-import { llm } from "../llm/models.ts";
+import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
+import { lightestThinking, llm } from "../llm/models.ts";
 
 // Decides whether a message in an awake channel is addressed to the bot.
 // Mentions and replies never reach here; they are answered deterministically.
@@ -23,6 +23,12 @@ export function parseJudgement(text: string): Judgement | null {
   } catch {
     return null;
   }
+}
+
+// The verdict is a short JSON; models that cannot skip thinking need room to think first.
+function judgeBudget(model: Model<Api>): { maxTokens: number; reasoning?: ThinkingLevel } {
+  const reasoning = lightestThinking(model);
+  return reasoning ? { maxTokens: 2000, reasoning } : { maxTokens: 300 };
 }
 
 export async function judgeAddressed(input: {
@@ -50,7 +56,7 @@ export async function judgeAddressed(input: {
         },
       ],
     },
-    { apiKey: input.apiKey, sessionId: randomUUID(), maxTokens: 300, signal: input.signal },
+    { apiKey: input.apiKey, sessionId: randomUUID(), signal: input.signal, ...judgeBudget(input.model) },
   );
   const text = res.content
     .filter((c) => c.type === "text")
