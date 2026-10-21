@@ -122,3 +122,26 @@ test("text beside a tool call is posted as progress, and a message sent meanwhil
     llm.deleteProvider(faux.provider.id);
   }
 });
+
+test("a failed web tool is reported with its reason", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    const cache = new GuildCache(GUILD);
+    cache.guild = makeGuild();
+    const rest = { get: async () => [] } as unknown as REST;
+    const reader = new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "1" }, { maxMessages: 500 });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("web_search", { query: "node" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("検索できませんでした")]),
+    ]);
+    const fetch = (async () => new Response("{}", { status: 401 })) as typeof globalThis.fetch;
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader, botName: "bot", transcript: [], target: "[1] owner: nodeの最新版は?",
+      web: { kind: "tavily", apiKey: "bad" }, fetch,
+    });
+    assert.deepEqual(result.toolErrors, [{ tool: "web_search", error: "Tavilyのキーが無効です" }]);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});

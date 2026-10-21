@@ -42,6 +42,8 @@ export interface RespondResult {
   progress: number;
   turns: number;
   toolCalls: string[];
+  /** Tools that failed, with the reason the model was given. */
+  toolErrors?: { tool: string; error: string }[];
 }
 
 /**
@@ -161,6 +163,14 @@ function textOf(m: AssistantMessage): string {
     .trim();
 }
 
+/** The text of a failed tool's result: an Error, or a tool result whose content carries the message. */
+function errorText(result: unknown): string {
+  if (result instanceof Error) return result.message;
+  const content = (result as { content?: { type: string; text?: string }[] } | undefined)?.content;
+  if (Array.isArray(content)) return content.map((c) => c.text ?? "").join(" ");
+  return String(result);
+}
+
 function hasToolCalls(m: AssistantMessage): boolean {
   return m.content.some((c) => c.type === "toolCall");
 }
@@ -216,9 +226,13 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   let turns = 0;
   let progress = 0;
   const toolCalls: string[] = [];
+  const toolErrors: { tool: string; error: string }[] = [];
   agent.subscribe(async (event) => {
     if (event.type === "turn_end" && ++turns >= MAX_TURNS) agent.abort();
     if (event.type === "tool_execution_start") toolCalls.push(event.toolName);
+    if (event.type === "tool_execution_end" && event.isError) {
+      toolErrors.push({ tool: event.toolName, error: errorText(event.result).slice(0, 300) });
+    }
     if (event.type === "message_end" && event.message.role === "assistant" && input.onProgress) {
       const m = event.message as AssistantMessage;
       const text = textOf(m);
@@ -246,7 +260,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   }
   const text = lastAssistantText(agent.state.messages);
   if (!text && turns >= MAX_TURNS) {
-    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls };
+    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors };
   }
-  return { text, progress, turns, toolCalls };
+  return { text, progress, turns, toolCalls, toolErrors };
 }

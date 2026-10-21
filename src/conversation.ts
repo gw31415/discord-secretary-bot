@@ -344,7 +344,7 @@ export class Conversations {
       });
       progress = result.progress;
       text = result.text || (progress > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
-      detail = { ...detail, progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, messagesRead: reader.messagesRead };
+      detail = { ...detail, progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), messagesRead: reader.messagesRead };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       this.deps.log(`応答の生成に失敗 (${input.replyToId})`, e);
