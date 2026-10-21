@@ -48,6 +48,26 @@ export type Decision =
 export const SETUP_NOTICE =
   "このBotと話すには、サーバーで `/llm` を実行して、APIキー・応答に使うモデル・宛先判定に使うモデルを設定してください。";
 
+interface ChannelContext {
+  /** Every recent message, oldest first, so the model can follow the conversation. */
+  transcript: string[];
+  /** Recent human messages only, the reference for how long and how casual a reply is. */
+  styleSamples: string[];
+}
+
+const STYLE_SAMPLES = 15;
+
+/**
+ * Human messages to imitate. Bots and webhooks are filtered out here, not by
+ * instruction, so the bot's own long answers never set the tone.
+ */
+export function styleSamples(messages: Pick<APIMessage, "author" | "webhook_id" | "content">[]): string[] {
+  return messages
+    .filter((m) => !m.author.bot && !m.webhook_id && m.content.trim())
+    .map((m) => m.content.trim())
+    .slice(-STYLE_SAMPLES);
+}
+
 /** Splits a reply into posts: first at the model's own breaks, then at Discord's length limit. */
 export function splitForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
   return text.split(/^[ \t]*<next>[ \t]*$/m).flatMap((part) => splitByLength(part, limit));
@@ -128,18 +148,18 @@ export class Conversations {
         return;
       }
       case "judge": {
-        const transcript = await this.#transcript(message);
-        if (!(await this.#addressed(decision.judgeUserId, transcript, message))) return;
-        return this.#reply(message, transcript, false);
+        const context = await this.#context(message);
+        if (!(await this.#addressed(decision.judgeUserId, context.transcript, message))) return;
+        return this.#reply(message, context, false);
       }
       case "reply":
-        return this.#reply(message, await this.#transcript(message), decision.wake);
+        return this.#reply(message, await this.#context(message), decision.wake);
     }
   }
 
-  async #transcript(message: GuildMessage): Promise<string[]> {
+  async #context(message: GuildMessage): Promise<ChannelContext> {
     const before = await this.deps.fetchBefore(message.channel_id, message.id, CONTEXT_MESSAGES);
-    return before.map(formatMessage).reverse();
+    return { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
   }
 
   async #addressed(judgeUserId: string, transcript: string[], message: GuildMessage): Promise<boolean> {
@@ -158,7 +178,7 @@ export class Conversations {
     return verdict.addressed && verdict.confidence >= CONFIDENCE_THRESHOLD;
   }
 
-  async #reply(message: GuildMessage, transcript: string[], wake: boolean): Promise<void> {
+  async #reply(message: GuildMessage, { transcript, styleSamples }: ChannelContext, wake: boolean): Promise<void> {
     const { store } = this.deps;
     const speaker = message.author.id;
     const conv = store.getConversation(message.channel_id);
@@ -184,6 +204,7 @@ export class Conversations {
         reader,
         botName: this.deps.botName(),
         transcript,
+        styleSamples,
         target: formatMessage(message),
         // The replied-to message is in the same channel, so its images may be shown here too.
         images: [...imageRefs(message), ...(message.referenced_message ? imageRefs(message.referenced_message) : [])],

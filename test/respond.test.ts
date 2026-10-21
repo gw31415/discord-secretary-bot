@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { REST } from "@discordjs/rest";
 import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider } from "@earendil-works/pi-ai";
 import { llm } from "../src/llm/models.ts";
-import { respond } from "../src/agent/respond.ts";
+import { respond, typicalLength } from "../src/agent/respond.ts";
 import { GuildCache } from "../src/discord/cache.ts";
 import { Reader } from "../src/discord/reader.ts";
 import { GUILD, makeGuild, SELF } from "./helpers.ts";
@@ -36,4 +36,9 @@ test("the agent calls read tools through the reader and returns its final text",
   } finally {
     llm.deleteProvider(faux.provider.id);
   }
+});
+
+test("the typical length is the median of the human samples", () => {
+  assert.equal(typicalLength([]), null);
+  assert.equal(typicalLength(["あ", "あいう", "あいうえおかきくけこ"]), 3);
 });

@@ -14,6 +14,8 @@ export interface RespondInput {
   botName: string;
   /** Recent channel messages, oldest first, already formatted. */
   transcript: string[];
+  /** Recent human messages (bots filtered out), the reference for reply length and tone. */
+  styleSamples?: string[];
   /** The message being answered, formatted. */
   target: string;
   /** Images on the message being answered (and the one it replies to). */
@@ -45,8 +47,7 @@ function systemPrompt(botName: string, seesImages: boolean): string {
     "- 返答はDiscordにそのまま投稿されます。ユーザーへの言及はメンションではなく名前で書きます。",
     "",
     "# 話し方",
-    "- チャットの会話に混ざる一人として、周りの人の発言と同じくらいの長さと口調で返します。雑談や短い質問には1〜2文で返し、前置き・まとめ・見出しは付けません。",
-    "- 長さや口調の手本にするのは人の発言だけです。名前に [bot] が付いた発言(あなた自身の過去の返答を含む)は手本にしないでください。",
+    "- チャットの会話に混ざる一人として、<style_samples> にある人の発言と同じくらいの長さと口調で返します。雑談や短い質問には前置き・まとめ・見出しを付けません。",
     "- 調べものや一覧を頼まれたときだけ、必要な分だけ長く書いて構いません(Markdown可)。",
     `- 人が連投するように、返答を複数の投稿に分けても構いません。分けるところに ${MESSAGE_BREAK} だけの行を入れます。分けるのは話題や区切りが変わるときだけにしてください。`,
     "- 話し手と同じ言語で答えます。",
@@ -56,12 +57,32 @@ function systemPrompt(botName: string, seesImages: boolean): string {
   ].join("\n");
 }
 
+/** Median length of the human samples: a number the model can aim at, not a rule. */
+export function typicalLength(samples: string[]): number | null {
+  if (samples.length === 0) return null;
+  const lengths = samples.map((s) => [...s].length).sort((a, b) => a - b);
+  return lengths[Math.floor(lengths.length / 2)]!;
+}
+
 function userPrompt(input: RespondInput): string {
+  const samples = input.styleSamples ?? [];
+  const typical = typicalLength(samples);
+  const style =
+    samples.length > 0
+      ? [
+          "<style_samples>",
+          ...samples.map((s) => s.replaceAll("\n", " ")),
+          "</style_samples>",
+          `この場の人の発言は1通あたりおよそ${typical}文字です。雑談ならこれに合わせ、調べものや一覧は必要な分だけ書いてください。`,
+          "",
+        ]
+      : [];
   return [
     "<messages>",
     ...input.transcript,
     "</messages>",
     "",
+    ...style,
     "次の発言に返答してください:",
     input.target,
   ].join("\n");

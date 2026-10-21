@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import type { APIMessage } from "discord-api-types/v10";
-import { Conversations, SESSION_MS, SETUP_NOTICE, splitForDiscord } from "../src/conversation.ts";
+import { Conversations, SESSION_MS, SETUP_NOTICE, splitForDiscord, styleSamples } from "../src/conversation.ts";
 import type { ConversationDeps, GuildMessage } from "../src/conversation.ts";
 import { Store } from "../src/db.ts";
 import { parseJudgement } from "../src/agent/judge.ts";
@@ -146,4 +146,12 @@ test("the model's <next> lines split a reply into separate posts", () => {
   assert.deepEqual(splitForDiscord("了解です\n<next>\n調べてみますね"), ["了解です", "調べてみますね"]);
   assert.deepEqual(splitForDiscord("一つだけ"), ["一つだけ"]);
   assert.deepEqual(splitForDiscord("a\n<next>\n\n<next>\nb"), ["a", "b"], "empty parts are dropped");
+});
+
+test("style samples keep only human messages, while the transcript keeps everything", () => {
+  const human = message("1", "3", "おはよう");
+  const bot = message("2", "999", "長い長いBotの返答".repeat(50), { author: { id: "999", username: "bot", discriminator: "0", global_name: null, avatar: null, bot: true } });
+  const hook = message("3", "4", "webhookの投稿", { webhook_id: "77" });
+  const empty = message("4", "3", "   ");
+  assert.deepEqual(styleSamples([human, bot, hook, empty]), ["おはよう"]);
 });
