@@ -212,3 +212,20 @@ test("the speaker's follow-ups and edits reach the answer being worked on", asyn
   await t.conv.handle(message("3", "1", "ありがとう"));
   assert.equal(t.responded.length, 2);
 });
+
+test("waking and answering report that a conversation is awake", async () => {
+  let awake = 0;
+  const t = setup();
+  t.conv.deps.onAwake = () => void awake++;
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.equal(awake, 2);
+});
+
+test("the store reports how long any channel stays awake", () => {
+  const store = new Store(":memory:", randomBytes(32));
+  assert.equal(store.awakeUntil(100), undefined);
+  store.saveConversation({ channelId: "10", startedBy: "1", awakeUntil: 200 });
+  store.saveConversation({ channelId: "11", startedBy: "1", awakeUntil: 300 });
+  assert.equal(store.awakeUntil(100), 300);
+  assert.equal(store.awakeUntil(300), undefined);
+});

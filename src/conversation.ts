@@ -39,6 +39,8 @@ export interface ConversationDeps {
   judge: (input: { model: JudgeModel; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
   /** Posts an approval dialog for writes. Absent keeps conversations read-only. */
   propose?: (input: ProposeInput) => Promise<Plan>;
+  /** A conversation woke or was extended. */
+  onAwake?: () => void;
   log: (message: string, error?: unknown) => void;
 }
 
@@ -206,6 +208,7 @@ export class Conversations {
       startedBy: wake || !conv ? speaker : conv.startedBy,
       awakeUntil: this.deps.now() + SESSION_MS,
     });
+    this.deps.onAwake?.();
     await this.#answer({
       guildId: message.guild_id,
       channelId: message.channel_id,
@@ -222,6 +225,7 @@ export class Conversations {
     // Extend the session from the moment the reply went out.
     const latest = store.getConversation(message.channel_id);
     if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
+    this.deps.onAwake?.();
   }
 
   /**

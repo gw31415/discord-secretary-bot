@@ -1,6 +1,7 @@
 import { Client, GatewayDispatchEvents, GatewayIntentBits } from "@discordjs/core";
 import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
+import { PresenceUpdateStatus } from "discord-api-types/v10";
 import { judgeAddressed } from "./agent/judge.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
@@ -10,6 +11,7 @@ import type { GuildMessage } from "./conversation.ts";
 import { Store } from "./db.ts";
 import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
+import { Presence } from "./discord/presence.ts";
 import { Reader } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
 import { findChatModel } from "./llm/models.ts";
@@ -32,8 +34,19 @@ const gateway = new WebSocketManager({
     GatewayIntentBits.GuildMembers |
     GatewayIntentBits.GuildMessages |
     GatewayIntentBits.MessageContent,
+  // Asleep until someone talks to it.
+  initialPresence: { status: PresenceUpdateStatus.Idle, activities: [], since: null, afk: true },
 });
 const client = new Client({ rest, gateway });
+
+const presence = new Presence({
+  awakeUntil: (now) => store.awakeUntil(now),
+  send: async (data) => {
+    for (const shardId of await gateway.getShardIds()) await client.updatePresence(shardId, data);
+  },
+  now: () => Date.now(),
+  log,
+});
 
 let selfId = "";
 let botName = "Bot";
@@ -90,7 +103,14 @@ const conversations = new Conversations({
   respond,
   judge: judgeAddressed,
   propose: (input) => planner.propose(input),
+  onAwake: () => presence.refresh(),
   log,
+});
+
+// Every (re)connection starts from the initial presence, so the status is sent again.
+client.on(GatewayDispatchEvents.Ready, () => {
+  presence.reset();
+  presence.refresh();
 });
 
 client.once(GatewayDispatchEvents.Ready, ({ data }) => {
@@ -184,6 +204,7 @@ const sweeper = setInterval(() => {
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
+  presence.stop();
   await gateway.destroy();
   store.close();
   process.exit(0);

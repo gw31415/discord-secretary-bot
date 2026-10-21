@@ -378,6 +378,12 @@ export class Store {
       .run(conv.channelId, conv.startedBy, conv.awakeUntil, new Date().toISOString());
   }
 
+  /** The latest time any channel stays awake, if one is awake now. */
+  awakeUntil(now: number): number | undefined {
+    const row = this.db.prepare("SELECT MAX(awake_until) AS until FROM conversations WHERE awake_until > ?").get(now) as { until: number | null };
+    return row.until ?? undefined;
+  }
+
   deleteExpiredConversations(now: number): void {
     this.db.prepare("DELETE FROM conversations WHERE awake_until <= ?").run(now);
   }
