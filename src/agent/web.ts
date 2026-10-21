@@ -233,9 +233,17 @@ interface McpCallResult {
   isError?: boolean;
 }
 
-// The servers do not document their argument names, so each tool's first required
-// argument is read from tools/list once and remembered.
-const argumentNames = new Map<string, string>();
+// The servers do not document their tool schemas, and the published tool names have
+// drifted from the docs (webSearchPrime), so the tool and its first required argument
+// are read from tools/list once per server and remembered.
+const resolved = new Map<string, { name: string; argument: string }>();
+
+const normalize = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** The listed tool meant by `wanted`: the same name ignoring case and separators, else the only tool. */
+export function pickMcpTool(tools: McpTool[], wanted: string): McpTool | undefined {
+  return tools.find((t) => t.name === wanted) ?? tools.find((t) => normalize(t.name) === normalize(wanted)) ?? (tools.length === 1 ? tools[0] : undefined);
+}
 
 async function callMcpTool(
   target: { url: string; tool: string },
@@ -253,21 +261,23 @@ async function callMcpTool(
   }, session, fetchImpl, signal);
   await rpc(target.url, apiKey, { method: "notifications/initialized" }, session, fetchImpl, signal);
 
-  let argument = argumentNames.get(target.tool);
-  if (!argument) {
+  let tool = resolved.get(target.url);
+  if (!tool) {
     const list = (await rpc(target.url, apiKey, { id: 2, method: "tools/list" }, session, fetchImpl, signal)) as { tools?: McpTool[] };
-    const tool = list.tools?.find((t) => t.name === target.tool);
-    if (!tool) throw new Error(`GLMのWebツール ${target.tool} が見つかりません`);
-    const schema = tool.inputSchema ?? {};
-    argument = schema.required?.[0] ?? Object.keys(schema.properties ?? {})[0];
-    if (!argument) throw new Error(`GLMのWebツール ${target.tool} の引数がわかりません`);
-    argumentNames.set(target.tool, argument);
+    const tools = list.tools ?? [];
+    const found = pickMcpTool(tools, target.tool);
+    if (!found) throw new Error(`GLMのWebツール ${target.tool} が見つかりません(あるのは ${tools.map((t) => t.name).join(", ") || "なし"})`);
+    const schema = found.inputSchema ?? {};
+    const argument = schema.required?.[0] ?? Object.keys(schema.properties ?? {})[0];
+    if (!argument) throw new Error(`GLMのWebツール ${found.name} の引数がわかりません`);
+    tool = { name: found.name, argument };
+    resolved.set(target.url, tool);
   }
 
   const result = (await rpc(target.url, apiKey, {
     id: 3,
     method: "tools/call",
-    params: { name: target.tool, arguments: { [argument]: value } },
+    params: { name: tool.name, arguments: { [tool.argument]: value } },
   }, session, fetchImpl, signal)) as McpCallResult;
   const body = (result.content ?? []).filter((c) => c.type === "text" && c.text).map((c) => c.text).join("\n");
   if (result.isError) throw new Error(body || "GLMのWebツールが失敗しました");

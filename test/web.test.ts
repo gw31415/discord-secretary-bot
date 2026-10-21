@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveWebAccess, webToolWarning, webTools, ZAI_MCP } from "../src/agent/web.ts";
+import { pickMcpTool, resolveWebAccess, webToolWarning, webTools, ZAI_MCP } from "../src/agent/web.ts";
 import type { KeyProviderId } from "../src/llm/models.ts";
 
 const keys = (map: Partial<Record<KeyProviderId, string>>) => (p: KeyProviderId) => map[p];
@@ -65,4 +65,11 @@ test("GLM's web tools are called over MCP, with the argument name taken from the
   methods.length = 0;
   await search!.execute("2", { query: "glm" });
   assert.deepEqual(methods, ["initialize", "notifications/initialized", "tools/call"]);
+});
+
+test("an MCP tool is found despite case and separator differences in its published name", () => {
+  const tools = [{ name: "web_search_prime" }, { name: "other" }];
+  assert.equal(pickMcpTool(tools, "webSearchPrime")?.name, "web_search_prime");
+  assert.equal(pickMcpTool([{ name: "search" }], "webSearchPrime")?.name, "search", "a server with one tool");
+  assert.equal(pickMcpTool(tools, "webReader"), undefined);
 });
