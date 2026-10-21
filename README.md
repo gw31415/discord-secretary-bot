@@ -47,7 +47,20 @@ npm start
 
 起動時にギルドコマンドを一括で上書き登録します(定義が変わっていなければ省略)。停止時にコマンドは消しません。
 
-常駐させる場合は `deploy/discord-admin-bot.service` を参考に systemd に登録します。
+## 本番と開発
+
+1台のサーバーで本番(prod)と開発(dev)を分けて動かします。それぞれ別のclone、`.env`(Botトークン)、データベース、systemdユニット(`discord-secretary-bot@prod` / `discord-secretary-bot@dev`)を持ちます。操作は `deploy/botctl` で、Discordには何も出しません。
+
+```sh
+botctl status              # 各環境で動いているコミット
+botctl dev [branch]        # devをブランチの最新にしてテストし、再起動(既定はmain)
+botctl promote             # devで動いているコミットを本番へ
+botctl rollback            # 本番を一つ前のコミットへ
+botctl logs prod|dev [n]   # ログ
+botctl install             # 初回の設置(~/discord-secretary-bot/{prod,dev,state})
+```
+
+本番に上げられるのは、devで動いているコミットだけです。本番を変える前にはデータベースを `prod/data/backups` に写します。新しいコミットが起動しなければ、元のコミットとそのデータベースに自動で戻します。
 
 ## 開発
 
