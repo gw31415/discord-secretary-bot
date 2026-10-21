@@ -4,10 +4,10 @@ import { formatMessage } from "./agent/tools.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
-import { findModel } from "./llm/models.ts";
+import { findChatModel, findJudgeModel } from "./llm/models.ts";
+import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
-import type { Api, Model } from "@earendil-works/pi-ai";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -31,7 +31,7 @@ export interface ConversationDeps {
   typing: (channelId: string) => Promise<void>;
   makeReader: (scope: ReadScope) => Reader;
   respond: (input: RespondInput) => Promise<RespondResult>;
-  judge: (input: { model: Model<Api>; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
+  judge: (input: { model: JudgeModel; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
   log: (message: string, error?: unknown) => void;
 }
 
@@ -136,7 +136,7 @@ export class Conversations {
   async #addressed(judgeUserId: string, transcript: string[], message: APIMessage): Promise<boolean> {
     const { store } = this.deps;
     const ref = store.getSettings(judgeUserId).judge;
-    const model = ref && findModel(ref.provider, ref.model);
+    const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(judgeUserId, ref.provider);
     if (!model || !apiKey) return false; // The waker's setup broke; stay quiet rather than guess.
     const verdict = await this.deps.judge({
@@ -160,7 +160,7 @@ export class Conversations {
     });
 
     const ref = store.getSettings(speaker).response!;
-    const model = findModel(ref.provider, ref.model)!;
+    const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
     const reader = this.deps.makeReader({ channelId: message.channel_id, speakerId: speaker });
 

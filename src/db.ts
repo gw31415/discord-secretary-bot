@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { open, seal } from "./crypto.ts";
+import { isProviderId } from "./llm/models.ts";
 import type { ProviderId } from "./llm/models.ts";
 
 // Each entry upgrades the schema by one version. Never edit an applied entry.
@@ -129,10 +130,12 @@ export class Store {
     return open(this.#masterKey, { ciphertext: row.ciphertext, wrappedDek: row.wrapped_dek }, `${userId}:${provider}`);
   }
 
+  // Rows of providers the bot no longer supports stay in the table but are ignored.
   listKeys(userId: string): KeySummary[] {
-    return this.db
+    const rows = this.db
       .prepare("SELECT provider, last4 FROM api_keys WHERE user_id = ? ORDER BY provider")
-      .all(userId) as KeySummary[];
+      .all(userId) as { provider: string; last4: string }[];
+    return rows.filter((r): r is KeySummary => isProviderId(r.provider));
   }
 
   // --- Model settings -----------------------------------------------------
@@ -142,7 +145,7 @@ export class Store {
       | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null }
       | undefined;
     const ref = (provider: string | null | undefined, model: string | null | undefined): ModelRef | null =>
-      provider && model ? { provider: provider as ProviderId, model } : null;
+      provider && model && isProviderId(provider) ? { provider, model } : null;
     return {
       response: ref(row?.default_provider, row?.default_model),
       judge: ref(row?.judge_provider, row?.judge_model),

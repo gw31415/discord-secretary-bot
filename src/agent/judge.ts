@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
-import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
-import { lightestThinking, llm } from "../llm/models.ts";
+import type { Api, ClassifierApi, ClassifierModel, Model, ThinkingLevel } from "@earendil-works/pi-ai";
+import { isClassifier, lightestThinking, llm } from "../llm/models.ts";
+import type { JudgeModel } from "../llm/models.ts";
 
 // Decides whether a message in an awake channel is addressed to the bot.
 // Mentions and replies never reach here; they are answered deterministically.
@@ -31,14 +31,47 @@ function judgeBudget(model: Model<Api>): { maxTokens: number; reasoning?: Thinki
   return reasoning ? { maxTokens: 2000, reasoning } : { maxTokens: 300 };
 }
 
-export async function judgeAddressed(input: {
-  model: Model<Api>;
+interface JudgeInput {
+  model: JudgeModel;
   apiKey: string;
   botName: string;
   transcript: string[];
   message: string;
   signal?: AbortSignal;
-}): Promise<Judgement> {
+}
+
+export async function judgeAddressed(input: JudgeInput): Promise<Judgement> {
+  const { model } = input;
+  return isClassifier(model) ? classifyAddressed({ ...input, model }) : askAddressed({ ...input, model });
+}
+
+// Classifiers (Jev) answer a typed question with a probability instead of text.
+async function classifyAddressed(input: JudgeInput & { model: ClassifierModel<ClassifierApi> }): Promise<Judgement> {
+  const res = await llm.classify(
+    input.model,
+    {
+      state: { bot_name: input.botName, recent_messages: input.transcript, last_message: input.message },
+      questions: {
+        addressed: {
+          type: "bool",
+          instructions: `Discordのチャンネルの会話です。last_message はBot「${input.botName}」に向けた発言ですか。recent_messages は直前の発言で、古い順です。`,
+          criteria: {
+            true: "Botとの会話の続き、Botへの質問や依頼、Botの返答への反応",
+            false: "人同士の会話、独り言、Botに関係ない発言",
+          },
+        },
+      },
+    },
+    { apiKey: input.apiKey, signal: input.signal },
+  );
+  const answer = res.answers.addressed;
+  // Fail quiet: an error or a missing answer means "not addressed".
+  if (res.stopReason !== "stop" || answer?.type !== "bool") return { addressed: false, confidence: 0 };
+  const addressed = answer.probability >= 0.5;
+  return { addressed, confidence: addressed ? answer.probability : 1 - answer.probability };
+}
+
+async function askAddressed(input: JudgeInput & { model: Model<Api> }): Promise<Judgement> {
   const res = await llm.completeSimple(
     input.model,
     {
@@ -56,7 +89,7 @@ export async function judgeAddressed(input: {
         },
       ],
     },
-    { apiKey: input.apiKey, sessionId: randomUUID(), signal: input.signal, ...judgeBudget(input.model) },
+    { apiKey: input.apiKey, signal: input.signal, ...judgeBudget(input.model) },
   );
   const text = res.content
     .filter((c) => c.type === "text")

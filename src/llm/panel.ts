@@ -9,12 +9,13 @@ import type {
 } from "discord-api-types/v10";
 import type { Store } from "../db.ts";
 import { findModel, isProviderId, PROVIDERS, selectableModels } from "./models.ts";
-import type { ProviderId } from "./models.ts";
+import type { ModelRole, ProviderId } from "./models.ts";
+
+export type { ModelRole };
 
 // The /llm panel: an ephemeral Components V2 message for one user's keys and models.
 // Both models are required and never chosen automatically.
 
-export type ModelRole = "response" | "judge";
 
 export const CUSTOM_ID = {
   keyButton: (p: ProviderId) => `llm:key:${p}`,
@@ -38,7 +39,7 @@ export function setupStatus(store: Store, userId: string): SetupStatus {
     const ref = settings[role];
     if (!ref) missing.push(label);
     else if (!keys.has(ref.provider)) missing.push(`${label}(${PROVIDERS[ref.provider].label}のキーがありません)`);
-    else if (!findModel(ref.provider, ref.model)) missing.push(`${label}(${ref.model}は使えなくなりました)`);
+    else if (!findModel(role, ref.provider, ref.model)) missing.push(`${label}(${ref.model}は使えなくなりました)`);
   }
   return { complete: missing.length === 0, missing };
 }
@@ -51,7 +52,7 @@ function modelSelects(store: Store, userId: string, role: ModelRole, placeholder
   const providers = store.listKeys(userId).map((k) => k.provider);
   const current = store.getSettings(userId)[role];
   return providers.flatMap((provider) => {
-    const models = selectableModels(provider);
+    const models = selectableModels(provider, role);
     const pages = Math.ceil(models.length / SELECT_LIMIT);
     return Array.from({ length: pages }, (_, page) => {
       const options = models.slice(page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT).map((model) => ({
@@ -102,11 +103,13 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
 
   const response = modelSelects(store, userId, "response", "応答に使うモデル");
   const judge = modelSelects(store, userId, "judge", "宛先判定に使うモデル");
-  if (response.length > 0 && judge.length > 0) {
+  if (judge.length > 0) {
     body.push(
       { type: ComponentType.TextDisplay, content: "**応答に使うモデル**(必須)\nBotがあなたに返事をするときに使います。" },
-      ...response,
-      { type: ComponentType.TextDisplay, content: "**宛先判定に使うモデル**(必須)\nあなたが起こした会話で、発言がBot宛てかを判定するときに使います。軽いモデルがおすすめです。" },
+      ...(response.length > 0
+        ? response
+        : [{ type: ComponentType.TextDisplay, content: "-# 応答に使えるモデルがありません。Claude APIのキーを登録してください。" } satisfies APIComponentInContainer]),
+      { type: ComponentType.TextDisplay, content: "**宛先判定に使うモデル**(必須)\nあなたが起こした会話で、発言がBot宛てかを判定するときに使います。軽いモデルか、判定専用のJev(TypeSafe)がおすすめです。" },
       ...judge,
     );
   } else {
@@ -172,7 +175,7 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
     const slash = value.indexOf("/");
     const provider = value.slice(0, slash);
     const model = value.slice(slash + 1);
-    if (slash < 0 || !isProviderId(provider) || !findModel(provider, model)) return null;
+    if (slash < 0 || !isProviderId(provider) || !findModel(arg, provider, model)) return null;
     return { kind: "selectModel", role: arg, provider, model };
   }
   return null;
