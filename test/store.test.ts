@@ -54,6 +54,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   const store = new Store(":memory:", master);
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "opencode-go", "sk-oc-abcdefgh5678");
+  store.setApiKey("u1", "zai", "zai-abcdefgh9012");
   const panel = renderPanel(store, "u1");
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
@@ -63,16 +64,18 @@ test("every selectable model is offered, with unique custom ids, within the comp
     const c = node as { type?: number; custom_id?: string; options?: { value: string }[]; components?: unknown };
     if (typeof c.type === "number") components++;
     if (c.type === 3) selects.push(c as (typeof selects)[number]);
+    if (c.type === 1 && Array.isArray(c.components)) assert.ok(c.components.length <= 5, "action row over five components");
     walk(c.components);
   };
   walk(panel.components);
   assert.ok(components <= 40, `${components} components`);
   assert.equal(new Set(selects.map((s) => s.custom_id)).size, selects.length);
   const offered = new Set(selects.filter((s) => s.custom_id.startsWith("llm:model:response")).flatMap((s) => s.options.map((o) => o.value)));
-  for (const provider of ["anthropic", "opencode-go"] as const) {
+  for (const provider of ["anthropic", "opencode-go", "zai"] as const) {
     for (const m of selectableModels(provider)) assert.ok(offered.has(`${provider}/${m.id}`), `${provider}/${m.id}`);
   }
   assert.ok(offered.has("anthropic/claude-opus-5-5"));
+  assert.ok(offered.has("zai/glm-5.3"));
 });
 
 test("custom ids parse into panel actions and reject unknown models", () => {

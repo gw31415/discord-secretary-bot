@@ -82,20 +82,21 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     const last4 = keys.get(p);
     return `${PROVIDERS[p].label}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
   });
-  const buttons: APIButtonComponent[] = (Object.keys(PROVIDERS) as ProviderId[]).flatMap((p) => {
+  // One row per provider: an action row holds at most five buttons.
+  const buttonRows = (Object.keys(PROVIDERS) as ProviderId[]).map((p): APIComponentInContainer => {
     const registered = keys.has(p);
     const list: APIButtonComponent[] = [
       { type: ComponentType.Button, style: ButtonStyle.Primary, custom_id: CUSTOM_ID.keyButton(p), label: `${PROVIDERS[p].label}のキーを${registered ? "差し替え" : "登録"}` },
     ];
     if (registered) list.push({ type: ComponentType.Button, style: ButtonStyle.Danger, custom_id: CUSTOM_ID.deleteButton(p), label: `${PROVIDERS[p].label}のキーを削除` });
-    return list;
+    return { type: ComponentType.ActionRow, components: list };
   });
 
   const body: APIComponentInContainer[] = [
     { type: ComponentType.TextDisplay, content: "## LLM設定\nあなたのAPIキーとモデルです。この画面はあなたにだけ見えています。" },
     { type: ComponentType.Separator },
     { type: ComponentType.TextDisplay, content: `**APIキー**\n${keyLines.join("\n")}` },
-    { type: ComponentType.ActionRow, components: buttons },
+    ...buttonRows,
     { type: ComponentType.Separator },
   ];
 
