@@ -3,6 +3,7 @@ import type { Store } from "./db.ts";
 import { formatMessage } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
+import { Inbox } from "./agent/respond.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
@@ -97,6 +98,8 @@ export class Conversations {
   readonly #notified = new Map<string, number>();
   /** Per-channel promise chain so messages in one channel are handled in order. */
   readonly #queues = new Map<string, Promise<void>>();
+  /** The answer being worked on in each channel, which takes in its speaker's follow-ups and edits. */
+  readonly #working = new Map<string, { speaker: string; messageIds: Set<string>; inbox: Inbox }>();
 
   constructor(deps: ConversationDeps) {
     this.deps = deps;
@@ -128,6 +131,13 @@ export class Conversations {
   }
 
   handle(message: GuildMessage): Promise<void> {
+    const working = this.#working.get(message.channel_id);
+    if (working && !message.author.bot && !message.webhook_id && message.author.id === working.speaker) {
+      if (working.inbox.deliver(`[追いコメント] ${formatMessage(message)}`)) {
+        working.messageIds.add(message.id);
+        return Promise.resolve();
+      }
+    }
     return this.#enqueue(message.channel_id, () => this.#process(message)).catch((e) =>
       this.deps.log(`メッセージ ${message.id} の処理に失敗`, e),
     );
@@ -154,6 +164,16 @@ export class Conversations {
       case "reply":
         return this.#reply(message, await this.#context(message), decision.wake);
     }
+  }
+
+  /**
+   * An edit to a message the bot is still answering reaches the agent. Edits to
+   * anything else are already current wherever history is read.
+   */
+  edited(message: Pick<APIMessage, "id" | "channel_id"> & Partial<APIMessage>): void {
+    const working = this.#working.get(message.channel_id);
+    if (!working || !working.messageIds.has(message.id) || message.author?.id !== working.speaker || message.content === undefined) return;
+    working.inbox.deliver(`[編集] 次の発言が編集されました。今の内容: ${formatMessage(message as APIMessage)}`);
   }
 
   async #context(message: GuildMessage): Promise<ChannelContext> {
@@ -195,6 +215,7 @@ export class Conversations {
       target: formatMessage(message),
       // The replied-to message is in the same channel, so its images may be shown here too.
       images: [...imageRefs(message), ...(message.referenced_message ? imageRefs(message.referenced_message) : [])],
+      messageIds: [message.id],
       audit: { channelId: message.channel_id, messageId: message.id },
     });
 
@@ -256,6 +277,8 @@ export class Conversations {
     target: string;
     images: ImageRef[];
     replaces?: string;
+    /** The messages this answer is for, whose edits it should take in. */
+    messageIds?: string[];
     audit: Record<string, unknown>;
   }): Promise<void> {
     const { store } = this.deps;
@@ -267,6 +290,17 @@ export class Conversations {
 
     await this.deps.typing(channelId).catch(() => undefined);
     const typing = setInterval(() => void this.deps.typing(channelId).catch(() => undefined), 8000);
+    const inbox = new Inbox();
+    this.#working.set(channelId, { speaker, messageIds: new Set(input.messageIds ?? []), inbox });
+    // The first post answers the message; the rest follow it as a series.
+    let replyTo: string | null = input.replyToId;
+    const post = async (content: string) => {
+      for (const part of splitForDiscord(content)) {
+        await this.deps.sendReply(channelId, replyTo, part);
+        replyTo = null;
+      }
+    };
+    let progress = 0;
     let text: string;
     let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}` };
     try {
@@ -280,6 +314,11 @@ export class Conversations {
         target: input.target,
         images: input.images,
         webSearch: this.deps.webSearch,
+        inbox,
+        onProgress: async (content) => {
+          await post(content);
+          await this.deps.typing(channelId).catch(() => undefined);
+        },
         propose: this.deps.propose
           ? (drafts, code) =>
               this.deps.propose!({
@@ -294,8 +333,9 @@ export class Conversations {
               })
           : undefined,
       });
-      text = result.text || "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。";
-      detail = { ...detail, turns: result.turns, toolCalls: result.toolCalls, messagesRead: reader.messagesRead };
+      progress = result.progress;
+      text = result.text || (progress > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
+      detail = { ...detail, progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, messagesRead: reader.messagesRead };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       this.deps.log(`応答の生成に失敗 (${input.replyToId})`, e);
@@ -303,10 +343,10 @@ export class Conversations {
       detail = { ...detail, error: reason.slice(0, 500) };
     } finally {
       clearInterval(typing);
+      if (this.#working.get(channelId)?.inbox === inbox) this.#working.delete(channelId);
     }
 
-    const posts = splitForDiscord(text);
-    for (const [i, post] of posts.entries()) await this.deps.sendReply(channelId, i === 0 ? input.replyToId : null, post);
+    await post(text);
     store.audit({ kind: "user", userId: speaker, via: "conversation" }, "conversation.reply", detail);
   }
 

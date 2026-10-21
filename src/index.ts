@@ -157,6 +157,11 @@ client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
   void conversations.handle(data as GuildMessage);
 });
 
+client.on(GatewayDispatchEvents.MessageUpdate, ({ data }) => {
+  if (!data.guild_id || !caches.get(data.guild_id)?.guild) return;
+  conversations.edited(data);
+});
+
 client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
   if (!caches.get(data.guild_id)) return;
   try {
