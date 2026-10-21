@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
@@ -68,6 +69,8 @@ function lastAssistantText(messages: AgentMessage[]): string {
 
 export async function respond(input: RespondInput): Promise<RespondResult> {
   const { model, apiKey } = input;
+  // OpenCode routes by this id and rejects requests without it; one per reply.
+  const sessionId = randomUUID();
   const agent = new Agent({
     initialState: { systemPrompt: systemPrompt(input.botName), model, tools: readTools(input.reader), thinkingLevel: "off" },
     getApiKey: () => apiKey,
@@ -76,6 +79,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
       llm.streamSimple(m, context, {
         ...options,
         apiKey,
+        sessionId,
         maxTokens: Math.min(MAX_OUTPUT_TOKENS, m.maxTokens || MAX_OUTPUT_TOKENS),
         // Claude's server-side web search, injected into the raw request. pi-ai skips the
         // server_tool_use / web_search_tool_result blocks and keeps the final text.

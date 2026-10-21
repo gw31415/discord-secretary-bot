@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { llm } from "../llm/models.ts";
 
@@ -49,7 +50,7 @@ export async function judgeAddressed(input: {
         },
       ],
     },
-    { apiKey: input.apiKey, maxTokens: 300, signal: input.signal },
+    { apiKey: input.apiKey, sessionId: randomUUID(), maxTokens: 300, signal: input.signal },
   );
   const text = res.content
     .filter((c) => c.type === "text")
