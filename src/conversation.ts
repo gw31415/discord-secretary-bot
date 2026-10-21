@@ -1,6 +1,7 @@
 import type { APIMessage } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
 import { formatMessage } from "./agent/tools.ts";
+import { imageRefs } from "./agent/images.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
@@ -25,7 +26,8 @@ export interface ConversationDeps {
   now: () => number;
   webSearch: boolean;
   fetchBefore: (channelId: string, beforeId: string, limit: number) => Promise<APIMessage[]>;
-  sendReply: (channelId: string, replyToId: string, content: string) => Promise<void>;
+  /** replyToId is null for follow-up posts, which read as a natural series. */
+  sendReply: (channelId: string, replyToId: string | null, content: string) => Promise<void>;
   sendDm: (userId: string, content: string) => Promise<void>;
   typing: (channelId: string) => Promise<void>;
   makeReader: (scope: ReadScope) => Reader;
@@ -46,7 +48,12 @@ export type Decision =
 export const SETUP_NOTICE =
   "このBotと話すには、サーバーで `/llm` を実行して、APIキー・応答に使うモデル・宛先判定に使うモデルを設定してください。";
 
+/** Splits a reply into posts: first at the model's own breaks, then at Discord's length limit. */
 export function splitForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
+  return text.split(/^[ \t]*<next>[ \t]*$/m).flatMap((part) => splitByLength(part, limit));
+}
+
+function splitByLength(text: string, limit: number): string[] {
   const chunks: string[] = [];
   let rest = text.trim();
   while (rest.length > limit) {
@@ -178,6 +185,8 @@ export class Conversations {
         botName: this.deps.botName(),
         transcript,
         target: formatMessage(message),
+        // The replied-to message is in the same channel, so its images may be shown here too.
+        images: [...imageRefs(message), ...(message.referenced_message ? imageRefs(message.referenced_message) : [])],
         webSearch: this.deps.webSearch,
       });
       text = result.text || "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。";
@@ -191,7 +200,8 @@ export class Conversations {
       clearInterval(typing);
     }
 
-    for (const chunk of splitForDiscord(text)) await this.deps.sendReply(message.channel_id, message.id, chunk);
+    const posts = splitForDiscord(text);
+    for (const [i, post] of posts.entries()) await this.deps.sendReply(message.channel_id, i === 0 ? message.id : null, post);
     store.audit({ kind: "user", userId: speaker, via: "conversation" }, "conversation.reply", detail);
 
     // Extend the session from the moment the reply went out.

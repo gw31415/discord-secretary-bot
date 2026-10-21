@@ -4,6 +4,7 @@ import type { TSchema } from "@earendil-works/pi-ai";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
 import { ChannelType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";
+import { downloadImages, imageRefs, MAX_IMAGES } from "./images.ts";
 import { AGENT_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
@@ -21,8 +22,10 @@ export function formatMessage(m: Omit<APIMessage, "reactions">): string {
   const parts = [`[${m.id}] ${m.timestamp.slice(0, 16).replace("T", " ")} ${name}(${m.author.id})${m.author.bot ? "[bot]" : ""}`];
   if (m.message_reference?.message_id) parts.push(`返信先:${m.message_reference.message_id}`);
   let line = `${parts.join(" ")}: ${m.content}`;
-  if (m.attachments.length > 0) line += ` [添付: ${m.attachments.map((a) => a.filename).join(", ")}]`;
-  if (m.embeds.length > 0) line += ` [埋め込み${m.embeds.length}件]`;
+  if (m.attachments.length > 0) {
+    line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : ""}`).join(", ")}]`;
+  }
+  if (m.embeds.length > 0) line += ` [埋め込み${m.embeds.length}件${m.embeds.some((e) => e.image || e.thumbnail) ? "・画像あり" : ""}]`;
   return line;
 }
 
@@ -38,7 +41,13 @@ function tool<T extends TSchema>(definition: AgentTool<T>): AgentTool<any> {
   return definition;
 }
 
-export function readTools(reader: Reader): AgentTool<any>[] {
+export interface ToolOptions {
+  /** The model accepts images, so view_images is offered. */
+  images: boolean;
+  fetch?: typeof fetch;
+}
+
+export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
   const readMessages = tool({
     name: "read_messages",
     label: "履歴を読む",
@@ -143,5 +152,24 @@ export function readTools(reader: Reader): AgentTool<any>[] {
     },
   });
 
-  return [readMessages, searchMessages, listChannels, findMembers, runCode];
+  const viewImages = tool({
+    name: "view_images",
+    label: "画像を見る",
+    description: `メッセージに添付された画像と埋め込みの画像を見ます(最大${MAX_IMAGES}枚)。履歴で「(画像)」や「画像あり」と出ているメッセージに使います。`,
+    parameters: Type.Object({
+      message_id: Type.String(),
+      channel_id: Type.Optional(Type.String({ description: "省略時は今のチャンネル" })),
+    }),
+    execute: async (_id, params) => {
+      const channelId = params.channel_id ?? reader.scope.channelId;
+      // Goes through the reader, so only messages that may be shown here are opened.
+      const message = (await reader.get(`/channels/${channelId}/messages/${params.message_id}`)) as APIMessage;
+      const images = await downloadImages(imageRefs(message), options.fetch);
+      if (images.length === 0) return text("このメッセージには見られる画像がありません");
+      return { content: [{ type: "text" as const, text: `メッセージ ${message.id} の画像 ${images.length}枚` }, ...images], details: {} };
+    },
+  });
+
+  const tools = [readMessages, searchMessages, listChannels, findMembers, runCode];
+  return options.images ? [...tools, viewImages] : tools;
 }

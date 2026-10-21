@@ -141,3 +141,9 @@ test("judgements parse defensively", () => {
 test("the setup notice points to /llm", () => {
   assert.match(SETUP_NOTICE, /\/llm/);
 });
+
+test("the model's <next> lines split a reply into separate posts", () => {
+  assert.deepEqual(splitForDiscord("了解です\n<next>\n調べてみますね"), ["了解です", "調べてみますね"]);
+  assert.deepEqual(splitForDiscord("一つだけ"), ["一つだけ"]);
+  assert.deepEqual(splitForDiscord("a\n<next>\n\n<next>\nb"), ["a", "b"], "empty parts are dropped");
+});

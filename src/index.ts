@@ -51,7 +51,7 @@ const conversations = new Conversations({
   sendReply: async (channelId, replyToId, content) => {
     await client.api.channels.createMessage(channelId, {
       content,
-      message_reference: { message_id: replyToId, fail_if_not_exists: false },
+      ...(replyToId ? { message_reference: { message_id: replyToId, fail_if_not_exists: false } } : {}),
       // Never ping anyone from model output.
       allowed_mentions: { parse: [], replied_user: false },
     });
