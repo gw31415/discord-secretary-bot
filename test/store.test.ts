@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
+import { selectableModels } from "../src/llm/models.ts";
 import { parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
 
 const master = randomBytes(32);
@@ -49,9 +50,34 @@ test("the model select menus stay within Discord's 25 options", () => {
   assert.match(panel, /llm:model:judge/);
 });
 
+test("every selectable model is offered, with unique custom ids, within the component limit", () => {
+  const store = new Store(":memory:", master);
+  store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
+  store.setApiKey("u1", "opencode-go", "sk-oc-abcdefgh5678");
+  const panel = renderPanel(store, "u1");
+  const selects: { custom_id: string; options: { value: string }[] }[] = [];
+  let components = 0;
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== "object") return;
+    const c = node as { type?: number; custom_id?: string; options?: { value: string }[]; components?: unknown };
+    if (typeof c.type === "number") components++;
+    if (c.type === 3) selects.push(c as (typeof selects)[number]);
+    walk(c.components);
+  };
+  walk(panel.components);
+  assert.ok(components <= 40, `${components} components`);
+  assert.equal(new Set(selects.map((s) => s.custom_id)).size, selects.length);
+  const offered = new Set(selects.filter((s) => s.custom_id.startsWith("llm:model:response")).flatMap((s) => s.options.map((o) => o.value)));
+  for (const provider of ["anthropic", "opencode-go"] as const) {
+    for (const m of selectableModels(provider)) assert.ok(offered.has(`${provider}/${m.id}`), `${provider}/${m.id}`);
+  }
+  assert.ok(offered.has("anthropic/claude-opus-5-5"));
+});
+
 test("custom ids parse into panel actions and reject unknown models", () => {
   assert.deepEqual(parseCustomId("llm:key:anthropic"), { kind: "openKeyModal", provider: "anthropic" });
-  assert.deepEqual(parseCustomId("llm:model:judge", ["anthropic/claude-haiku-4-5"]), {
+  assert.deepEqual(parseCustomId("llm:model:judge:anthropic:0", ["anthropic/claude-haiku-4-5"]), {
     kind: "selectModel", role: "judge", provider: "anthropic", model: "claude-haiku-4-5",
   });
   assert.equal(parseCustomId("llm:model:judge", ["anthropic/not-a-model"]), null);

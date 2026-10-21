@@ -1,14 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { REST } from "@discordjs/rest";
-import { fauxAssistantMessage, fauxText, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider } from "@earendil-works/pi-ai";
+import { llm } from "../src/llm/models.ts";
 import { respond } from "../src/agent/respond.ts";
 import { GuildCache } from "../src/discord/cache.ts";
 import { Reader } from "../src/discord/reader.ts";
 import { GUILD, makeGuild, SELF } from "./helpers.ts";
 
 test("the agent calls read tools through the reader and returns its final text", async () => {
-  const faux = registerFauxProvider();
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
   try {
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall("list_channels", {})], { stopReason: "toolUse" }),
@@ -32,6 +34,6 @@ test("the agent calls read tools through the reader and returns its final text",
     assert.deepEqual(result.toolCalls, ["list_channels", "read_messages"]);
     assert.equal(result.turns, 3);
   } finally {
-    faux.unregister();
+    llm.deleteProvider(faux.provider.id);
   }
 });

@@ -1,5 +1,5 @@
-import { completeSimple } from "@mariozechner/pi-ai";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { llm } from "../llm/models.ts";
 
 // Decides whether a message in an awake channel is addressed to the bot.
 // Mentions and replies never reach here; they are answered deterministically.
@@ -32,7 +32,7 @@ export async function judgeAddressed(input: {
   message: string;
   signal?: AbortSignal;
 }): Promise<Judgement> {
-  const res = await completeSimple(
+  const res = await llm.completeSimple(
     input.model,
     {
       systemPrompt: [

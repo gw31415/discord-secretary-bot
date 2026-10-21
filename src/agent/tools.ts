@@ -1,6 +1,6 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { Type } from "@mariozechner/pi-ai";
-import type { TSchema } from "@mariozechner/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { Type } from "@earendil-works/pi-ai";
+import type { TSchema } from "@earendil-works/pi-ai";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
 import { ChannelType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";

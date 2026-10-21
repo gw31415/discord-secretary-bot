@@ -20,7 +20,8 @@ export const CUSTOM_ID = {
   keyButton: (p: ProviderId) => `llm:key:${p}`,
   deleteButton: (p: ProviderId) => `llm:delkey:${p}`,
   keyModal: (p: ProviderId) => `llm:keymodal:${p}`,
-  modelSelect: (role: ModelRole) => `llm:model:${role}`,
+  // Provider and page only keep custom_ids unique; the chosen value carries the model.
+  modelSelect: (role: ModelRole, p: ProviderId, page: number) => `llm:model:${role}:${p}:${page}`,
 } as const;
 
 export interface SetupStatus {
@@ -42,23 +43,35 @@ export function setupStatus(store: Store, userId: string): SetupStatus {
   return { complete: missing.length === 0, missing };
 }
 
-function modelSelect(store: Store, userId: string, role: ModelRole, placeholder: string): APIActionRowComponent<APIStringSelectComponent> | null {
+const SELECT_LIMIT = 25;
+
+// One select per provider, split into more selects when a provider lists more
+// models than Discord's 25-option limit, so no model is dropped.
+function modelSelects(store: Store, userId: string, role: ModelRole, placeholder: string): APIActionRowComponent<APIStringSelectComponent>[] {
   const providers = store.listKeys(userId).map((k) => k.provider);
   const current = store.getSettings(userId)[role];
-  const options = providers
-    .flatMap((p) => selectableModels(p).map((m) => ({ provider: p, model: m })))
-    .slice(0, 25)
-    .map(({ provider, model }) => ({
-      label: model.name.slice(0, 100),
-      value: `${provider}/${model.id}`,
-      description: `${PROVIDERS[provider].label} · ${model.id}`.slice(0, 100),
-      default: current?.provider === provider && current.model === model.id,
-    }));
-  if (options.length === 0) return null;
-  return {
-    type: ComponentType.ActionRow,
-    components: [{ type: ComponentType.StringSelect, custom_id: CUSTOM_ID.modelSelect(role), placeholder, options }],
-  };
+  return providers.flatMap((provider) => {
+    const models = selectableModels(provider);
+    const pages = Math.ceil(models.length / SELECT_LIMIT);
+    return Array.from({ length: pages }, (_, page) => {
+      const options = models.slice(page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT).map((model) => ({
+        label: model.name.slice(0, 100),
+        value: `${provider}/${model.id}`,
+        description: model.id.slice(0, 100),
+        default: current?.provider === provider && current.model === model.id,
+      }));
+      const suffix = pages > 1 ? ` (${page + 1}/${pages})` : "";
+      return {
+        type: ComponentType.ActionRow,
+        components: [{
+          type: ComponentType.StringSelect,
+          custom_id: CUSTOM_ID.modelSelect(role, provider, page),
+          placeholder: `${placeholder}: ${PROVIDERS[provider].label}${suffix}`.slice(0, 150),
+          options,
+        }],
+      } satisfies APIActionRowComponent<APIStringSelectComponent>;
+    });
+  });
 }
 
 export function renderPanel(store: Store, userId: string, notice?: string): { flags: number; components: APIMessageTopLevelComponent[] } {
@@ -86,14 +99,14 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     { type: ComponentType.Separator },
   ];
 
-  const response = modelSelect(store, userId, "response", "応答に使うモデルを選ぶ");
-  const judge = modelSelect(store, userId, "judge", "宛先判定に使うモデルを選ぶ");
-  if (response && judge) {
+  const response = modelSelects(store, userId, "response", "応答に使うモデル");
+  const judge = modelSelects(store, userId, "judge", "宛先判定に使うモデル");
+  if (response.length > 0 && judge.length > 0) {
     body.push(
       { type: ComponentType.TextDisplay, content: "**応答に使うモデル**(必須)\nBotがあなたに返事をするときに使います。" },
-      response,
+      ...response,
       { type: ComponentType.TextDisplay, content: "**宛先判定に使うモデル**(必須)\nあなたが起こした会話で、発言がBot宛てかを判定するときに使います。軽いモデルがおすすめです。" },
-      judge,
+      ...judge,
     );
   } else {
     body.push({ type: ComponentType.TextDisplay, content: "**モデル**\n先にAPIキーを登録すると、モデルを選べるようになります。" });

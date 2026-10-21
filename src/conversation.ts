@@ -7,7 +7,7 @@ import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
 import { findModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is

@@ -1,8 +1,8 @@
-import { Agent } from "@mariozechner/pi-agent-core";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import { streamSimple } from "@mariozechner/pi-ai";
-import type { Api, AssistantMessage, Model } from "@mariozechner/pi-ai";
+import { Agent } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { Reader } from "../discord/reader.ts";
+import { llm } from "../llm/models.ts";
 import { readTools } from "./tools.ts";
 
 export interface RespondInput {
@@ -73,7 +73,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
     getApiKey: () => apiKey,
     toolExecution: "sequential",
     streamFn: (m, context, options) =>
-      streamSimple(m, context, {
+      llm.streamSimple(m, context, {
         ...options,
         apiKey,
         maxTokens: Math.min(MAX_OUTPUT_TOKENS, m.maxTokens || MAX_OUTPUT_TOKENS),
