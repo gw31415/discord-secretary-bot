@@ -2,8 +2,10 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { open, seal } from "./crypto.ts";
-import { isProviderId } from "./llm/models.ts";
-import type { ProviderId } from "./llm/models.ts";
+import { isKeyProviderId, isProviderId } from "./llm/models.ts";
+import type { KeyProviderId, ProviderId } from "./llm/models.ts";
+import { isWebTool } from "./agent/web.ts";
+import type { WebTool } from "./agent/web.ts";
 import type { Plan, PlanStatus, StepState } from "./plan/types.ts";
 
 // Each entry upgrades the schema by one version. Never edit an applied entry.
@@ -93,6 +95,9 @@ const MIGRATIONS: string[] = [
   ALTER TABLE plans ADD COLUMN undo_of TEXT;
   CREATE INDEX plans_undo_of ON plans (undo_of);
   `,
+  `
+  ALTER TABLE user_settings ADD COLUMN web_tool TEXT;
+  `,
 ];
 
 export interface ModelRef {
@@ -103,10 +108,12 @@ export interface ModelRef {
 export interface UserSettings {
   response: ModelRef | null;
   judge: ModelRef | null;
+  /** The web service the agent uses. Unset means the response model's own. */
+  web: WebTool;
 }
 
 export interface KeySummary {
-  provider: ProviderId;
+  provider: KeyProviderId;
   last4: string;
 }
 
@@ -174,7 +181,7 @@ export class Store {
 
   // --- API keys -----------------------------------------------------------
 
-  setApiKey(userId: string, provider: ProviderId, apiKey: string): void {
+  setApiKey(userId: string, provider: KeyProviderId, apiKey: string): void {
     const sealed = seal(this.#masterKey, apiKey, `${userId}:${provider}`);
     this.db
       .prepare(
@@ -187,11 +194,11 @@ export class Store {
       .run(userId, provider, sealed.ciphertext, sealed.wrappedDek, apiKey.slice(-4), new Date().toISOString());
   }
 
-  deleteApiKey(userId: string, provider: ProviderId): boolean {
+  deleteApiKey(userId: string, provider: KeyProviderId): boolean {
     return this.db.prepare("DELETE FROM api_keys WHERE user_id = ? AND provider = ?").run(userId, provider).changes > 0;
   }
 
-  getApiKey(userId: string, provider: ProviderId): string | undefined {
+  getApiKey(userId: string, provider: KeyProviderId): string | undefined {
     const row = this.db
       .prepare("SELECT ciphertext, wrapped_dek FROM api_keys WHERE user_id = ? AND provider = ?")
       .get(userId, provider) as { ciphertext: Buffer; wrapped_dek: Buffer } | undefined;
@@ -204,21 +211,27 @@ export class Store {
     const rows = this.db
       .prepare("SELECT provider, last4 FROM api_keys WHERE user_id = ? ORDER BY provider")
       .all(userId) as { provider: string; last4: string }[];
-    return rows.filter((r): r is KeySummary => isProviderId(r.provider));
+    return rows.filter((r): r is KeySummary => isKeyProviderId(r.provider));
   }
 
   // --- Model settings -----------------------------------------------------
 
   getSettings(userId: string): UserSettings {
     const row = this.db.prepare("SELECT * FROM user_settings WHERE user_id = ?").get(userId) as
-      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null }
+      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; web_tool: string | null }
       | undefined;
     const ref = (provider: string | null | undefined, model: string | null | undefined): ModelRef | null =>
       provider && model && isProviderId(provider) ? { provider, model } : null;
     return {
       response: ref(row?.default_provider, row?.default_model),
       judge: ref(row?.judge_provider, row?.judge_model),
+      web: row?.web_tool && isWebTool(row.web_tool) ? row.web_tool : "auto",
     };
+  }
+
+  setWebTool(userId: string, tool: WebTool): void {
+    this.db.prepare("INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING").run(userId);
+    this.db.prepare("UPDATE user_settings SET web_tool = ? WHERE user_id = ?").run(tool, userId);
   }
 
   setModel(userId: string, role: "response" | "judge", ref: ModelRef | null): void {

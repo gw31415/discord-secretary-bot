@@ -30,7 +30,7 @@ test("the agent calls read tools through the reader and returns its final text",
     const reader = new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "2" }, { maxMessages: 500 });
     const result = await respond({
       model: faux.getModel(), apiKey: "k", reader, botName: "bot",
-      transcript: [], target: "[1] user: チャンネルを教えて", webSearch: false,
+      transcript: [], target: "[1] user: チャンネルを教えて", web: null,
     });
     assert.equal(result.text, "チャンネルは #general です");
     assert.deepEqual(result.toolCalls, ["list_channels", "read_messages"]);
@@ -59,7 +59,7 @@ test("writes go through propose_plan only when proposing is allowed", async () =
       fauxAssistantMessage([fauxText("チャンネル作成を提案しました")]),
     ]);
     const result = await respond({
-      model: faux.getModel(), apiKey: "k", reader, botName: "bot", transcript: [], target: "[1] owner: newを作って", webSearch: false,
+      model: faux.getModel(), apiKey: "k", reader, botName: "bot", transcript: [], target: "[1] owner: newを作って", web: null,
       propose: async (drafts) => {
         proposed.push(...drafts);
         return { id: "p1", steps: drafts, risk: "write" } as never;
@@ -105,7 +105,7 @@ test("text beside a tool call is posted as progress, and a message sent meanwhil
     const inbox = new Inbox();
     const progress: string[] = [];
     const result = await respond({
-      model: faux.getModel(), apiKey: "k", reader, botName: "bot", transcript: [], target: "[1] owner: チャンネルは?", webSearch: false,
+      model: faux.getModel(), apiKey: "k", reader, botName: "bot", transcript: [], target: "[1] owner: チャンネルは?", web: null,
       inbox,
       onProgress: async (text) => {
         progress.push(text);

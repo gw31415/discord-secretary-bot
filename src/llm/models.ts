@@ -13,6 +13,15 @@ export const PROVIDERS = {
 } as const;
 
 export type ProviderId = keyof typeof PROVIDERS;
+
+/** Every key a person can register: the LLM providers, plus services the agent's tools call. */
+export const KEY_PROVIDERS = {
+  ...PROVIDERS,
+  // Web search and page reading for any model (src/agent/web.ts).
+  tavily: { label: "Tavily" },
+} as const;
+
+export type KeyProviderId = keyof typeof KEY_PROVIDERS;
 export type ModelRole = "response" | "judge";
 
 /** Answers use a chat model; judgment takes a chat model or a classifier. */
@@ -20,6 +29,10 @@ export type JudgeModel = Model<Api> | ClassifierModel<ClassifierApi>;
 
 export function isProviderId(value: string): value is ProviderId {
   return Object.hasOwn(PROVIDERS, value);
+}
+
+export function isKeyProviderId(value: string): value is KeyProviderId {
+  return Object.hasOwn(KEY_PROVIDERS, value);
 }
 
 /** The model collection every LLM call goes through. Keys are passed per request. */

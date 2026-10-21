@@ -3,7 +3,8 @@ import { InteractionType, MessageFlags } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
 import { modalValue } from "./discord/modal.ts";
-import { PROVIDERS } from "./llm/models.ts";
+import { WEB_TOOLS } from "./agent/web.ts";
+import { KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
 import { keyModal, parseCustomId, renderPanel } from "./llm/panel.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
@@ -40,7 +41,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `${PROVIDERS[action.provider].label}のキーを削除しました`),
+          panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを削除しました`),
         );
         return;
       }
@@ -55,6 +56,16 @@ export async function handleInteraction(api: API, store: Store, interaction: API
           notice = `${PROVIDERS[action.provider].label}のキーが登録されていません`;
         }
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
+        return;
+      }
+      case "selectWeb": {
+        store.setWebTool(userId, action.tool);
+        store.audit(actor, "llm.web.set", { tool: action.tool });
+        await api.interactions.updateMessage(
+          interaction.id,
+          interaction.token,
+          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`),
+        );
         return;
       }
       default:
@@ -72,7 +83,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
     await api.interactions.updateMessage(
       interaction.id,
       interaction.token,
-      panelUpdate(store, userId, `${PROVIDERS[action.provider].label}のキーを保存しました`),
+      panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを保存しました`),
     );
   }
 }

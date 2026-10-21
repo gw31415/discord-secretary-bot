@@ -3,6 +3,7 @@ import type { Store } from "./db.ts";
 import { formatMessage } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
+import { resolveWebAccess } from "./agent/web.ts";
 import { Inbox } from "./agent/respond.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
@@ -28,6 +29,7 @@ export interface ConversationDeps {
   selfId: () => string;
   botName: () => string;
   now: () => number;
+  /** False turns the web off for everyone, whatever each person chose in /llm. */
   webSearch: boolean;
   fetchBefore: (channelId: string, beforeId: string, limit: number) => Promise<APIMessage[]>;
   /** replyToId is null for follow-up posts, which read as a natural series. */
@@ -290,6 +292,9 @@ export class Conversations {
     const ref = store.getSettings(speaker).response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
+    const web = this.deps.webSearch
+      ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p))
+      : null;
     const reader = this.deps.makeReader({ guildId: input.guildId, channelId, speakerId: speaker });
 
     await this.deps.typing(channelId).catch(() => undefined);
@@ -306,7 +311,7 @@ export class Conversations {
     };
     let progress = 0;
     let text: string;
-    let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}` };
+    let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}`, web: web?.kind ?? null };
     try {
       const result = await this.deps.respond({
         model,
@@ -317,7 +322,7 @@ export class Conversations {
         styleSamples: input.context.styleSamples,
         target: input.target,
         images: input.images,
-        webSearch: this.deps.webSearch,
+        web,
         inbox,
         onProgress: async (content) => {
           await post(content);
