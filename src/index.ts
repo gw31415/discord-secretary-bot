@@ -64,21 +64,25 @@ const conversations = new Conversations({
   log,
 });
 
-client.once(GatewayDispatchEvents.Ready, async ({ data, api }) => {
+client.once(GatewayDispatchEvents.Ready, ({ data }) => {
   selfId = data.user.id;
   botName = data.user.global_name ?? data.user.username;
   log(`${data.user.username} としてログインしました`);
+  if (!data.guilds.some((g) => g.id === config.guildId)) {
+    log(`Botがサーバー ${config.guildId} に参加していません。招待されると自動で準備します`);
+  }
+});
+
+// Registering on GUILD_CREATE (not READY) also covers the bot being invited while running.
+client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
+  if (data.id !== config.guildId) return;
+  cache.loadGuild(data);
   try {
     const changed = await registerCommands(api, store, config.applicationId, config.guildId);
     log(changed ? "ギルドコマンドを登録しました" : "ギルドコマンドは変更なし");
   } catch (e) {
     log("ギルドコマンドの登録に失敗", e);
   }
-});
-
-client.on(GatewayDispatchEvents.GuildCreate, async ({ data }) => {
-  if (data.id !== config.guildId) return;
-  cache.loadGuild(data);
   // GUILD_CREATE only carries some members; fetch the rest for audience checks.
   try {
     for await (const { members } of client.requestGuildMembersIterator({ guild_id: data.id, query: "", limit: 0 })) {
