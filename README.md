@@ -1,4 +1,4 @@
-# discord-admin-bot
+# discord-secretary-bot
 
 内輪の1サーバー向けの管理者Discord Botです。設計は「管理者Discord Bot 設計書」と「詳細仕様」にあります。
 

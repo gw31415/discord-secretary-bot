@@ -1,5 +1,5 @@
 {
-  "name": "discord-admin-bot",
+  "name": "discord-secretary-bot",
   "version": "0.1.0",
   "description": "Admin Discord bot with pi agent, Plan-based writes and event rules",
   "main": "src/index.ts",
@@ -10,13 +10,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gw31415/discord-admin-bot.git"
+    "url": "git+https://github.com/gw31415/discord-secretary-bot.git"
   },
   "license": "UNLICENSED",
   "bugs": {
-    "url": "https://github.com/gw31415/discord-admin-bot/issues"
+    "url": "https://github.com/gw31415/discord-secretary-bot/issues"
   },
-  "homepage": "https://github.com/gw31415/discord-admin-bot#readme",
+  "homepage": "https://github.com/gw31415/discord-secretary-bot#readme",
   "dependencies": {
     "@discordjs/core": "^2.6.0",
     "@discordjs/rest": "^2.6.3",
