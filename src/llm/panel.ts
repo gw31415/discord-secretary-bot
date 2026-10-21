@@ -8,8 +8,10 @@ import type {
   APIStringSelectComponent,
 } from "discord-api-types/v10";
 import type { Store } from "../db.ts";
-import { findModel, isProviderId, PROVIDERS, selectableModels } from "./models.ts";
-import type { ModelRole, ProviderId } from "./models.ts";
+import { isWebTool, WEB_TOOLS, webToolWarning } from "../agent/web.ts";
+import type { WebTool } from "../agent/web.ts";
+import { findModel, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels } from "./models.ts";
+import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 
 export type { ModelRole };
 
@@ -18,11 +20,12 @@ export type { ModelRole };
 
 
 export const CUSTOM_ID = {
-  keyButton: (p: ProviderId) => `llm:key:${p}`,
-  deleteButton: (p: ProviderId) => `llm:delkey:${p}`,
-  keyModal: (p: ProviderId) => `llm:keymodal:${p}`,
+  keyButton: (p: KeyProviderId) => `llm:key:${p}`,
+  deleteButton: (p: KeyProviderId) => `llm:delkey:${p}`,
+  keyModal: (p: KeyProviderId) => `llm:keymodal:${p}`,
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
   modelSelect: (role: ModelRole, p: ProviderId, page: number) => `llm:model:${role}:${p}:${page}`,
+  webSelect: "llm:web:tool",
 } as const;
 
 export interface SetupStatus {
@@ -34,7 +37,7 @@ export function setupStatus(store: Store, userId: string): SetupStatus {
   const keys = new Set(store.listKeys(userId).map((k) => k.provider));
   const settings = store.getSettings(userId);
   const missing: string[] = [];
-  if (keys.size === 0) missing.push("APIキー");
+  if (![...keys].some(isProviderId)) missing.push("APIキー");
   for (const [role, label] of [["response", "応答に使うモデル"], ["judge", "宛先判定に使うモデル"]] as const) {
     const ref = settings[role];
     if (!ref) missing.push(label);
@@ -49,7 +52,7 @@ const SELECT_LIMIT = 25;
 // One select per provider, split into more selects when a provider lists more
 // models than Discord's 25-option limit, so no model is dropped.
 function modelSelects(store: Store, userId: string, role: ModelRole, placeholder: string): APIActionRowComponent<APIStringSelectComponent>[] {
-  const providers = store.listKeys(userId).map((k) => k.provider);
+  const providers = store.listKeys(userId).map((k) => k.provider).filter(isProviderId);
   const current = store.getSettings(userId)[role];
   return providers.flatMap((provider) => {
     const models = selectableModels(provider, role);
@@ -79,17 +82,18 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
   const keys = new Map(store.listKeys(userId).map((k) => [k.provider, k.last4]));
   const status = setupStatus(store, userId);
 
-  const keyLines = (Object.keys(PROVIDERS) as ProviderId[]).map((p) => {
+  const keyLines = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p) => {
     const last4 = keys.get(p);
-    return `${PROVIDERS[p].label}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
+    const note = p === "tavily" ? "(Web検索用)" : "";
+    return `${KEY_PROVIDERS[p].label}${note}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
   });
   // One row per provider: an action row holds at most five buttons.
-  const buttonRows = (Object.keys(PROVIDERS) as ProviderId[]).map((p): APIComponentInContainer => {
+  const buttonRows = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p): APIComponentInContainer => {
     const registered = keys.has(p);
     const list: APIButtonComponent[] = [
-      { type: ComponentType.Button, style: ButtonStyle.Primary, custom_id: CUSTOM_ID.keyButton(p), label: `${PROVIDERS[p].label}のキーを${registered ? "差し替え" : "登録"}` },
+      { type: ComponentType.Button, style: ButtonStyle.Primary, custom_id: CUSTOM_ID.keyButton(p), label: `${KEY_PROVIDERS[p].label}のキーを${registered ? "差し替え" : "登録"}` },
     ];
-    if (registered) list.push({ type: ComponentType.Button, style: ButtonStyle.Danger, custom_id: CUSTOM_ID.deleteButton(p), label: `${PROVIDERS[p].label}のキーを削除` });
+    if (registered) list.push({ type: ComponentType.Button, style: ButtonStyle.Danger, custom_id: CUSTOM_ID.deleteButton(p), label: `${KEY_PROVIDERS[p].label}のキーを削除` });
     return { type: ComponentType.ActionRow, components: list };
   });
 
@@ -116,6 +120,8 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     body.push({ type: ComponentType.TextDisplay, content: "**モデル**\n先にAPIキーを登録すると、モデルを選べるようになります。" });
   }
 
+  body.push(...webSection(store, userId));
+
   body.push(
     { type: ComponentType.Separator },
     {
@@ -133,10 +139,36 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
   };
 }
 
-export function keyModal(provider: ProviderId): APIModalInteractionResponseCallbackData {
+// Not required for setup: the bot answers without the web when none works.
+function webSection(store: Store, userId: string): APIComponentInContainer[] {
+  const settings = store.getSettings(userId);
+  const keys = new Set(store.listKeys(userId).map((k) => k.provider));
+  const warning = webToolWarning(settings.web, settings.response?.provider, keys);
+  return [
+    { type: ComponentType.Separator },
+    { type: ComponentType.TextDisplay, content: "**Webツール**\nBotがWebを検索したりページを読んだりするときに使います。" },
+    {
+      type: ComponentType.ActionRow,
+      components: [{
+        type: ComponentType.StringSelect,
+        custom_id: CUSTOM_ID.webSelect,
+        placeholder: "Webツール",
+        options: (Object.keys(WEB_TOOLS) as WebTool[]).map((tool) => ({
+          label: WEB_TOOLS[tool].label,
+          value: tool,
+          description: WEB_TOOLS[tool].description.slice(0, 100),
+          default: settings.web === tool,
+        })),
+      }],
+    },
+    ...(warning ? [{ type: ComponentType.TextDisplay, content: `-# ⚠️ ${warning}` } satisfies APIComponentInContainer] : []),
+  ];
+}
+
+export function keyModal(provider: KeyProviderId): APIModalInteractionResponseCallbackData {
   return {
     custom_id: CUSTOM_ID.keyModal(provider),
-    title: `${PROVIDERS[provider].label}のAPIキー`,
+    title: `${KEY_PROVIDERS[provider].label}のAPIキー`,
     components: [
       {
         type: ComponentType.ActionRow,
@@ -158,18 +190,23 @@ export function keyModal(provider: ProviderId): APIModalInteractionResponseCallb
 }
 
 export type PanelAction =
-  | { kind: "openKeyModal"; provider: ProviderId }
-  | { kind: "deleteKey"; provider: ProviderId }
-  | { kind: "submitKey"; provider: ProviderId }
-  | { kind: "selectModel"; role: ModelRole; provider: ProviderId; model: string };
+  | { kind: "openKeyModal"; provider: KeyProviderId }
+  | { kind: "deleteKey"; provider: KeyProviderId }
+  | { kind: "submitKey"; provider: KeyProviderId }
+  | { kind: "selectModel"; role: ModelRole; provider: ProviderId; model: string }
+  | { kind: "selectWeb"; tool: WebTool };
 
 /** Parses a custom_id (and select value) into an action. Unknown ids return null. */
 export function parseCustomId(customId: string, values: string[] = []): PanelAction | null {
   const [ns, kind, arg] = customId.split(":");
   if (ns !== "llm" || !arg) return null;
-  if (kind === "key" && isProviderId(arg)) return { kind: "openKeyModal", provider: arg };
-  if (kind === "delkey" && isProviderId(arg)) return { kind: "deleteKey", provider: arg };
-  if (kind === "keymodal" && isProviderId(arg)) return { kind: "submitKey", provider: arg };
+  if (kind === "key" && isKeyProviderId(arg)) return { kind: "openKeyModal", provider: arg };
+  if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
+  if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
+  if (kind === "web" && arg === "tool") {
+    const tool = values[0] ?? "";
+    return isWebTool(tool) ? { kind: "selectWeb", tool } : null;
+  }
   if (kind === "model" && (arg === "response" || arg === "judge")) {
     const value = values[0] ?? "";
     const slash = value.indexOf("/");

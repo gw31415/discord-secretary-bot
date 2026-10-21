@@ -1,16 +1,21 @@
 import { Client, GatewayDispatchEvents, GatewayIntentBits } from "@discordjs/core";
 import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
+import { PresenceUpdateStatus } from "discord-api-types/v10";
 import { judgeAddressed } from "./agent/judge.ts";
 import { respond } from "./agent/respond.ts";
+import { summarizeCode } from "./agent/summarize.ts";
 import { loadConfig } from "./config.ts";
 import { Conversations, MAX_MESSAGES_PER_REPLY } from "./conversation.ts";
 import type { GuildMessage } from "./conversation.ts";
 import { Store } from "./db.ts";
 import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
+import { Presence } from "./discord/presence.ts";
 import { Reader } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
+import { findChatModel } from "./llm/models.ts";
+import { Planner } from "./plan/service.ts";
 
 const config = loadConfig();
 const store = new Store(config.dbPath, config.masterKey);
@@ -29,8 +34,19 @@ const gateway = new WebSocketManager({
     GatewayIntentBits.GuildMembers |
     GatewayIntentBits.GuildMessages |
     GatewayIntentBits.MessageContent,
+  // Asleep until someone talks to it.
+  initialPresence: { status: PresenceUpdateStatus.Idle, activities: [], since: null, afk: true },
 });
 const client = new Client({ rest, gateway });
+
+const presence = new Presence({
+  awakeUntil: (now) => store.awakeUntil(now),
+  send: async (data) => {
+    for (const shardId of await gateway.getShardIds()) await client.updatePresence(shardId, data);
+  },
+  now: () => Date.now(),
+  log,
+});
 
 let selfId = "";
 let botName = "Bot";
@@ -40,6 +56,24 @@ function log(message: string, error?: unknown): void {
   if (error) console.error(`${time} ${message}`, error);
   else console.log(`${time} ${message}`);
 }
+
+const planner = new Planner({
+  api: client.api,
+  store,
+  caches,
+  selfId: () => selfId,
+  now: () => Date.now(),
+  log,
+  revise: (input) => conversations.revise(input),
+  // The actor's own response model and key, as for their conversation.
+  summarize: async (code, actorId) => {
+    const ref = store.getSettings(actorId).response;
+    const model = ref && findChatModel(ref.provider, ref.model);
+    const apiKey = ref && store.getApiKey(actorId, ref.provider);
+    if (!model || !apiKey) return null;
+    return summarizeCode({ model, apiKey, code });
+  },
+});
 
 const conversations = new Conversations({
   store,
@@ -68,7 +102,15 @@ const conversations = new Conversations({
   },
   respond,
   judge: judgeAddressed,
+  propose: (input) => planner.propose(input),
+  onAwake: () => presence.refresh(),
   log,
+});
+
+// Every (re)connection starts from the initial presence, so the status is sent again.
+client.on(GatewayDispatchEvents.Ready, () => {
+  presence.reset();
+  presence.refresh();
 });
 
 client.once(GatewayDispatchEvents.Ready, ({ data }) => {
@@ -135,9 +177,15 @@ client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
   void conversations.handle(data as GuildMessage);
 });
 
+client.on(GatewayDispatchEvents.MessageUpdate, ({ data }) => {
+  if (!data.guild_id || !caches.get(data.guild_id)?.guild) return;
+  conversations.edited(data);
+});
+
 client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
   if (!caches.get(data.guild_id)) return;
   try {
+    if (await planner.handleInteraction(data)) return;
     await handleInteraction(api, store, data);
   } catch (e) {
     log("インタラクションの処理に失敗", e);
@@ -148,11 +196,15 @@ function guildOf(channel: object): string | undefined {
   return "guild_id" in channel ? (channel.guild_id as string | undefined) : undefined;
 }
 
-const sweeper = setInterval(() => conversations.sweep(), 60_000);
+const sweeper = setInterval(() => {
+  conversations.sweep();
+  planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
+}, 60_000);
 
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
+  presence.stop();
   await gateway.destroy();
   store.close();
   process.exit(0);
@@ -160,4 +212,6 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
+// Plans a restart cut off are marked failed (and can be resumed) before anything else runs.
+await planner.recover().catch((e) => log("中断された変更の後始末に失敗", e));
 await gateway.connect();

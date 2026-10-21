@@ -1,22 +1,14 @@
 import type { API } from "@discordjs/core";
-import { ComponentType, InteractionType, MessageFlags } from "discord-api-types/v10";
-import type { APIInteraction, APIModalSubmitInteraction } from "discord-api-types/v10";
+import { InteractionType, MessageFlags } from "discord-api-types/v10";
+import type { APIInteraction } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
-import { PROVIDERS } from "./llm/models.ts";
+import { modalValue } from "./discord/modal.ts";
+import { WEB_TOOLS } from "./agent/web.ts";
+import { KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
 import { keyModal, parseCustomId, renderPanel } from "./llm/panel.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
 // within 3 seconds; everything here is a local DB operation, so no defer is needed.
-
-function modalValue(interaction: APIModalSubmitInteraction, customId: string): string | undefined {
-  for (const row of interaction.data.components) {
-    const inner = "components" in row ? row.components : "component" in row ? [row.component] : [];
-    for (const c of inner) {
-      if (c.type === ComponentType.TextInput && c.custom_id === customId) return c.value;
-    }
-  }
-  return undefined;
-}
 
 function panelUpdate(store: Store, userId: string, notice?: string) {
   // UPDATE_MESSAGE cannot change the ephemeral flag, so only Components V2 is sent.
@@ -49,7 +41,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `${PROVIDERS[action.provider].label}のキーを削除しました`),
+          panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを削除しました`),
         );
         return;
       }
@@ -64,6 +56,16 @@ export async function handleInteraction(api: API, store: Store, interaction: API
           notice = `${PROVIDERS[action.provider].label}のキーが登録されていません`;
         }
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
+        return;
+      }
+      case "selectWeb": {
+        store.setWebTool(userId, action.tool);
+        store.audit(actor, "llm.web.set", { tool: action.tool });
+        await api.interactions.updateMessage(
+          interaction.id,
+          interaction.token,
+          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`),
+        );
         return;
       }
       default:
@@ -81,7 +83,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
     await api.interactions.updateMessage(
       interaction.id,
       interaction.token,
-      panelUpdate(store, userId, `${PROVIDERS[action.provider].label}のキーを保存しました`),
+      panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを保存しました`),
     );
   }
 }

@@ -21,7 +21,7 @@ function message(id: string, author: string, content: string, extra: Partial<API
 
 const mention = { id: SELF, username: "bot", discriminator: "0", global_name: null, avatar: null };
 
-function setup(opts: { judge?: { addressed: boolean; confidence: number } } = {}) {
+function setup(opts: { judge?: { addressed: boolean; confidence: number }; respond?: ConversationDeps["respond"] } = {}) {
   const store = new Store(":memory:", randomBytes(32));
   for (const user of ["1", "2"]) {
     store.setApiKey(user, "anthropic", `sk-ant-key-for-${user}`);
@@ -43,7 +43,7 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number } } = {}
     makeReader: () => ({ messagesRead: 0 }) as unknown as Reader,
     respond: async (input) => {
       responded.push({ apiKey: input.apiKey, target: input.target });
-      return { text: "answer", turns: 1, toolCalls: [] };
+      return opts.respond ? opts.respond(input) : { text: "answer", progress: 0, turns: 1, toolCalls: [] };
     },
     judge: async (input) => {
       judged.push(input.apiKey);
@@ -154,4 +154,78 @@ test("style samples keep only human messages, while the transcript keeps everyth
   const hook = message("3", "4", "webhookの投稿", { webhook_id: "77" });
   const empty = message("4", "3", "   ");
   assert.deepEqual(styleSamples([human, bot, hook, empty]), ["おはよう"]);
+});
+
+test("progress goes out while the agent works, and the answer follows", async () => {
+  const t = setup({
+    respond: async (input) => {
+      await input.onProgress!("ロールを調べます");
+      return { text: "answer", progress: 1, turns: 2, toolCalls: ["list_channels"] };
+    },
+  });
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(t.replies, ["ロールを調べます", "answer"]);
+});
+
+test("nothing more is posted when progress already said it all", async () => {
+  const t = setup({
+    respond: async (input) => {
+      await input.onProgress!("変更案を出します");
+      return { text: "", progress: 1, turns: 2, toolCalls: ["propose_plan"] };
+    },
+  });
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(t.replies, ["変更案を出します"]);
+});
+
+test("the speaker's follow-ups and edits reach the answer being worked on", async () => {
+  const delivered: string[] = [];
+  let finish!: () => void;
+  const working = new Promise<void>((resolve) => (finish = resolve));
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => (started = resolve));
+  const t = setup({
+    respond: async (input) => {
+      input.inbox!.open((text) => delivered.push(text));
+      started();
+      await working;
+      input.inbox!.close();
+      return { text: "answer", progress: 0, turns: 1, toolCalls: [] };
+    },
+  });
+  const first = t.conv.handle(message("1", "1", "<@999> 一覧を", { mentions: [mention] }));
+  await ready;
+  await t.conv.handle(message("2", "1", "あとロールも"));
+  t.conv.edited(message("1", "1", "<@999> チャンネル一覧を"));
+  // Someone else's edit, or an edit to an unrelated message, is not passed on.
+  t.conv.edited(message("1", "2", "x"));
+  t.conv.edited(message("7", "1", "y"));
+  finish();
+  await first;
+  assert.equal(t.responded.length, 1);
+  assert.equal(delivered.length, 2);
+  assert.match(delivered[0]!, /^\[追いコメント\].*あとロールも/);
+  assert.match(delivered[1]!, /^\[編集\].*チャンネル一覧を/);
+  assert.deepEqual(t.replies, ["answer"]);
+
+  // Once the answer is out, a new message is a new turn.
+  await t.conv.handle(message("3", "1", "ありがとう"));
+  assert.equal(t.responded.length, 2);
+});
+
+test("waking and answering report that a conversation is awake", async () => {
+  let awake = 0;
+  const t = setup();
+  t.conv.deps.onAwake = () => void awake++;
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.equal(awake, 2);
+});
+
+test("the store reports how long any channel stays awake", () => {
+  const store = new Store(":memory:", randomBytes(32));
+  assert.equal(store.awakeUntil(100), undefined);
+  store.saveConversation({ channelId: "10", startedBy: "1", awakeUntil: 200 });
+  store.saveConversation({ channelId: "11", startedBy: "1", awakeUntil: 300 });
+  assert.equal(store.awakeUntil(100), 300);
+  assert.equal(store.awakeUntil(300), undefined);
 });

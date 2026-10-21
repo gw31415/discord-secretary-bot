@@ -55,7 +55,12 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "typesafe", "ts-abcdefgh5678");
   store.setApiKey("u1", "zai", "glm-abcdefgh9012");
+  store.setApiKey("u1", "tavily", "tvly-abcdefgh3456");
+  // A warning line is the most the web section ever adds.
+  store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
+  store.setWebTool("u1", "anthropic");
   const panel = renderPanel(store, "u1");
+  assert.match(JSON.stringify(panel), /応答モデルがClaudeではない/);
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
   const walk = (node: unknown): void => {
@@ -91,6 +96,10 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:judge:typesafe:0", ["typesafe/jev-latest"])?.kind, "selectModel");
   assert.equal(parseCustomId("llm:model:response:typesafe:0", ["typesafe/jev-latest"]), null);
   assert.equal(parseCustomId("llm:key:openai"), null);
+  assert.deepEqual(parseCustomId("llm:key:tavily"), { kind: "openKeyModal", provider: "tavily" });
+  assert.deepEqual(parseCustomId("llm:web:tool", ["tavily"]), { kind: "selectWeb", tool: "tavily" });
+  assert.equal(parseCustomId("llm:web:tool", ["bing"]), null);
+  assert.equal(parseCustomId("llm:model:response:tavily:0", ["tavily/search"]), null);
   assert.equal(parseCustomId("plan:run:1"), null);
 });
 
@@ -118,4 +127,14 @@ test("keys and settings of providers the bot dropped are ignored", () => {
   assert.deepEqual(store.listKeys("u1").map((k) => k.provider), ["anthropic"]);
   assert.equal(store.getSettings("u1").response, null);
   assert.doesNotThrow(() => renderPanel(store, "u1"));
+});
+
+test("a Tavily key alone does not complete setup, and the web tool defaults to the model's own", () => {
+  const store = new Store(":memory:", master);
+  store.setApiKey("u1", "tavily", "tvly-abcdefgh3456");
+  assert.ok(setupStatus(store, "u1").missing.includes("APIキー"));
+  assert.equal(store.getSettings("u1").web, "auto");
+  store.setWebTool("u1", "tavily");
+  assert.equal(store.getSettings("u1").web, "tavily");
+  assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1")), /llm:model:response:tavily/);
 });
