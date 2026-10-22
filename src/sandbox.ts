@@ -1,5 +1,6 @@
 import { newAsyncContext, shouldInterruptAfterDeadline } from "quickjs-emscripten";
 import type { QuickJSAsyncContext, QuickJSHandle } from "quickjs-emscripten";
+import { CANVAS_PRELUDE, MAX_IMAGES_PER_RUN, measureText, renderCanvas } from "./canvas.ts";
 
 // Read-only code execution. The code runs in QuickJS inside WebAssembly and can
 // only reach the bindings passed in here: no network, files, timers or host objects.
@@ -21,6 +22,8 @@ export interface SandboxBindings {
    */
   state?: unknown;
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
+  /** Enables createCanvas()/attachImage(); takes the drawn PNG and returns the image's id. */
+  attach?: (png: Buffer, name: string) => string;
 }
 
 export interface SandboxLimits {
@@ -86,6 +89,17 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     vm.setProp(vm.global, "discord", discord);
     discord.dispose();
 
+    let attached = 0;
+    if (bindings.attach) {
+      const attach = bindings.attach;
+      vm.newFunction("__attach", (w, h, opsJson, name) => {
+        if (++attached > MAX_IMAGES_PER_RUN) throw new Error(`attachImage は1回の実行で${MAX_IMAGES_PER_RUN}回までです`);
+        const png = renderCanvas(vm.dump(w), vm.dump(h), JSON.parse(vm.getString(opsJson)));
+        return vm.newString(attach(png, vm.getString(name)));
+      }).consume((fn) => vm.setProp(vm.global, "__attach", fn));
+      vm.newFunction("__measure", (font, text) => toHandle(vm, measureText(vm.getString(font), vm.getString(text)))).consume((fn) => vm.setProp(vm.global, "__measure", fn));
+    }
+
     vm.newFunction("log", (...args) => {
       logs.push(args.map((a) => JSON.stringify(vm.dump(a))).join(" ").slice(0, 2000));
     }).consume((fn) => vm.setProp(vm.global, "log", fn));
@@ -93,9 +107,10 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     // Wrapped so the code can `return` its answer; JSON keeps host and guest values apart.
     // call()/rule()/plan() only build plain objects: a returned plan is a proposal, not a write.
     // setState keeps a JSON copy, so later changes to the object do not leak into what is saved.
+    const prelude = bindings.attach ? `${PRELUDE}\n${CANVAS_PRELUDE}` : PRELUDE;
     const wrapped = stateful
-      ? `${PRELUDE}\nvar __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`
-      : `${PRELUDE}\nJSON.stringify((function () {\n${code}\n})())`;
+      ? `${prelude}\nvar __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`
+      : `${prelude}\nJSON.stringify((function () {\n${code}\n})())`;
     const result = await vm.evalCodeAsync(wrapped, "agent.js");
     if (result.error) {
       const err = vm.dump(result.error) as { name?: string; message?: string } | string;

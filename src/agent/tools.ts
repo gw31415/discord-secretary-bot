@@ -8,6 +8,7 @@ import type { Reader } from "../discord/reader.ts";
 import { downloadImages, imageRefs, MAX_IMAGES } from "./images.ts";
 import { CodeFailed, syntaxError } from "./coder.ts";
 import type { CodeEnv, Coder, CodeKind } from "./coder.ts";
+import type { ImageBox } from "./attachments.ts";
 import { AGENT_SANDBOX_LIMITS, RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { SandboxBindings } from "../sandbox.ts";
 import { catalogSummary } from "../plan/catalog.ts";
@@ -89,6 +90,8 @@ export interface ToolOptions {
   rules?: RuleTools;
   /** The speaker's coding model. When set, the agent describes code and this writes it. */
   coder?: Coder;
+  /** Where run_code's drawings go; when set, the code can draw with createCanvas(). */
+  attachments?: ImageBox;
 }
 
 export type Propose = (drafts: StepDraft[], code?: string, rules?: RuleProposal[]) => Promise<Plan>;
@@ -181,6 +184,27 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   });
 
   const sandboxBindings = bindingsOf(reader);
+  const box = options.attachments;
+  /** Runs code whose drawings go into the reply's box; a failed run leaves none behind. */
+  const runDrawing = async (code: string) => {
+    const made: string[] = [];
+    const result = await runSandboxed(code, box ? { ...sandboxBindings, attach: (png, name) => (made.push(box.add({ data: png, name: `${name || "image"}.png` })), made.at(-1)!) } : sandboxBindings, AGENT_SANDBOX_LIMITS);
+    if (!result.ok) box?.discard(made);
+    return { result, made: result.ok ? made : [] };
+  };
+  /** The coder's trial runs draw too, but nothing is kept. */
+  const trialBindings: SandboxBindings = box ? { ...sandboxBindings, attach: () => "img0" } : sandboxBindings;
+  const drawn = (ids: string[]) => {
+    if (!box || ids.length === 0) return [];
+    const all = box.all();
+    return [
+      { type: "text" as const, text: `\n画像 ${ids.join(", ")} を用意しました。返答に添付されます。propose_plan の投稿に付けるときは body の files にIDを入れます。` },
+      ...(options.images ? ids.map((id) => ({ type: "image" as const, data: all[id]!.data, mimeType: "image/png" })) : []),
+    ];
+  };
+  const CANVAS_LINE = box
+    ? "画像も描けます: const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します(画像のIDが返ります。1回4枚、縦横2048pxまで)。"
+    : "";
 
   const runCode = tool({
     name: "run_code",
@@ -189,13 +213,14 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       "読み取り専用のJavaScriptを実行し、returnした値をJSONで返します。複数のAPIを組み合わせる集計に使います。",
       "使えるもの: guild(サーバーID), actor, discord.get(route, { query }) (同期関数。例: discord.get(`/guilds/${guild}/roles`)), log(...)。",
       "読めるのは許可された経路だけで、結果は今のチャンネルで扱える範囲に絞られます。ネットワーク・タイマー・ファイルはありません。",
+      ...(CANVAS_LINE ? [CANVAS_LINE] : []),
     ].join("\n"),
     parameters: Type.Object({ code: Type.String({ description: "関数本体。最後に return で結果を返す" }) }),
     execute: async (_id, params) => {
-      const result = await runSandboxed(params.code, sandboxBindings, AGENT_SANDBOX_LIMITS);
+      const { result, made } = await runDrawing(params.code);
       const logs = result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : "";
       if (!result.ok) throw new Error(`${result.error}${logs}`);
-      return text(`${JSON.stringify(result.value, null, 1)}${logs}`);
+      return { content: [{ type: "text" as const, text: `${JSON.stringify(result.value, null, 1)}${logs}` }, ...drawn(made)], details: {} };
     },
   });
 
@@ -209,20 +234,23 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       "読み取り専用のJavaScriptで調べ、結果をJSONで返します。複数のAPIを組み合わせる集計に使います。",
       "コードはコード用のモデルが書きます。task には、何を調べて何を返すコードかを具体的に書きます。コード用のモデルは会話を見ていないので、使うID・名前・条件・返してほしい形を task に全部書いてください。",
       "コードは Discord REST API の GET を読めます(結果は今のチャンネルで扱える範囲に絞られます)。返ってきたコードと結果を確かめて使ってください。",
+      ...(box ? ["画像(グラフや表など)を描いて添付することもできます。そのときは task に、何をどう描くかと画像の名前を書きます。"] : []),
     ].join("\n"),
     parameters: Type.Object({ task: Type.String({ description: "何を調べて何を返すコードか" }) }),
     execute: async (_id, params) => {
       let result: Awaited<ReturnType<typeof runSandboxed>> | undefined;
+      let made: string[] = [];
       const { code } = await writeCode(coder!, "read", params.task, {
         check: async (code) => {
-          result = await runSandboxed(code, sandboxBindings, AGENT_SANDBOX_LIMITS);
+          ({ result, made } = await runDrawing(code));
           return result.ok ? null : `${result.error}${result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : ""}`;
         },
-        run: (code) => runSandboxed(code, sandboxBindings, AGENT_SANDBOX_LIMITS),
+        run: (code) => runSandboxed(code, trialBindings, AGENT_SANDBOX_LIMITS),
         tools: coderTools,
+        ...(box ? { canvas: true } : {}),
       });
       const logs = result!.logs.length > 0 ? `\nlog:\n${result!.logs.join("\n")}` : "";
-      return text(`コード:\n${code}\n\n結果:\n${JSON.stringify(result!.value, null, 1)}${logs}`);
+      return { content: [{ type: "text" as const, text: `コード:\n${code}\n\n結果:\n${JSON.stringify(result!.value, null, 1)}${logs}` }, ...drawn(made)], details: {} };
     },
   });
 

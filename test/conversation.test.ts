@@ -30,6 +30,7 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number }; respo
   }
   let now = 1_000_000;
   const replies: string[] = [];
+  const uploads: string[][] = [];
   const dms: string[] = [];
   const responded: Array<{ apiKey: string; target: string }> = [];
   const judged: string[] = [];
@@ -37,7 +38,10 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number }; respo
     store, webSearch: false,
     selfId: () => SELF, botName: () => "bot", now: () => now,
     fetchBefore: async () => [],
-    sendReply: async (_c, _r, content) => void replies.push(content),
+    sendReply: async (_c, _r, content, files) => {
+      replies.push(content);
+      uploads.push((files ?? []).map((f) => f.name));
+    },
     sendDm: async (userId) => void dms.push(userId),
     typing: async () => undefined,
     makeReader: () => ({ messagesRead: 0 }) as unknown as Reader,
@@ -51,7 +55,7 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number }; respo
     },
     log: () => undefined,
   };
-  return { conv: new Conversations(deps), store, replies, dms, responded, judged, advance: (ms: number) => (now += ms) };
+  return { conv: new Conversations(deps), store, replies, uploads, dms, responded, judged, advance: (ms: number) => (now += ms) };
 }
 
 test("ignores ordinary messages while asleep", async () => {
@@ -291,4 +295,33 @@ test("reactions show in the transcript", async () => {
   const { formatMessage } = await import("../src/agent/tools.ts");
   const line = formatMessage(message("1", "1", "どう?", { reactions: [{ emoji: { id: null, name: "👍" }, count: 2, me: true } as never] }));
   assert.match(line, /\[リアクション: 👍2\(Botも\)\]/);
+});
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+test("images a tool put in the box go out with the last post of the reply", async () => {
+  const t = setup({
+    respond: async (input) => {
+      input.attachments!.add({ data: PNG, name: "formula.png" });
+      return { text: "式です", progress: 0, turns: 2, toolCalls: [] };
+    },
+  });
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(t.replies, ["式です"]);
+  assert.deepEqual(t.uploads, [["formula.png"]]);
+});
+
+test("a reply that is only an image is still posted, and an image a change takes stays off the reply", async () => {
+  const t = setup({
+    respond: async (input) => {
+      const box = input.attachments!;
+      box.add({ data: PNG, name: "a.png" });
+      box.add({ data: PNG, name: "b.png" });
+      box.take(["img2"]);
+      return { text: "", progress: 0, turns: 2, toolCalls: [] };
+    },
+  });
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(t.replies, [""]);
+  assert.deepEqual(t.uploads, [["a.png"]]);
 });

@@ -5,6 +5,7 @@ import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider, Type } from
 import { llm } from "../src/llm/models.ts";
 import { Inbox, ReplyFailed, respond, typicalLength } from "../src/agent/respond.ts";
 import { isTransient } from "../src/agent/retry.ts";
+import { attachedResult, ImageBox } from "../src/agent/attachments.ts";
 import { stripComments } from "../src/agent/summarize.ts";
 import { formatMessage } from "../src/agent/tools.ts";
 import { GuildCache } from "../src/discord/cache.ts";
@@ -248,4 +249,51 @@ test("a reaction model's choice falls back to the safe side", async () => {
   assert.deepEqual(parseChoice('{"action":"reply"}', "reaction"), { action: "reply" });
   assert.deepEqual(parseChoice("わからない", "reaction"), { action: "none" });
   assert.ok(isReactionEmoji("❤️") && isReactionEmoji("👍🏽") && !isReactionEmoji("name:123") && !isReactionEmoji("a"));
+});
+
+test("image tools plug into the agent and put their images in the reply's box", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("make_test_image", {})], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("どうぞ")]),
+    ]);
+    const box = new ImageBox();
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot", transcript: [], target: "[1] user: 図を", web: null,
+      attachments: box,
+      imageTools: (b, sees) => [{
+        name: "make_test_image", label: "テスト画像", description: "テスト用", parameters: Type.Object({}),
+        execute: async () => attachedResult(b, { data: Buffer.from([0x89, 0x50, 0x4e, 0x47]), name: "test.png" }, sees),
+      }],
+    });
+    assert.equal(result.text, "どうぞ");
+    assert.deepEqual(box.forReply().map((a) => a.name), ["test.png"]);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
+test("run_code can draw an image into the reply; a run that fails leaves none behind", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("run_code", { code: `attachImage(createCanvas(8, 8), "broken"); throw new Error("oops");` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("run_code", { code: `const c = createCanvas(40, 20); c.getContext("2d").fillRect(0, 0, 40, 20); return attachImage(c, "bar");` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("グラフです")]),
+    ]);
+    const box = new ImageBox();
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot", transcript: [], target: "[1] user: グラフにして", web: null,
+      attachments: box,
+    });
+    assert.equal(result.text, "グラフです");
+    assert.deepEqual(Object.keys(box.all()), ["img2"]);
+    assert.deepEqual(box.forReply().map((a) => a.name), ["bar.png"]);
+    assert.equal(result.toolErrors?.length, 1);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
 });

@@ -6,6 +6,9 @@ import type { ImageRef } from "./agent/images.ts";
 import { resolveWebAccess } from "./agent/web.ts";
 import { Inbox, ReplyFailed } from "./agent/respond.ts";
 import { isTransient } from "./agent/retry.ts";
+import { ImageBox } from "./agent/attachments.ts";
+import type { ImageTools } from "./agent/attachments.ts";
+import type { Attachment } from "./plan/types.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import type { ChooseInput, ReactionChoice } from "./agent/react.ts";
@@ -39,7 +42,10 @@ export interface ConversationDeps {
   webSearch: boolean;
   fetchBefore: (channelId: string, beforeId: string, limit: number) => Promise<APIMessage[]>;
   /** replyToId is null for follow-up posts, which read as a natural series. */
-  sendReply: (channelId: string, replyToId: string | null, content: string) => Promise<void>;
+  /** Posts one message; `files` are PNGs uploaded with it. */
+  sendReply: (channelId: string, replyToId: string | null, content: string, files?: Array<{ name: string; data: Buffer }>) => Promise<void>;
+  /** Tools that make or fetch images for the reply; none are wired yet. */
+  imageTools?: ImageTools;
   sendDm: (userId: string, content: string) => Promise<void>;
   typing: (channelId: string) => Promise<void>;
   makeReader: (scope: ReadScope) => Reader;
@@ -432,9 +438,14 @@ export class Conversations {
     this.#working.set(channelId, { speaker, messageIds: new Set(input.messageIds ?? []), inbox });
     // The first post answers the message; the rest follow it as a series.
     let replyTo: string | null = input.replyToId;
-    const post = async (content: string) => {
-      for (const part of splitForDiscord(content)) {
-        await this.deps.sendReply(channelId, replyTo, part);
+    const images = new ImageBox();
+    // Images go with the last part; a reply that is only images still gets posted.
+    const post = async (content: string, files: Attachment[] = []) => {
+      const parts = splitForDiscord(content);
+      if (parts.length === 0 && files.length > 0) parts.push("");
+      for (const [i, part] of parts.entries()) {
+        const uploads = i === parts.length - 1 ? files.map((f) => ({ name: f.name, data: Buffer.from(f.data, "base64") })) : [];
+        await this.deps.sendReply(channelId, replyTo, part, uploads.length > 0 ? uploads : undefined);
         replyTo = null;
       }
     };
@@ -460,8 +471,8 @@ export class Conversations {
           await this.deps.typing(channelId).catch(() => undefined);
         },
         propose: this.deps.propose
-          ? (drafts, code, rules) =>
-              this.deps.propose!({
+          ? async (drafts, code, rules) => {
+              const plan = await this.deps.propose!({
                 guildId: input.guildId,
                 channelId,
                 replyToId: input.replyToId,
@@ -471,8 +482,14 @@ export class Conversations {
                 ...(code ? { code } : {}),
                 ...(input.replaces ? { replaces: input.replaces } : {}),
                 ...(rules ? { rules, reader, request: input.target } : {}),
-              })
+                images: images.all(),
+              });
+              images.take(Object.keys(plan.attachments ?? {}));
+              return plan;
+            }
           : undefined,
+        attachments: images,
+        ...(this.deps.imageTools ? { imageTools: this.deps.imageTools } : {}),
         rules: this.deps.rules
           ? {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
@@ -482,7 +499,7 @@ export class Conversations {
       });
       progress = result.progress;
       // A reaction alone is an answer.
-      text = result.text || (progress > 0 || result.reactions?.length ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
+      text = result.text || (progress > 0 || result.reactions?.length || images.forReply().length > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
       detail = { ...detail, ...(result.reactions?.length ? { reactions: result.reactions } : {}), progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), ...(result.retries ? { retries: result.retries } : {}), messagesRead: reader.messagesRead };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
@@ -500,7 +517,9 @@ export class Conversations {
       if (this.#working.get(channelId)?.inbox === inbox) this.#working.delete(channelId);
     }
 
-    await post(text);
+    const attached = images.forReply();
+    if (attached.length > 0) detail = { ...detail, images: attached.map((a) => a.name) };
+    await post(text, attached);
     store.audit({ kind: "user", userId: speaker, via: "conversation" }, "conversation.reply", detail);
   }
 
