@@ -4,7 +4,8 @@ import { formatMessage } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
 import { resolveWebAccess } from "./agent/web.ts";
-import { Inbox } from "./agent/respond.ts";
+import { Inbox, ReplyFailed } from "./agent/respond.ts";
+import { isTransient } from "./agent/retry.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
@@ -364,12 +365,18 @@ export class Conversations {
       });
       progress = result.progress;
       text = result.text || (progress > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
-      detail = { ...detail, progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), messagesRead: reader.messagesRead };
+      detail = { ...detail, progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), ...(result.retries ? { retries: result.retries } : {}), messagesRead: reader.messagesRead };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       this.deps.log(`応答の生成に失敗 (${input.replyToId})`, e);
-      text = `応答の生成に失敗しました: ${reason.slice(0, 300)}`;
-      detail = { ...detail, error: reason.slice(0, 500) };
+      text = isTransient(reason)
+        ? "LLMとの通信が途中で切れたため、応答を作れませんでした(やり直しても切れました)。少し待ってからもう一度話しかけてください。"
+        : `応答の生成に失敗しました: ${reason.slice(0, 300)}`;
+      detail = {
+        ...detail,
+        error: reason.slice(0, 500),
+        ...(e instanceof ReplyFailed ? { turns: e.turns, toolCalls: e.toolCalls, retries: e.retries } : {}),
+      };
     } finally {
       clearInterval(typing);
       if (this.#working.get(channelId)?.inbox === inbox) this.#working.delete(channelId);

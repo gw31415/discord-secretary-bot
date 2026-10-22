@@ -6,6 +6,7 @@ import { lightestThinking, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { triggerSummary } from "../rules/triggers.ts";
 import { runSandboxed } from "../sandbox.ts";
+import { retryFailedCall } from "./retry.ts";
 
 // A second agent, on the model the speaker picked for writing code. The conversation
 // agent describes what the code should do; this agent tries code against the server
@@ -173,6 +174,7 @@ export function llmCoder(model: Model<Api>, apiKey: string): Coder {
       const timeout = signal ?? AbortSignal.timeout(180_000);
       timeout.addEventListener("abort", () => agent.abort(), { once: true });
       await agent.prompt(task);
+      await retryFailedCall(agent, () => accepted === null && turns < MAX_CODE_TURNS && !timeout.aborted);
 
       if (accepted !== null) return { code: accepted, attempts: failures + 1 };
       // A model that answers with a code block instead of calling the tool still gets one check.
