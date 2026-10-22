@@ -5,7 +5,7 @@ import type { Attachment } from "../plan/types.ts";
 // The place where tools put images for the bot to post. A tool that makes or
 // fetches an image adds it here and gets an id ("img1"); images a proposed
 // change names in a post's `files` go with that change, and the rest go out
-// with the reply. No tool fills it yet: tools plug in through `ImageTools`.
+// with the reply. Outside tools plug in through `ImageTools`.
 
 /** An image a tool made; `name` carries the extension. */
 export interface ImageFile {
@@ -46,6 +46,12 @@ export class ImageBox {
     if ([...this.#items.values()].some((a) => a.name === name)) name = `${base}-${id}.${ext}`;
     this.#items.set(id, { name, data: file.data.toString("base64") });
     return id;
+  }
+
+  /** An image already in the box, for tools that work on it (convert_image). */
+  get(id: string): ImageFile | undefined {
+    const a = this.#items.get(id);
+    return a && { data: Buffer.from(a.data, "base64"), name: a.name };
   }
 
   all(): Record<string, Attachment> {

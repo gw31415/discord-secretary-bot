@@ -181,11 +181,11 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   assert.doesNotMatch(before, /"openrouter\//, "hundreds of models stay out of the menus");
   store.setModel("u1", "response", { provider: "openrouter", model: "anthropic/claude-sonnet-5" });
   const after = renderPanel(store, "u1");
-  const values: Array<{ value: string; default?: boolean }> = [];
+  const values: Array<{ value: string; default?: boolean; label?: string }> = [];
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) return node.forEach(walk);
     if (!node || typeof node !== "object") return;
-    const c = node as { custom_id?: string; options?: Array<{ value: string; default?: boolean }>; components?: unknown };
+    const c = node as { custom_id?: string; options?: Array<{ value: string; default?: boolean; label?: string }>; components?: unknown };
     if (c.custom_id?.startsWith("llm:model:response:")) values.push(...(c.options ?? []));
     walk(c.components);
   };
