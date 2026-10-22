@@ -226,7 +226,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   };
   const makeMath = async (tex: string, opts: MathOptions, name: string | undefined): Promise<string> => {
     box!.checkRoom();
-    return box!.add({ data: await renderMath(tex, opts), name: `${name || "math"}.png` });
+    return box!.add({ data: await renderMath(tex, opts), name: `${name || "math"}.svg` });
   };
   const makeConverted = async (source: unknown, opts: ConvertOptions, name: string | undefined): Promise<string> => {
     box!.checkRoom();
@@ -282,7 +282,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   };
   const CANVAS_LINE = box
     ? "画像も描けます: const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します(画像のIDが返ります。1回4枚、縦横2048pxまで)。" +
-      "数式は renderMath(\"TeX\", { size, color, background, display }, \"name\") で、画像の変換(大きさ・切り抜き・回転・形式)は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, crop, rotate, format, quality, background, grayscale, trim }, \"name\") で作れます。どちらも新しい画像のIDを返し、作れるのは canvas と合わせて1回4枚までです。"
+      "数式は renderMath(\"TeX\", { size, color, background, display }, \"name\") で SVG に(投稿するときは PNG になります)、画像の変換(大きさ・切り抜き・回転・形式)は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, crop, rotate, format, quality, background, grayscale, trim }, \"name\") で作れます。どちらも新しい画像のIDを返し、作れるのは canvas と合わせて1回4枚までです。"
     : "";
 
   const runCode = tool({
@@ -337,7 +337,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   const renderMathTool = tool({
     name: "render_math",
     label: "数式を描く",
-    description: "TeX の数式を MathJax で画像にして添付します(ams・mhchem の \\ce・color・cancel・boldsymbol が使えます)。文中に式を並べるより読みやすいときに使います。いくつもの式は aligned などで1枚にまとめられます。",
+    description: "TeX の数式を MathJax で SVG 画像にして添付します(Discord には PNG にして送られます。ams・mhchem の \\ce・color・cancel・boldsymbol が使えます)。文中に式を並べるより読みやすいときに使います。いくつもの式は aligned などで1枚にまとめられます。",
     parameters: Type.Object({
       tex: Type.String({ maxLength: 2000, description: "TeX($ や \\[ \\] で囲まない)" }),
       name: Type.Optional(Type.String({ maxLength: 40, description: "ファイル名(拡張子なし)" })),
@@ -353,7 +353,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   const convertImageTool = tool({
     name: "convert_image",
     label: "画像を変換する",
-    description: "画像の大きさ・切り抜き・回転・反転・白黒・余白の削除・背景色・形式(PNG・JPEG・WebP)を変えた画像を作って添付します。元にできるのは、この返答で用意した画像(img1 など)か、メッセージに添付された画像です。",
+    description: "画像の大きさ・切り抜き・回転・反転・白黒・余白の削除・背景色・形式(PNG・JPEG・WebP)を変えた画像を作って添付します。元にできるのは、この返答で用意した画像(img1 など。render_math の SVG も可)か、メッセージに添付された画像です。",
     parameters: Type.Object({
       source: ImageSourceSchema,
       name: Type.Optional(Type.String({ maxLength: 40, description: "ファイル名(拡張子なし)" })),

@@ -16,6 +16,7 @@ import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
 import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
 import { llmCoder } from "./agent/coder.ts";
 import { decideFor } from "./agent/decide.ts";
+import { toUploadable } from "./media.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
@@ -462,8 +463,9 @@ export class Conversations {
     const post = async (content: string, files: Attachment[] = []) => {
       const parts = splitForDiscord(content);
       if (parts.length === 0 && files.length > 0) parts.push("");
+      const converted = await toUploadable(files.map((f) => ({ name: f.name, data: Buffer.from(f.data, "base64") })));
       for (const [i, part] of parts.entries()) {
-        const uploads = i === parts.length - 1 ? files.map((f) => ({ name: f.name, data: Buffer.from(f.data, "base64") })) : [];
+        const uploads = i === parts.length - 1 ? converted : [];
         await this.deps.sendReply(channelId, replyTo, part, uploads.length > 0 ? uploads : undefined);
         replyTo = null;
       }

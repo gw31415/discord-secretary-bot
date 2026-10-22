@@ -81,13 +81,13 @@ const RULE = [
   "- batch はその回のイベント全部(古い順の [{ eventName, event }])で、まとめて実行するルールでは複数件、それ以外は1件です。SCHEDULE(時刻)のときの event は { guild_id, scheduled_at, schedule, timezone }、BOT_READY(起動時)のときは { guild_id } です。COMMAND(スラッシュコマンド)のときは { guild_id, channel_id, command, user: { id, username, global_name }, member: { roles, nick }, options: { オプション名: 値 } } で、reply(\"文\") で実行した人に返事をします(何度も呼ぶと改行でつながり、1900文字まで)。",
   "- state は前回の実行で setState(値) した値(最初は null)です。次の実行に持ち越したい値があれば setState で保存します(JSON にできる値。保存されるのは実行が通ったときだけ)。",
   "- 実行は1回30秒・discord.get 200回までです。",
-  "- 画像も作れます。createCanvas(幅, 高さ) で描いて attachImage(c, \"name\")、数式は renderMath(\"TeX\", { size, color, background, display }, \"name\")、変換は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, format, … }, \"name\")。どれも \"img1\" のようなIDを返し、1回4枚までです。投稿(POST /channels/{channel}/messages・DM)の body.files に IDを入れると添付され(許す操作の body に files があるときだけ)、COMMAND では作った画像が返事に添付されます。",
+  "- 画像も作れます。createCanvas(幅, 高さ) で描いて attachImage(c, \"name\")、数式は renderMath(\"TeX\", { size, color, background, display }, \"name\")(SVG。投稿するときは PNG になります)、変換は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, format, … }, \"name\")。どれも \"img1\" のようなIDを返し、1回4枚までです。投稿(POST /channels/{channel}/messages・DM)の body.files に IDを入れると添付され(許す操作の body に files があるときだけ)、COMMAND では作った画像が返事に添付されます。",
   "- 返すステップは依頼にある「許す操作」に合うものだけにします。合わないステップは実行されません。許す操作で { madeInRun: true } のフィールドには、同じ回の前のステップを指す { $ref: \"steps.<id>.result.id\" } を入れます。",
   "",
   "使える操作:",
 ];
 
-const CANVAS = "\n\n画像を頼まれたら、const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します。attachImage は画像のIDを返すので、結果に含めて返します。1回4枚、縦横2048pxまでです。背景は透明なので、必要なら最初に塗ります。\n数式は renderMath(\"TeX\", { size, color, background, display }, \"name\") で MathJax の画像に、画像の変換は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, crop, rotate, flip, flop, grayscale, trim, background, format, quality }, \"name\") でできます(format は png・jpeg・webp)。どちらも新しい画像のIDを返し、canvas と合わせて1回4枚までです。";
+const CANVAS = "\n\n画像を頼まれたら、const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します。attachImage は画像のIDを返すので、結果に含めて返します。1回4枚、縦横2048pxまでです。背景は透明なので、必要なら最初に塗ります。\n数式は renderMath(\"TeX\", { size, color, background, display }, \"name\") で MathJax の SVG 画像に(投稿するときは PNG になります)、画像の変換は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, crop, rotate, flip, flop, grayscale, trim, background, format, quality }, \"name\") でできます(format は png・jpeg・webp)。どちらも新しい画像のIDを返し、canvas と合わせて1回4枚までです。";
 
 const RULE_DEBUG = "\n\n既存のルールを直すときや、ルールが動かない理由を調べるときは、list_rules で今のコードを、rule_runs で実行履歴(結果・エラー・log)を確かめてから書きます。";
 

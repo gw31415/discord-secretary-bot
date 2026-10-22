@@ -1,3 +1,4 @@
+import { toUploadable, uploadName } from "../media.ts";
 import type { Attachment, Plan, Step } from "./types.ts";
 
 // Images on posts. A post's body names images by id (`files: ["img1"]`); the
@@ -47,21 +48,22 @@ export function attachmentsFor(steps: Step[], sources: Array<Record<string, Atta
   return { ...(Object.keys(attachments).length > 0 ? { attachments } : {}), problems };
 }
 
-/** The files to upload with a post, in the order its body names them. */
-export function uploadsFor(plan: Pick<Plan, "attachments">, step: Pick<Step, "op" | "body">): Array<{ name: string; data: Buffer }> {
-  return stepFiles(step).map((id) => {
+/** The files to upload with a post, in the order its body names them, converted for Discord. */
+export function uploadsFor(plan: Pick<Plan, "attachments">, step: Pick<Step, "op" | "body">): Promise<Array<{ name: string; data: Buffer }>> {
+  return toUploadable(stepFiles(step).map((id) => {
     const a = plan.attachments?.[id];
     if (!a) throw new Error(`画像 ${id} が変更に含まれていません`);
     return { name: a.name, data: Buffer.from(a.data, "base64") };
-  });
+  }));
 }
 
 /** The dialog's file name for an image: ids are unique within a plan, names may not be. */
 export function dialogFileName(id: string, attachment: Attachment): string {
-  return `${id}.${attachment.name.split(".").pop()}`;
+  return `${id}.${uploadName(attachment.name).split(".").pop()}`;
 }
 
 /** Every image in the plan, for showing them in the dialog. */
-export function dialogUploads(plan: Pick<Plan, "attachments">): Array<{ name: string; data: Buffer }> {
-  return Object.entries(plan.attachments ?? {}).map(([id, a]) => ({ name: dialogFileName(id, a), data: Buffer.from(a.data, "base64") }));
+export async function dialogUploads(plan: Pick<Plan, "attachments">): Promise<Array<{ name: string; data: Buffer }>> {
+  const files = await toUploadable(Object.entries(plan.attachments ?? {}).map(([id, a]) => ({ id, name: a.name, data: Buffer.from(a.data, "base64") })));
+  return files.map(({ id, data }) => ({ name: dialogFileName(id, plan.attachments![id]!), data }));
 }

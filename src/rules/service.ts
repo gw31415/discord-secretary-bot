@@ -1,3 +1,4 @@
+import { toUploadable } from "../media.ts";
 import type { API } from "@discordjs/core";
 import { InteractionType, MessageFlags } from "discord-api-types/v10";
 import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
@@ -370,7 +371,7 @@ export class RuleService {
       report = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, images: [], steps: 0 };
     }
     const content = commandReplyText(rule.name, report);
-    const files = commandFailed(report) ? [] : report.images.map((i) => ({ name: i.name, data: i.data }));
+    const files = commandFailed(report) ? [] : await toUploadable(report.images.map((i) => ({ name: i.name, data: i.data })));
     const body = { content, allowed_mentions: { parse: [] }, ...(files.length ? { files } : {}) };
     if (visibility === "auto" && (report.reply || files.length) && !commandFailed(report) && (await this.#showToAll(rule, spec, event, report))) {
       await api.interactions.followUp(interaction.application_id, interaction.token, body);

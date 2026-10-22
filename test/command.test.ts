@@ -230,7 +230,7 @@ test("a command's code can make images for its reply and its posts", async () =>
   assert.deepEqual(edit.files!.map((f) => f.name), ["eq.png"]);
   assert.ok(edit.files![0]!.data.length > 100);
   assert.deepEqual(Object.keys(w.runs[0].images), ["img1"]);
-  assert.equal(w.runs[0].images.img1.name, "eq.png");
+  assert.equal(w.runs[0].images.img1.name, "eq.svg");
 });
 
 test("the owner changes who sees a command's replies from /rules, keeping the version and the code", async () => {
