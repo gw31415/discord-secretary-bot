@@ -22,9 +22,10 @@ import { auditView, detailView, homeView, parseRuleCustomId, plansView } from ".
 import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
 import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
-import type { CommandSpec } from "./command.ts";
+import type { CommandSpec, CommandVisibility } from "./command.ts";
+import { defaultVisibility, showsToAll } from "../agent/judge.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
-import type { Rule, RuleDefinition, RuleProposal, RuleRun } from "./types.ts";
+import type { Rule, RuleDefinition, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
@@ -46,8 +47,8 @@ export interface RuleServiceDeps {
   log: (message: string, error?: unknown) => void;
   /** Explains rule code from the code alone, paid for by the owner. */
   summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
-  /** Whether a command's reply should be shown to everyone, by the owner's judge model. */
-  decideVisibility?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<boolean>;
+  /** How likely a command's reply is meant for everyone (0 to 1), by the owner's judge model; null without one. */
+  visibilityScore?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<number | null>;
 }
 
 type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
@@ -230,7 +231,7 @@ export class RuleService {
       drafts.push({
         key: `r${i + 1}`,
         name: r.name.slice(0, 60),
-        trigger: r.trigger,
+        trigger: await this.#withVisibility(input.ownerId, r, dry),
         allow: r.allow,
         code: r.code,
         ...(r.params ? { params: r.params } : {}),
@@ -244,6 +245,30 @@ export class RuleService {
     }
     if (problems.length > 0) throw new PlanRejected(problems);
     return drafts;
+  }
+
+  /**
+   * A command whose request did not say who sees its replies starts the dialog
+   * on the judge model's pick, from the dry run's reply; the requester can change it there.
+   */
+  async #withVisibility(ownerId: string, r: { trigger: RuleTrigger; sampleEvent?: unknown }, dry: RuleDryRun): Promise<RuleTrigger> {
+    const command = r.trigger.command;
+    if (!command || command.visibility) return r.trigger;
+    let visibility: CommandVisibility = "private";
+    try {
+      const score = await this.deps.visibilityScore?.({
+        ownerId,
+        command,
+        options: ((r.sampleEvent as { options?: Record<string, unknown> } | undefined)?.options ?? {}),
+        reply: dry.reply ?? "",
+        images: dry.images ?? 0,
+        steps: dry.lines.length,
+      });
+      if (typeof score === "number") visibility = defaultVisibility(score);
+    } catch (e) {
+      this.deps.log(`コマンド /${command.name} の公開の既定値を決められませんでした`, e);
+    }
+    return { ...r.trigger, command: { ...command, visibility } };
   }
 
   /** A command name must be free in the server, counting this plan's earlier rules; `replaces` may keep its own. */
@@ -356,9 +381,9 @@ export class RuleService {
 
   /** The owner's judge model decides; without one, or on any error, the reply stays private. */
   async #showToAll(rule: Rule, spec: CommandSpec, event: Record<string, unknown>, report: CommandReport): Promise<boolean> {
-    if (!this.deps.decideVisibility) return false;
+    if (!this.deps.visibilityScore) return false;
     try {
-      return await this.deps.decideVisibility({ ownerId: rule.ownerId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", images: report.images.length, steps: report.steps });
+      return showsToAll((await this.deps.visibilityScore({ ownerId: rule.ownerId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", images: report.images.length, steps: report.steps })) ?? 0);
     } catch (e) {
       this.deps.log(`コマンド /${spec.name} の公開判定に失敗`, e);
       return false;

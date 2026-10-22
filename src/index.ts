@@ -2,7 +2,7 @@ import { Client, GatewayDispatchEvents, GatewayIntentBits } from "@discordjs/cor
 import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { PresenceUpdateStatus } from "discord-api-types/v10";
-import { judgeAddressed, judgePublicReply } from "./agent/judge.ts";
+import { judgeAddressed, publicReplyScore } from "./agent/judge.ts";
 import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
@@ -145,12 +145,12 @@ const rules = new RuleService({
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
   },
-  decideVisibility: async ({ ownerId, command, options, reply, images, steps }) => {
+  visibilityScore: async ({ ownerId, command, options, reply, images, steps }) => {
     const ref = store.getSettings(ownerId).judge;
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
-    if (!model || !apiKey) return false;
-    return judgePublicReply({ model, apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
+    if (!model || !apiKey) return null;
+    return publicReplyScore({ model, apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
   },
 });
 

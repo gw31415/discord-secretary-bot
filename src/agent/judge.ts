@@ -118,7 +118,8 @@ interface VisibilityInput {
 const PUBLIC_WHEN = "チャンネルの人たちに向けた内容(お知らせ、全員に関係する結果、みんなで見る情報、サーバーへの変更の報告)";
 const PRIVATE_WHEN = "実行した人だけに関係する内容(本人の情報、確認や受付の連絡、調べ物の結果、エラーや使い方の説明)、またはどちらとも言えないもの";
 
-export async function judgePublicReply(input: VisibilityInput): Promise<boolean> {
+/** How likely the reply is meant for everyone, 0 to 1. Anything unreadable counts as 0. */
+export async function publicReplyScore(input: VisibilityInput): Promise<number> {
   const { model } = input;
   const state = {
     command: `/${input.command.name}: ${input.command.description}`,
@@ -143,7 +144,7 @@ export async function judgePublicReply(input: VisibilityInput): Promise<boolean>
       { apiKey: input.apiKey, signal: input.signal },
     );
     const answer = res.answers.public;
-    return res.stopReason === "stop" && answer?.type === "bool" && answer.probability >= CONFIDENCE_THRESHOLD;
+    return res.stopReason === "stop" && answer?.type === "bool" ? answer.probability : 0;
   }
   const res = await llm.completeSimple(
     model,
@@ -164,11 +165,25 @@ export async function judgePublicReply(input: VisibilityInput): Promise<boolean>
     .map((c) => (c as { text: string }).text)
     .join("");
   const match = /\{[\s\S]*\}/.exec(text);
-  if (!match) return false;
+  if (!match) return 0;
   try {
     const value = JSON.parse(match[0]) as { public?: unknown; confidence?: unknown };
-    return value.public === true && (typeof value.confidence !== "number" || value.confidence >= CONFIDENCE_THRESHOLD);
+    if (typeof value.public !== "boolean") return 0;
+    const confidence = typeof value.confidence === "number" ? Math.max(0, Math.min(1, value.confidence)) : 0.5;
+    return value.public ? confidence : 1 - confidence;
   } catch {
-    return false;
+    return 0;
   }
+}
+
+/** A reply is shown to everyone when the score clears the bar the addressed judge uses. */
+export function showsToAll(score: number): boolean {
+  return score >= CONFIDENCE_THRESHOLD;
+}
+
+/** The confirmation dialog's starting choice: sure either way, or leave it to each reply. */
+export function defaultVisibility(score: number): "public" | "private" | "auto" {
+  if (score >= CONFIDENCE_THRESHOLD) return "public";
+  if (score <= 1 - CONFIDENCE_THRESHOLD) return "private";
+  return "auto";
 }

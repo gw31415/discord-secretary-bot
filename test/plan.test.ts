@@ -620,7 +620,7 @@ const CLEANUP_RULE = {
   sampleEvent: { guild_id: GUILD, user_id: "3", channel_id: null, before_channel_id: "10" },
 };
 
-function withRules(t: ReturnType<typeof setup>) {
+function withRules(t: ReturnType<typeof setup>, visibilityScore?: () => Promise<number | null>) {
   const caches = { get: (id: string | undefined) => (id === GUILD ? t.cache : undefined) };
   const admin = new RuleAdmin({ store: t.store, caches, selfId: () => SELF, now: () => t.now.t });
   const engine = new RuleEngine({
@@ -628,7 +628,7 @@ function withRules(t: ReturnType<typeof setup>) {
     makeReader: () => ({ get: async () => null }) as never,
     run: async () => ({ ok: true, value: null, logs: [] }),
   });
-  const service = new RuleService({ api: t.api, store: t.store, caches, admin, engine, selfId: () => SELF, now: () => t.now.t, log: () => {}, summarize: async () => "説明です。" });
+  const service = new RuleService({ api: t.api, store: t.store, caches, admin, engine, selfId: () => SELF, now: () => t.now.t, log: () => {}, summarize: async () => "説明です。", ...(visibilityScore ? { visibilityScore } : {}) });
   t.planner.deps.rules = { prepare: (i) => service.prepare(i), register: (g, o, d) => service.register(g, o, d) };
   return { admin, engine, service };
 }
@@ -848,4 +848,51 @@ test("a rule's post carries the images its code made, and only those", async () 
   assert.equal((calls.at(-1)!.options as { files?: unknown[] }).files!.length, 1);
   // The allow list still decides: a body without files in it refuses them.
   await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts, images: { img1: PNG } }), /範囲外/);
+});
+
+const TEX_RULE = {
+  name: "数式",
+  trigger: { event: "COMMAND", command: { name: "tex", description: "数式を画像にする", options: [{ name: "tex", description: "TeX", type: "string" as const, required: true }] } },
+  allow: [],
+  code: "reply('ok'); return null;",
+};
+
+test("a command's dialog starts on the judge's pick for who sees replies, and the requester can change it", async () => {
+  const t = setup();
+  let score: number | null = 0.5;
+  withRules(t, async () => score);
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "/tex を作って", drafts: [] };
+  const selectOf = (body: any) => body.components[0].components.find((c: any) => c.type === ComponentType.ActionRow && c.components[0].type === ComponentType.StringSelect)?.components[0];
+  const chosen = (body: any) => selectOf(body)?.options.find((o: any) => o.default)?.value;
+
+  const plan = await t.planner.propose({ ...base, rules: [TEX_RULE] });
+  assert.equal(plan.rules![0]!.trigger.command!.visibility, "auto");
+  assert.equal(chosen(t.replies.at(-1)!.body), "auto");
+  score = 0.9;
+  assert.equal((await t.planner.propose({ ...base, rules: [TEX_RULE] })).rules![0]!.trigger.command!.visibility, "public");
+  score = null; // no judge model: only the person who ran it
+  assert.equal((await t.planner.propose({ ...base, rules: [TEX_RULE] })).rules![0]!.trigger.command!.visibility, "private");
+  // What the request said is kept.
+  const told = { ...TEX_RULE, trigger: { ...TEX_RULE.trigger, command: { ...TEX_RULE.trigger.command, visibility: "public" as const } } };
+  score = 0;
+  assert.equal((await t.planner.propose({ ...base, rules: [told] })).rules![0]!.trigger.command!.visibility, "public");
+
+  // Only the requester changes it; the change is part of what gets approved.
+  const pick = (userId: string, value: string) => ({
+    ...click(plan, "visibility", userId),
+    data: { custom_id: `plan:visibility.r1:${plan.id}:${plan.hash.slice(0, 8)}`, component_type: ComponentType.StringSelect, values: [value] },
+  }) as unknown as APIInteraction;
+  await t.planner.handleInteraction(pick("3", "public"));
+  assert.equal(t.store.getPlan(plan.id)!.plan.rules![0]!.trigger.command!.visibility, "auto");
+  await t.planner.handleInteraction(pick("1", "public"));
+  const changed = t.store.getPlan(plan.id)!.plan;
+  assert.equal(changed.rules![0]!.trigger.command!.visibility, "public");
+  assert.notEqual(changed.hash, plan.hash);
+  assert.equal(chosen(t.replies.at(-1)!.body), "public");
+  // The old buttons no longer work; the redrawn ones do, and register the pick.
+  await t.planner.handleInteraction(click(plan, "run", "1"));
+  assert.equal(t.store.getPlan(plan.id)!.status, "pending_approval");
+  await t.planner.handleInteraction(click(changed, "run", "1"));
+  await settle(() => t.store.getPlan(plan.id)!.status === "succeeded");
+  assert.equal(t.store.listRules(GUILD)[0]!.trigger.command!.visibility, "public");
 });

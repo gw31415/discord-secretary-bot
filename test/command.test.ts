@@ -75,7 +75,7 @@ function interaction(options: Record<string, string>, permissions = P.SendMessag
   } as never;
 }
 
-function world(decideVisibility?: (input: any) => Promise<boolean>) {
+function world(visibilityScore?: (input: any) => Promise<number | null>) {
   const store = new Store(":memory:", randomBytes(32));
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
@@ -106,7 +106,7 @@ function world(decideVisibility?: (input: any) => Promise<boolean>) {
     },
     applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]) },
   } as never;
-  const service = new RuleService({ api, store, caches, admin, engine, selfId: () => SELF, now: () => 1_000_000, log: () => {}, ...(decideVisibility ? { decideVisibility } : {}) });
+  const service = new RuleService({ api, store, caches, admin, engine, selfId: () => SELF, now: () => 1_000_000, log: () => {}, ...(visibilityScore ? { visibilityScore } : {}) });
   const definition: RuleDefinition = {
     name: "お知らせ",
     sourcePrompt: "/announce で投稿",
@@ -176,7 +176,7 @@ test("enabled command rules are registered next to the bot's own commands", asyn
 
 test("by default the owner's judge model decides who sees the reply; failures and errors stay private", async () => {
   const asked: any[] = [];
-  let verdict: () => Promise<boolean> = async () => true;
+  let verdict: () => Promise<number> = async () => 0.9;
   const w = world(async (input) => (asked.push(input), verdict()));
   w.admin.save(GUILD, "1", w.definition);
   await w.service.handleCustomCommand(interaction({ text: "お知らせです" }));
@@ -201,7 +201,7 @@ test("by default the owner's judge model decides who sees the reply; failures an
 
 test("a fixed visibility is used as is, without asking the judge", async () => {
   const asked: any[] = [];
-  const w = world(async (input) => (asked.push(input), true));
+  const w = world(async (input) => (asked.push(input), 1));
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { ...SPEC, visibility: "public" } } });
   await w.service.handleCustomCommand(interaction({ text: "x" }));
   assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "edit"]);
