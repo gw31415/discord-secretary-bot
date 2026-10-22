@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import type { Static } from "typebox";
-import type { RuleTrigger } from "../rules/types.ts";
+import type { RuleLimits, RuleTrigger } from "../rules/types.ts";
 
 // Core Plan types. TypeBox gives both the TypeScript type and the JSON Schema
 // that validates what the agent proposes.
@@ -102,6 +102,12 @@ export interface AllowEntry {
    * before the step runs, e.g. { properties: { name: { pattern: "^📞" } } }.
    */
   target?: Record<string, unknown>;
+  /**
+   * JSON Schema the channel the step acts in must satisfy, read right before
+   * the step runs, e.g. { properties: { parent_id: { const: "123" } } } for
+   * posting only inside one category.
+   */
+  channel?: Record<string, unknown>;
   /** Steps of this kind per run. Absent means up to the plan limit. */
   maxStepsPerRun?: number;
 }
@@ -122,6 +128,8 @@ export interface PlanRuleDraft {
   params?: Record<string, unknown>;
   /** Written from the code alone by a model that did not see the request. */
   summary: string | null;
+  /** Absent means DEFAULT_LIMITS. */
+  limits?: RuleLimits;
   /** An existing rule of the owner's this is a new version of. */
   replaces?: {
     id: string;

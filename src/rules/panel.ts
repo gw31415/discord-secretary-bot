@@ -5,8 +5,9 @@ import { RISK_LABEL } from "../plan/types.ts";
 import type { RuleDryRun } from "../plan/types.ts";
 import { allowLines, allowRisk, valueText } from "./allow.ts";
 import type { Halt } from "./engine.ts";
+import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { TRIGGERS, triggerEvents } from "./triggers.ts";
-import type { Rule, RuleRun, RunOutcome } from "./types.ts";
+import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
 // What /rules shows: the management panel. Everything is drawn from the rule
 // definition and the database; the model's own words appear only as the
@@ -69,8 +70,24 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 }
 
 export function triggerLabel(trigger: Rule["trigger"]): string {
-  const label = triggerEvents(trigger).map((e) => `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`).join("、または");
-  return `${label}${trigger.includeBotOrigin ? " ⚠️ Bot自身が起こしたイベントでも動きます" : ""}`;
+  const label = triggerEvents(trigger)
+    .map((e) => {
+      const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
+      return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
+    })
+    .join("、または");
+  const origin =
+    trigger.includeBotOrigin === "other_rules"
+      ? " ⚠️ ほかのルールや会話でBotが起こしたイベントでも動きます"
+      : trigger.includeBotOrigin
+        ? " ⚠️ Bot自身が起こしたイベントでも動きます"
+        : "";
+  const debounce = trigger.debounceSeconds ? ` · イベントが${trigger.debounceSeconds}秒途切れたらまとめて1回動きます` : "";
+  return `${label}${origin}${debounce}`;
+}
+
+export function limitsLabel(limits: RuleLimits): string {
+  return `1分に${limits.perMinute}回まで · ${limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`;
 }
 
 export function dryRunText(dry: RuleDryRun): string {
@@ -101,7 +118,7 @@ export function dryRunText(dry: RuleDryRun): string {
 function definitionTexts(d: Pick<Rule, "ownerId" | "trigger" | "allow" | "code" | "params" | "summary" | "limits">, label: (id: string) => string): string[] {
   const risk = allowRisk(d.allow);
   return [
-    `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · 1分に${d.limits.perMinute}回まで · ${d.limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`,
+    `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · ${limitsLabel(d.limits)}`,
     `**許す操作**(これ以外の変更は実行されません)\n${allowLines(d.allow, label).join("\n")}`,
     d.params ? `**params**(コードが読む値)\n${paramsText(d.params, label)}` : "",
     `**コードの説明**\n${d.summary ?? "説明を作れませんでした。コードを読んで確かめてください。"}`,

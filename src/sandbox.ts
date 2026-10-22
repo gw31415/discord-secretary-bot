@@ -13,6 +13,8 @@ export interface SandboxBindings {
   params?: unknown;
   /** Which of the rule's triggers fired, e.g. "CHANNEL_CREATE"; null for the agent's code. */
   eventName?: string | null;
+  /** Every event of the run, oldest first: one, or many for a debounced rule. */
+  batch?: unknown[];
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -63,6 +65,7 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     toHandle(vm, bindings.event ?? null).consume((h) => vm.setProp(vm.global, "event", h));
     toHandle(vm, bindings.params ?? null).consume((h) => vm.setProp(vm.global, "params", h));
     toHandle(vm, bindings.eventName ?? null).consume((h) => vm.setProp(vm.global, "eventName", h));
+    toHandle(vm, bindings.batch ?? null).consume((h) => vm.setProp(vm.global, "batch", h));
 
     const discord = vm.newObject();
     vm.newAsyncifiedFunction("get", async (routeHandle, optsHandle) => {

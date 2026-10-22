@@ -269,3 +269,120 @@ test("one rule can fire on several triggers, and its code sees which one", async
   assert.throws(() => w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", events: ["NOPE"] } }), /NOPE/);
   assert.throws(() => w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", events: ["MESSAGE_UPDATE", "MESSAGE_DELETE", "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE"] } }), /5種類まで/);
 });
+
+test("cron schedules are read in their time zone", async () => {
+  const { cronMatches, parseCron, scheduleProblems } = await import("../src/rules/schedule.ts");
+  // 2026-10-22T19:00Z is 04:00 on Friday the 23rd in Tokyo.
+  const at = Date.parse("2026-10-22T19:00:30Z");
+  assert.ok(cronMatches(parseCron("0 4 * * *"), at, "Asia/Tokyo"));
+  assert.ok(!cronMatches(parseCron("0 4 * * *"), at, "UTC"));
+  assert.ok(cronMatches(parseCron("*/10 * * * 5"), at, "Asia/Tokyo"));
+  assert.ok(cronMatches(parseCron("0 4 * * 7,1-4"), at, "Asia/Tokyo") === false);
+  // Day and weekday both given: either matches.
+  assert.ok(cronMatches(parseCron("0 4 1 * 5"), at, "Asia/Tokyo"));
+  assert.ok(cronMatches(parseCron("@daily"), Date.parse("2026-10-22T15:00:00Z"), "Asia/Tokyo"));
+  assert.match(scheduleProblems("61 * * * *", undefined).join(), /範囲/);
+  assert.match(scheduleProblems("* * *", undefined).join(), /5つの欄/);
+  assert.match(scheduleProblems("0 4 * * *", "Mars/Base").join(), /timezone/);
+  assert.match(scheduleProblems(undefined, undefined).join(), /schedule/);
+});
+
+test("trigger settings are checked together", async () => {
+  const { triggerProblems } = await import("../src/rules/triggers.ts");
+  assert.deepEqual(triggerProblems({ event: "CHANNEL_CREATE", events: ["SCHEDULE"], schedule: "0 4 * * *", debounceSeconds: 5, includeBotOrigin: "other_rules" }), []);
+  assert.match(triggerProblems({ event: "CHANNEL_CREATE", schedule: "0 4 * * *" }).join(), /SCHEDULE と一緒/);
+  assert.match(triggerProblems({ event: "SCHEDULE" }).join(), /schedule/);
+  assert.match(triggerProblems({ event: "CHANNEL_CREATE", debounceSeconds: 0 }).join(), /debounce_seconds/);
+});
+
+test("SCHEDULE rules fire once in their minute, with the scheduled time as the event", async () => {
+  const w = world({ t: Date.parse("2026-10-22T19:00:05Z") });
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "0 4 * * *" } });
+  w.admin.save(GUILD, "1", { ...w.definition, name: "別の時刻", trigger: { event: "SCHEDULE", schedule: "30 4 * * *" } });
+  w.engine.tick([GUILD]);
+  w.engine.tick([GUILD], w.now.t + 20_000); // the same minute again
+  await w.engine.idle();
+  assert.equal(w.runs.length, 1);
+  assert.equal(w.runs[0].rule.id, rule.id);
+  assert.equal(w.seen[0].eventName, "SCHEDULE");
+  assert.equal(w.seen[0].event.scheduled_at, "2026-10-22T19:00:00.000Z");
+  assert.equal(w.seen[0].batch.length, 1);
+  // The dry run makes the same kind of event without a sample.
+  const { syntheticEvent } = await import("../src/rules/triggers.ts");
+  assert.equal(syntheticEvent("SCHEDULE", GUILD, rule.trigger, w.now.t)!.timezone, "Asia/Tokyo");
+});
+
+test("a debounced rule runs once on the whole batch, at the latest after five periods", async () => {
+  const timers: Array<{ fn: () => void; at: number; cleared: boolean }> = [];
+  const w = world();
+  (w.engine.deps as any).setTimer = (fn: () => void, ms: number) => {
+    const t = { fn, at: w.now.t + ms, cleared: false };
+    timers.push(t);
+    return t;
+  };
+  (w.engine.deps as any).clearTimer = (t: any) => t && (t.cleared = true);
+  const advance = (ms: number) => {
+    w.now.t += ms;
+    for (const t of timers) if (!t.cleared && t.at <= w.now.t) (t.cleared = true), t.fn();
+  };
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "CHANNEL_UPDATE", debounceSeconds: 2 } });
+  const update = (id: string) => w.engine.dispatch("CHANNEL_UPDATE", GUILD, { id, guild_id: GUILD, name: "x", type: 0, permission_overwrites: [] });
+  update("10");
+  advance(1000);
+  update("13");
+  advance(1500);
+  await w.engine.idle();
+  assert.equal(w.runs.length, 0);
+  advance(600);
+  await w.engine.idle();
+  assert.equal(w.runs.length, 1);
+  assert.deepEqual(w.seen[0].batch.map((b: any) => b.event.id), ["10", "13"]);
+  assert.equal(w.seen[0].event.id, "13");
+  // A steady stream still runs within five periods of its first event.
+  for (let i = 0; i < 12; i++) {
+    update("10");
+    advance(1000);
+  }
+  await w.engine.idle();
+  assert.equal(w.runs.length, 2);
+});
+
+test("other_rules fires on other writers' changes but not on the rule's own", async () => {
+  const w = world();
+  const sitemap = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "CHANNEL_UPDATE", includeBotOrigin: "other_rules" } });
+  const update = { id: "10", guild_id: GUILD, name: "x", type: 0, permission_overwrites: [] };
+  const write = (rule: string | undefined) =>
+    w.engine.noteWrite({ guildId: GUILD, ...(rule ? { rule: { id: rule } } : {}) } as any, { op: "PATCH /channels/{channel}", pathParams: { channel: "10" } } as any, {});
+  write(sitemap.id);
+  w.engine.dispatch("CHANNEL_UPDATE", GUILD, update);
+  await w.engine.idle();
+  assert.equal(w.runs.length, 0);
+  write("sorter");
+  w.engine.dispatch("CHANNEL_UPDATE", GUILD, update);
+  write(undefined); // from a conversation's plan
+  w.engine.dispatch("CHANNEL_UPDATE", GUILD, update);
+  await w.engine.idle();
+  assert.equal(w.runs.length, 2);
+  // The bot's own posts cannot be told apart, so they never fire it.
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", includeBotOrigin: "other_rules" } });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", SELF, "703"));
+  await w.engine.idle();
+  assert.equal(w.runs.length, 2);
+});
+
+test("an allow entry can put conditions on the channel a step acts in", () => {
+  const entry = { op: "POST /channels/{channel}/messages", channel: { properties: { parent_id: { const: "500" } }, required: ["parent_id"] } };
+  assert.deepEqual(allowShapeProblems([entry]), []);
+  assert.match(allowShapeProblems([{ op: "POST /guilds/{guild}/channels", channel: {} }]).join(), /チャンネルの条件/);
+  const steps = normalizeSteps([{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x" } }], GUILD, "p");
+  assert.deepEqual(allowProblems(steps, [entry], undefined, undefined, new Map([["s1", { id: "10", parent_id: "500" }]])), []);
+  assert.match(allowProblems(steps, [entry], undefined, undefined, new Map([["s1", { id: "10", parent_id: "501" }]])).join(), /範囲外/);
+  assert.match(allowProblems(steps, [entry], undefined, undefined, new Map([["s1", null]])).join(), /範囲外/);
+});
+
+test("reaction operations take an emoji, not an id, in their path", () => {
+  const op = "PUT /channels/{channel}/messages/{message}/reactions/{emoji}/@me";
+  assert.equal(normalizeSteps([{ op, path: { channel: "10", message: "1", emoji: "👍" } }], GUILD, "p").length, 1);
+  assert.equal(normalizeSteps([{ op, path: { channel: "10", message: "1", emoji: "ok_hand:123" } }], GUILD, "p").length, 1);
+  for (const emoji of ["..", "a/b", "", "%F0"]) assert.throws(() => normalizeSteps([{ op, path: { channel: "10", message: "1", emoji } }], GUILD, "p"), /emoji/);
+});

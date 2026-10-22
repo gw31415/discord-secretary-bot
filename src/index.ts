@@ -192,6 +192,12 @@ client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
   } catch (e) {
     log(`${data.name}: メンバー一覧の取得に失敗`, e);
   }
+  // After the members, so the owners' permissions are known.
+  try {
+    engine.dispatch("BOT_READY", data.id, { guild_id: data.id });
+  } catch (e) {
+    log(`${data.name}: BOT_READY のルールの振り分けに失敗`, e);
+  }
 });
 
 client.on(GatewayDispatchEvents.GuildDelete, ({ data }) => {
@@ -234,10 +240,11 @@ client.on(GatewayDispatchEvents.VoiceStateUpdate, ({ data }) => {
 });
 
 // Rules see each event after the cache has taken it in (listeners run in the order added).
-for (const event of Object.keys(TRIGGERS)) {
+for (const [event, spec] of Object.entries(TRIGGERS)) {
+  if (spec.synthetic) continue;
   client.on(event as GatewayDispatchEvents.MessageCreate, ({ data }) => {
     const payload = data as unknown as Record<string, unknown>;
-    const guildId = (payload.guild_id as string | undefined) ?? undefined;
+    const guildId = spec.guildId ? spec.guildId(payload) : ((payload.guild_id as string | undefined) ?? undefined);
     if (!served(guildId)) return;
     try {
       engine.dispatch(event, guildId, payload);
@@ -276,6 +283,20 @@ function guildOf(channel: object): string | undefined {
   return "guild_id" in channel ? (channel.guild_id as string | undefined) : undefined;
 }
 
+// SCHEDULE rules: checked at the start of every minute.
+let scheduler: ReturnType<typeof setTimeout> | undefined;
+function scheduleTick(): void {
+  scheduler = setTimeout(() => {
+    try {
+      engine.tick(caches.ids());
+    } catch (e) {
+      log("時刻のルールの振り分けに失敗", e);
+    }
+    scheduleTick();
+  }, 60_000 - (Date.now() % 60_000) + 50);
+}
+scheduleTick();
+
 const sweeper = setInterval(() => {
   conversations.sweep();
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
@@ -286,6 +307,7 @@ const sweeper = setInterval(() => {
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
+  clearTimeout(scheduler);
   presence.stop();
   await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);
   await gateway.destroy();

@@ -12,13 +12,36 @@ export interface RuleLimits {
 }
 
 export const DEFAULT_LIMITS: RuleLimits = { perMinute: 10, maxConsecutiveFailures: 3 };
+export const MAX_LIMITS: RuleLimits = { perMinute: 60, maxConsecutiveFailures: 20 };
+
+/** The limits a rule asked for, inside what is allowed. */
+export function ruleLimits(asked: Partial<RuleLimits> | undefined): RuleLimits {
+  const clamp = (v: number | undefined, d: number, max: number) => (Number.isInteger(v) && v! >= 1 ? Math.min(v!, max) : d);
+  return {
+    perMinute: clamp(asked?.perMinute, DEFAULT_LIMITS.perMinute, MAX_LIMITS.perMinute),
+    maxConsecutiveFailures: clamp(asked?.maxConsecutiveFailures, DEFAULT_LIMITS.maxConsecutiveFailures, MAX_LIMITS.maxConsecutiveFailures),
+  };
+}
 
 export interface RuleTrigger {
   event: string;
   /** More events that fire the same rule; the code tells them apart by `eventName`. */
   events?: string[];
-  /** Also fire on events the bot itself caused. Off by default to stop loops. */
-  includeBotOrigin?: boolean;
+  /**
+   * Also fire on events the bot itself caused. Off by default to stop loops.
+   * "other_rules" fires on the bot's changes except this rule's own (and except
+   * the bot's posts and reactions, whose maker cannot be told apart).
+   */
+  includeBotOrigin?: boolean | "other_rules";
+  /** Cron (minute hour day month weekday) for the SCHEDULE trigger. */
+  schedule?: string;
+  /** Time zone the schedule is read in. Absent means Asia/Tokyo. */
+  timezone?: string;
+  /**
+   * Waits this long after the last event before running once on the batch;
+   * the code reads every event of it as `batch`.
+   */
+  debounceSeconds?: number;
 }
 
 /** What the owner approves. Any change makes a new version that is approved again. */
@@ -75,4 +98,6 @@ export interface RuleProposal {
   sampleEvent?: unknown;
   /** The id of the owner's rule this is a new version of. */
   replaces?: string;
+  /** Overrides of DEFAULT_LIMITS. */
+  limits?: Partial<RuleLimits>;
 }

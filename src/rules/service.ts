@@ -17,8 +17,8 @@ import { allowProblems } from "./allow.ts";
 import type { RuleEngine } from "./engine.ts";
 import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
-import { isTrigger, MAX_TRIGGER_EVENTS, triggerEvents } from "./triggers.ts";
-import { DEFAULT_LIMITS } from "./types.ts";
+import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
+import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
 import type { Rule, RuleDefinition, RuleProposal, RuleRun } from "./types.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
@@ -94,6 +94,9 @@ export class RuleService {
   /** A real event to try the rule on, read with `reader`; otherwise the agent's sample. */
   async sample(guildId: string, ownerId: string, channelId: string, draft: Pick<RuleProposal, "trigger" | "sampleEvent">, reader: Pick<Reader, "get">): Promise<{ event: unknown; source: string | null }> {
     const event = draft.trigger.event;
+    // Events the bot makes itself need no sample: the dry run makes one like the real thing.
+    const synthetic = syntheticEvent(event, guildId, draft.trigger, this.deps.now());
+    if (synthetic) return { event: synthetic, source: "いま発火したとしたときのイベント" };
     try {
       if ((event === "MESSAGE_CREATE" || event === "MESSAGE_UPDATE") && channelId) {
         const messages = (await reader.get(`/channels/${channelId}/messages`, { limit: 10 })) as APIMessage[];
@@ -159,11 +162,11 @@ export class RuleService {
       const where = `ルール「${r.name}」`;
       const own: string[] = [];
       if (!r.name.trim()) own.push("名前がありません");
-      for (const event of triggerEvents(r.trigger)) if (!isTrigger(event)) own.push(`きっかけ ${event} には対応していません`);
-      if (triggerEvents(r.trigger).length > MAX_TRIGGER_EVENTS) own.push(`きっかけは${MAX_TRIGGER_EVENTS}種類までです`);
+      const triggerIssues = triggerProblems(r.trigger);
+      own.push(...triggerIssues);
       for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
-      const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, summary: null, limits: DEFAULT_LIMITS };
-      if (triggerEvents(r.trigger).every(isTrigger)) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
+      const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, summary: null, limits: ruleLimits(r.limits) };
+      if (triggerIssues.length === 0) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
       for (const id of pinnedIds(r)) {
         if (!input.shareable.has(id)) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
       }
@@ -212,6 +215,7 @@ export class RuleService {
         allow: r.allow,
         code: r.code,
         ...(r.params ? { params: r.params } : {}),
+        ...(r.limits ? { limits: ruleLimits(r.limits) } : {}),
         summary: r.summary !== undefined ? r.summary : await this.#summarize(r.code, input.ownerId, triggerEvents(r.trigger).join("・")),
         ...(replaces ? { replaces } : {}),
         dry,
@@ -233,7 +237,7 @@ export class RuleService {
       code: draft.code,
       ...(draft.params ? { params: draft.params } : {}),
       summary: draft.summary,
-      limits: DEFAULT_LIMITS,
+      limits: draft.limits ?? DEFAULT_LIMITS,
     };
     return this.deps.admin.save(guildId, ownerId, definition, draft.replaces?.id).id;
   }

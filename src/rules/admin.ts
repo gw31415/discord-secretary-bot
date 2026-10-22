@@ -7,7 +7,7 @@ import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { allowShapeProblems, missingPermissions } from "./allow.ts";
 import { haltKey } from "./engine.ts";
 import type { Halt } from "./engine.ts";
-import { isTrigger, MAX_TRIGGER_EVENTS, triggerEvents } from "./triggers.ts";
+import { triggerProblems } from "./triggers.ts";
 import type { Rule, RuleDefinition, RuleRun } from "./types.ts";
 
 // The rule management functions. The /rule panel is a view over these; a web
@@ -96,9 +96,7 @@ export class RuleAdmin {
   ownershipProblems(guildId: string, ownerId: string, definition: RuleDefinition): string[] {
     const viewer = this.#viewer(guildId, ownerId);
     const problems = [...allowShapeProblems(definition.allow)];
-    const events = triggerEvents(definition.trigger);
-    for (const event of events) if (!isTrigger(event)) problems.push(`きっかけ ${event} には対応していません`);
-    if (events.length > MAX_TRIGGER_EVENTS) problems.push(`きっかけは${MAX_TRIGGER_EVENTS}種類までです`);
+    problems.push(...triggerProblems(definition.trigger));
     const missing = missingPermissions(viewer.guild, viewer.member, definition.allow);
     if (missing.length > 0) problems.push(`許す操作に必要な権限をあなたが持っていません: ${missing.join(", ")}`);
     const bot = viewer.guild.members.get(this.deps.selfId());

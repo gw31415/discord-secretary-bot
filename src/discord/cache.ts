@@ -168,4 +168,8 @@ export class GuildCaches {
   get size(): number {
     return this.#caches.size;
   }
+
+  ids(): string[] {
+    return [...this.#caches.keys()];
+  }
 }
