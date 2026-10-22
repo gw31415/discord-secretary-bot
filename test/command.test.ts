@@ -252,3 +252,35 @@ test("the owner changes who sees a command's replies from /rules, keeping the ve
   assert.match(view, /返事を全員に見せる」にしました/);
   assert.throws(() => w.admin.setVisibility(GUILD, "1", rule.id, "everyone" as never), /選べない/);
 });
+
+test("a rule's panel opens on a short summary; allow, code and runs are pages in one menu", async () => {
+  const w = world();
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  const press = (action: string, values?: string[]) => ({
+    id: "i3", token: "tok", application_id: "app", type: InteractionType.MessageComponent, guild_id: GUILD,
+    member: { user: { id: "1" }, roles: [], permissions: "0" },
+    data: { custom_id: `rule:${action}:${action === "open" && values ? "" : rule.id}`, component_type: values ? 3 : 2, ...(values ? { values } : {}) },
+  }) as never;
+  await w.service.handleInteraction(press("home"));
+  const home = JSON.stringify(w.calls.at(-1)![1]);
+  assert.doesNotMatch(home, /会話でBotに頼む/);
+  await w.service.handleInteraction(press("open", [rule.id]));
+  const summary = w.calls.at(-1)![1] as { components: Array<{ components: Array<{ type: number; components?: Array<{ type: number; custom_id?: string; options?: Array<{ value: string }> }> }> }> };
+  const text = JSON.stringify(summary);
+  assert.doesNotMatch(text, /```js/);
+  assert.doesNotMatch(text, /許す操作\*\*/);
+  const rows = summary.components[0]!.components.filter((c) => c.type === 1);
+  for (const r of rows) assert.ok(r.components!.length <= 3, "at most three buttons in a row");
+  const menu = rows.flatMap((r) => r.components!).find((c) => c.custom_id === `rule:view:${rule.id}`)!;
+  assert.deepEqual(menu.options!.map((o) => o.value), ["summary", "allow", "source", "runs", "delete"]);
+  await w.service.handleInteraction(press("view", ["source"]));
+  const source = JSON.stringify(w.calls.at(-1)![1]);
+  assert.match(source, /```js/);
+  assert.match(source, /rule:code:/);
+  await w.service.handleInteraction(press("view", ["allow"]));
+  assert.match(JSON.stringify(w.calls.at(-1)![1]), /許す操作\*\*/);
+  await w.service.handleInteraction(press("view", ["runs"]));
+  assert.match(JSON.stringify(w.calls.at(-1)![1]), /最近の実行/);
+  await w.service.handleInteraction(press("view", ["delete"]));
+  assert.match(JSON.stringify(w.calls.at(-1)![1]), /本当に削除/);
+});

@@ -495,7 +495,7 @@ test("the same change to many targets is shown as one line", async () => {
   assert.doesNotMatch(text, /^2\./m);
 });
 
-test("a plan made from code opens on the code and its explanation, and switches to the steps", async () => {
+test("a plan made from code opens on its explanation and the changes; the code and exact calls are pages away", async () => {
   const { planner, store, replies, summarized } = setup();
   const code = 'const ids = ["3"];\nreturn plan(ids.map((u) => call("PUT /guilds/{guild}/members/{user}/roles/{role}", { path: { user: u, role: "' + MOD_ROLE + '" } })));';
   const plan = await planner.propose({
@@ -506,17 +506,17 @@ test("a plan made from code opens on the code and its explanation, and switches 
   assert.deepEqual(summarized, [code]);
   assert.deepEqual(plan.source, { code, summary: "全員に @Mod を付けます。" });
   const opened = replies.at(-1)!.body;
-  assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*```js\nconst ids/);
-  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "結果を見る", "JSONを見る"]);
+  assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*ロール付与/);
+  assert.doesNotMatch(dialogText(opened), /```/);
+  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "概要", "コード", "詳細", "JSONを見る"]);
 
   // Anyone may switch the view; it stays switched when the dialog is redrawn.
-  await planner.handleInteraction(click(plan, "result", "2"));
-  const result = replies.at(-1)!.body;
-  assert.doesNotMatch(dialogText(result), /```js\n/);
-  assert.match(dialogText(result), /ロール付与[\s\S]*```json\n\[\{"id":"s1"/);
-  assert.ok(dialogButtons(result).includes("コードを見る"));
+  await planner.handleInteraction(click(plan, "code", "2"));
+  assert.match(dialogText(replies.at(-1)!.body), /```js\nconst ids/);
+  await planner.handleInteraction(click(plan, "details", "2"));
+  assert.match(dialogText(replies.at(-1)!.body), /```json\n\[\{"id":"s1"/);
   await planner.handleInteraction(click(plan, "cancel", "1"));
-  assert.doesNotMatch(dialogText(replies.at(-1)!.body), /```js\n/);
+  assert.match(dialogText(replies.at(-1)!.body), /```json/);
   assert.equal(store.getPlan(plan.id)!.status, "cancelled");
 });
 
@@ -652,9 +652,12 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.match(text, /1件 · ルール2件/);
   assert.match(text, /登録するルール/);
   assert.match(text, /通話部屋を作る/);
-  assert.match(text, /lobby: \(s1 で作るもののid\)/);
-  assert.match(text, /対象の条件: .*📞/);
-  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "コードを見る", "JSONを見る"]);
+  assert.doesNotMatch(text, /lobby:/);
+  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "概要", "コード", "詳細", "JSONを見る"]);
+  await t.planner.handleInteraction(click(plan, "details", "1"));
+  const details = dialogText(t.replies.at(-1)!.body);
+  assert.match(details, /lobby: \(s1 で作るもののid\)/);
+  assert.match(details, /対象の条件: .*📞/);
   assert.equal(t.store.listRules(GUILD).length, 0); // nothing is registered before the approval
 
   // One click: the lobby is made, then both rules are registered.

@@ -19,12 +19,22 @@ const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用の
 
 export type RuleAction =
   | "home" | "open" | "enable" | "disable" | "dry" | "delete" | "delete2" | "code"
-  | "plans" | "audit" | "halt" | "resume" | "clearstate" | "visibility";
+  | "plans" | "audit" | "halt" | "resume" | "clearstate" | "visibility"
+  | "allow" | "source" | "runs" | "view";
 
 const ACTIONS = new Set<RuleAction>([
   "home", "open", "enable", "disable", "dry", "delete", "delete2", "code",
   "plans", "audit", "halt", "resume", "clearstate", "visibility",
+  "allow", "source", "runs", "view",
 ]);
+
+/** A rule's panel opens on its summary; what it may do, its code and its runs are a button away. */
+export type RulePage = "summary" | "allow" | "source" | "runs";
+
+const PAGE_LABEL: Record<RulePage, string> = { summary: "概要", allow: "許す操作", source: "コード", runs: "実行履歴" };
+export const RULE_PAGES = Object.keys(PAGE_LABEL) as RulePage[];
+/** The page menu's extra entry, which asks before deleting. */
+export const DELETE_CHOICE = "delete";
 
 export function ruleCustomId(action: RuleAction, arg = ""): string {
   return `rule:${action}:${arg}`;
@@ -121,17 +131,6 @@ export function dryRunText(dry: RuleDryRun): string {
   return [head, ...body].join("\n");
 }
 
-function definitionTexts(d: Pick<Rule, "ownerId" | "trigger" | "allow" | "code" | "params" | "summary" | "limits">, label: (id: string) => string): string[] {
-  const risk = allowRisk(d.allow);
-  return [
-    `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · ${limitsLabel(d.limits)}`,
-    `**許す操作**(これ以外の変更は実行されません)\n${allowLines(d.allow, label).join("\n")}`,
-    d.params ? `**params**(コードが読む値)\n${paramsText(d.params, label)}` : "",
-    `**コードの説明**\n${d.summary ?? "説明を作れませんでした。コードを読んで確かめてください。"}`,
-    fenced("js", d.code.length > MAX_CODE ? `${d.code.slice(0, MAX_CODE)}\n// …(続きは「コードをファイルで」)` : d.code),
-  ];
-}
-
 /** A rule's params, with ids named where the cache knows them. */
 export function paramsText(params: Record<string, unknown>, label: (id: string) => string): string {
   return Object.entries(params)
@@ -171,24 +170,9 @@ export interface HomeInput {
 }
 
 export function homeView(input: HomeInput): Rendered {
-  const texts = [
-    `## ルール\n${input.canSeeAll ? "このサーバーのすべてのルールです。" : "あなたのルールです。"}新しいルールや変更は、会話でBotに頼むと作れます(例: 「#自己紹介 に投稿した人に @メンバー を付けるルールを作って」)。この画面はあなたにだけ見えています。`,
-  ];
-  if (input.halted) texts.push(`🛑 **全ルールを停止中**(<@${input.halted.by}> が <t:${unix(input.halted.at)}:f> に停止)`);
-  if (input.rules.length === 0) texts.push("ルールはまだありません。");
-  else {
-    texts.push(
-      input.rules
-        .slice(0, 25)
-        .map((r) => {
-          const last = input.lastRuns.get(r.id);
-          const run = last ? ` · 最後: ${OUTCOME_LABEL[last.outcome]} <t:${unix(last.startedAt)}:R>` : "";
-          const owner = r.ownerId === input.userId ? "" : ` · <@${r.ownerId}>`;
-          return `${ruleStatus(r)} **${r.name}** v${r.version} — ${triggerEvents(r.trigger).map((e) => TRIGGERS[e]?.label ?? e).join("/")}${owner}${run}`;
-        })
-        .join("\n"),
-    );
-  }
+  const texts = ["## ルール"];
+  if (input.halted) texts.push(`🛑 全ルールを停止中(<@${input.halted.by}>、<t:${unix(input.halted.at)}:R>)`);
+  if (input.rules.length === 0) texts.push("まだありません。会話でBotに頼むと作れます。");
   if (input.notice) texts.push(`-# ${input.notice}`);
   const rows: APIComponentInContainer[] = [];
   if (input.rules.length > 0) {
@@ -197,14 +181,22 @@ export function homeView(input: HomeInput): Rendered {
       components: [{
         type: ComponentType.StringSelect,
         custom_id: ruleCustomId("open"),
-        placeholder: "ルールを開く",
-        options: input.rules.slice(0, 25).map((r) => ({ label: clip(r.name, 100), value: r.id, description: clip(`${r.enabled ? "有効" : "停止中"} · ${triggerEvents(r.trigger).join(",")}`, 100) })),
+        placeholder: `ルールを開く(${input.rules.length}件)`,
+        options: input.rules.slice(0, 25).map((r) => {
+          const last = input.lastRuns.get(r.id);
+          const owner = r.ownerId === input.userId ? "" : " · ほかの人のルール";
+          return {
+            label: clip(`${r.enabled ? "🟢" : "⏸️"} ${r.name}`, 100),
+            value: r.id,
+            description: clip(`${triggerEvents(r.trigger).map((e) => (e === "COMMAND" && r.trigger.command ? `/${r.trigger.command.name}` : TRIGGERS[e]?.label ?? e)).join("/")}${last ? ` · 最後: ${OUTCOME_LABEL[last.outcome]}` : ""}${owner}`, 100),
+          };
+        }),
       }],
     });
   }
   const buttons = [button(ruleCustomId("plans"), "変更の履歴"), button(ruleCustomId("audit"), "監査ログ")];
   if (input.canHalt) {
-    buttons.push(input.halted ? button(ruleCustomId("resume"), "全ルールを再開", ButtonStyle.Primary) : button(ruleCustomId("halt"), "全ルールを緊急停止", ButtonStyle.Danger));
+    buttons.push(input.halted ? button(ruleCustomId("resume"), "全ルールを再開", ButtonStyle.Primary) : button(ruleCustomId("halt"), "緊急停止", ButtonStyle.Danger));
   }
   rows.push(row(buttons));
   return container(texts, rows);
@@ -212,6 +204,8 @@ export function homeView(input: HomeInput): Rendered {
 
 export interface DetailInput {
   rule: Rule;
+  userId: string;
+  page?: RulePage;
   runs: RuleRun[];
   can: { enable: boolean; disable: boolean; remove: boolean; owner: boolean };
   dry?: RuleDryRun;
@@ -234,43 +228,76 @@ function runLine(run: RuleRun): string {
   return `<t:${unix(run.startedAt)}:R> v${run.ruleVersion} ${OUTCOME_LABEL[run.outcome]}${plan}${error}`;
 }
 
+/** Pages, and deleting, sit in one menu so the buttons stay few. */
+function pageMenu(rule: Rule, page: RulePage, canRemove: boolean): APIComponentInContainer {
+  return {
+    type: ComponentType.ActionRow,
+    components: [{
+      type: ComponentType.StringSelect,
+      custom_id: ruleCustomId("view", rule.id),
+      placeholder: "詳しく見る",
+      options: [
+        ...RULE_PAGES.map((p) => ({ label: PAGE_LABEL[p], value: p, default: p === page })),
+        ...(canRemove ? [{ label: "このルールを削除…", value: DELETE_CHOICE }] : []),
+      ],
+    }],
+  };
+}
+
 export function detailView(input: DetailInput, label: (id: string) => string): Rendered {
   const { rule } = input;
-  const texts = [
-    `### ${rule.name}\n${ruleStatus(rule)} · v${rule.version} · \`${rule.id}\``,
-    ...definitionTexts(rule, label),
-    `**元の依頼**\n${clip(rule.sourcePrompt, 300)}`,
-    `**最近の実行**\n${input.runs.length > 0 ? input.runs.map(runLine).join("\n") : "まだありません"}`,
-  ];
-  if (input.state !== undefined && input.state !== null) texts.push(`**状態**(次の実行に持ち越す値)\n${fenced("json", stateText(input.state))}`);
-  if (input.dry) texts.push(dryRunText(input.dry));
-  if (input.can.owner) texts.push(`-# 直すときは、会話でBotに「ルール \`${rule.id}\`(${rule.name})を〜に直して」と頼んでください。確認のあと新しい版になります。`);
-  if (input.confirmDelete) texts.push("⚠️ 本当に削除しますか? 実行履歴と監査ログは残ります。");
-  if (input.notice) texts.push(`-# ${input.notice}`);
-  const buttons: APIButtonComponent[] = [];
+  const page = input.page ?? "summary";
+  const texts = [`### ${rule.name}\n${ruleStatus(rule)} · v${rule.version}${rule.ownerId === input.userId ? "" : ` · <@${rule.ownerId}>`}`];
   if (input.confirmDelete) {
-    buttons.push(button(ruleCustomId("delete2", rule.id), "削除する", ButtonStyle.Danger), button(ruleCustomId("open", rule.id), "やめる"));
-    return container(texts, [row(buttons)]);
+    texts.push("⚠️ 本当に削除しますか? 実行履歴と監査ログは残ります。");
+    return container(texts, [row([button(ruleCustomId("delete2", rule.id), "削除する", ButtonStyle.Danger), button(ruleCustomId("open", rule.id), "やめる")])]);
   }
-  if (rule.enabled && input.can.disable) buttons.push(button(ruleCustomId("disable", rule.id), "止める", ButtonStyle.Danger));
-  if (!rule.enabled && input.can.enable) buttons.push(button(ruleCustomId("enable", rule.id), "有効にする", ButtonStyle.Primary));
-  if (input.can.owner) buttons.push(button(ruleCustomId("dry", rule.id), "ドライラン"));
-  if (input.can.owner && input.state !== undefined && input.state !== null) buttons.push(button(ruleCustomId("clearstate", rule.id), "状態を消す"));
-  buttons.push(button(ruleCustomId("code", rule.id), "コードをファイルで"));
-  const second: APIButtonComponent[] = [button(ruleCustomId("home"), "戻る")];
-  if (input.can.remove) second.push(button(ruleCustomId("delete", rule.id), "削除", ButtonStyle.Danger));
-  // The owner picks who sees a command's replies here, without a new version.
-  const visibility: APIComponentInContainer[] = input.can.owner && rule.trigger.command
-    ? [{
+  const rows: APIComponentInContainer[] = [];
+  const back = button(ruleCustomId("home"), "一覧へ");
+  const buttons: APIButtonComponent[] = [back];
+  if (page === "summary") {
+    const last = input.runs[0];
+    texts.push(
+      triggerLabel(rule.trigger),
+      rule.summary ?? "説明を作れませんでした。「コード」で確かめてください。",
+      last ? `-# 最後の実行: ${runLine(last)}` : "-# まだ実行されていません",
+    );
+    if (input.dry) texts.push(dryRunText(input.dry));
+    // The owner picks who sees a command's replies here, without a new version.
+    if (input.can.owner && rule.trigger.command) {
+      rows.push({
         type: ComponentType.ActionRow,
         components: [{
           type: ComponentType.StringSelect,
           custom_id: ruleCustomId("visibility", rule.id),
           options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (rule.trigger.command!.visibility ?? "auto") === o.value })),
         }],
-      }]
-    : [];
-  return container(texts, [...visibility, row(buttons), row(second)]);
+      });
+    }
+    if (rule.enabled && input.can.disable) buttons.push(button(ruleCustomId("disable", rule.id), "止める", ButtonStyle.Danger));
+    if (!rule.enabled && input.can.enable) buttons.push(button(ruleCustomId("enable", rule.id), "有効にする", ButtonStyle.Primary));
+    if (input.can.owner) buttons.push(button(ruleCustomId("dry", rule.id), "ドライラン"));
+  } else if (page === "allow") {
+    texts.push(
+      `**許す操作**(これ以外の変更は実行されません)\n${allowLines(rule.allow, label).join("\n") || "なし(返事だけします)"}`,
+      `<@${rule.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[allowRisk(rule.allow)]}\n${limitsLabel(rule.limits)}`,
+      rule.params ? `**params**(コードが読む値)\n${paramsText(rule.params, label)}` : "",
+    );
+  } else if (page === "source") {
+    texts.push(
+      `**元の依頼**\n${clip(rule.sourcePrompt, 300)}`,
+      fenced("js", rule.code.length > MAX_CODE ? `${rule.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.code),
+    );
+    if (input.can.owner) texts.push(`-# 直すときは会話でBotに「ルール \`${rule.id}\`(${rule.name})を〜に直して」と頼みます。`);
+    buttons.push(button(ruleCustomId("code", rule.id), "ファイルで"));
+  } else {
+    texts.push(`**最近の実行**\n${input.runs.length > 0 ? input.runs.map(runLine).join("\n") : "まだありません"}`);
+    const hasState = input.state !== undefined && input.state !== null;
+    if (hasState) texts.push(`**状態**(次の実行に持ち越す値)\n${fenced("json", stateText(input.state))}`);
+    if (input.can.owner && hasState) buttons.push(button(ruleCustomId("clearstate", rule.id), "状態を消す"));
+  }
+  if (input.notice) texts.push(`-# ${input.notice}`);
+  return container(texts, [pageMenu(rule, page, input.can.remove), ...rows, row(buttons)]);
 }
 
 const STATUS_LABEL: Record<PlanRow["status"], string> = {

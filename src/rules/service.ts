@@ -18,7 +18,8 @@ import type { RuleAdmin } from "./admin.ts";
 import { allowProblems } from "./allow.ts";
 import { attachmentsFor } from "../plan/files.ts";
 import type { RuleEngine } from "./engine.ts";
-import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
+import { auditView, DELETE_CHOICE, detailView, homeView, parseRuleCustomId, plansView, RULE_PAGES } from "./panel.ts";
+import type { RulePage } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
 import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
@@ -405,11 +406,11 @@ export class RuleService {
     });
   }
 
-  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean } = {}): Rendered {
+  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean; page?: RulePage } = {}): Rendered {
     const { admin } = this.deps;
     const rule = admin.get(guildId, userId, ruleId);
     return detailView(
-      { rule, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), ...extra },
+      { rule, userId, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), ...extra },
       cacheLabel(this.deps.caches.get(guildId)?.guild),
     );
   }
@@ -435,6 +436,17 @@ export class RuleService {
         case "open": {
           const values = "values" in interaction.data ? interaction.data.values : [];
           await update(this.#detail(guildId, userId, values[0] ?? parsed.arg));
+          return true;
+        }
+        case "allow":
+        case "source":
+        case "runs":
+          await update(this.#detail(guildId, userId, parsed.arg, { page: parsed.action }));
+          return true;
+        case "view": {
+          const value = "values" in interaction.data ? interaction.data.values[0] : undefined;
+          if (value === DELETE_CHOICE) await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
+          else await update(this.#detail(guildId, userId, parsed.arg, { page: RULE_PAGES.includes(value as RulePage) ? (value as RulePage) : "summary" }));
           return true;
         }
         case "enable":
@@ -473,7 +485,7 @@ export class RuleService {
           }
           this.deps.store.setRuleState(rule.id, null);
           this.deps.store.audit({ kind: "user", userId, via: "panel" }, "rule.clear_state", {}, undefined, rule.id);
-          await update(this.#detail(guildId, userId, rule.id, { notice: "状態を消しました。次の実行は state が null で始まります" }));
+          await update(this.#detail(guildId, userId, rule.id, { page: "runs", notice: "状態を消しました。次の実行は state が null で始まります" }));
           return true;
         }
         case "delete2": {
