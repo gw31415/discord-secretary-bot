@@ -358,7 +358,7 @@ function resultBody(plan: Plan, state: DialogState): string[] {
 function gallery(plan: Plan): APIMediaGalleryComponent[] {
   const ids = Object.keys(plan.attachments ?? {});
   if (ids.length === 0) return [];
-  return [{ type: ComponentType.MediaGallery, items: ids.map((id) => ({ media: { url: `attachment://${dialogFileName(id)}` }, description: plan.attachments![id]!.name })) }];
+  return [{ type: ComponentType.MediaGallery, items: ids.map((id) => ({ media: { url: `attachment://${dialogFileName(id, plan.attachments![id]!)}` }, description: plan.attachments![id]!.name })) }];
 }
 
 export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {

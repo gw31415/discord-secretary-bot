@@ -7,6 +7,7 @@ import { resolveWebAccess } from "./agent/web.ts";
 import { Inbox, ReplyFailed } from "./agent/respond.ts";
 import { isTransient } from "./agent/retry.ts";
 import { ImageBox } from "./agent/attachments.ts";
+import type { ImageTools } from "./agent/attachments.ts";
 import type { Attachment } from "./plan/types.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
@@ -43,6 +44,8 @@ export interface ConversationDeps {
   /** replyToId is null for follow-up posts, which read as a natural series. */
   /** Posts one message; `files` are PNGs uploaded with it. */
   sendReply: (channelId: string, replyToId: string | null, content: string, files?: Array<{ name: string; data: Buffer }>) => Promise<void>;
+  /** Tools that make or fetch images for the reply; none are wired yet. */
+  imageTools?: ImageTools;
   sendDm: (userId: string, content: string) => Promise<void>;
   typing: (channelId: string) => Promise<void>;
   makeReader: (scope: ReadScope) => Reader;
@@ -486,6 +489,7 @@ export class Conversations {
             }
           : undefined,
         attachments: images,
+        ...(this.deps.imageTools ? { imageTools: this.deps.imageTools } : {}),
         rules: this.deps.rules
           ? {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),

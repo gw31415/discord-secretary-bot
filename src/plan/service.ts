@@ -105,7 +105,7 @@ export interface ProposeInput {
   reader?: Pick<Reader, "get">;
   /** The request the plan answers, kept as each rule's source. */
   request?: string;
-  /** Images drawn for this reply that the steps' posts may name in `files`. */
+  /** Images attached in this reply that the steps' posts may name in `files`. */
   images?: Record<string, Attachment>;
 }
 
