@@ -24,10 +24,10 @@ function schemaProblem(schema: unknown, where: string): string | null {
   }
 }
 
-/** Shape problems of an allow list, before anyone is asked to approve it. */
-export function allowShapeProblems(allow: AllowEntry[]): string[] {
+/** Shape problems of an allow list, before anyone is asked to approve it. A command that only replies may change nothing. */
+export function allowShapeProblems(allow: AllowEntry[], mayBeEmpty = false): string[] {
   const problems: string[] = [];
-  if (allow.length === 0) problems.push("許す操作が1つもありません");
+  if (allow.length === 0 && !mayBeEmpty) problems.push("許す操作が1つもありません");
   if (allow.length > MAX_ALLOW_ENTRIES) problems.push(`許す操作は${MAX_ALLOW_ENTRIES}個までです`);
   if (JSON.stringify(allow).length > MAX_ALLOW_JSON) problems.push("許す操作の定義が長すぎます");
   allow.forEach((entry, i) => {

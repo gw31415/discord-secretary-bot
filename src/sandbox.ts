@@ -24,6 +24,8 @@ export interface SandboxBindings {
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
   /** Enables createCanvas()/attachImage(); takes the drawn PNG and returns the image's id. */
   attach?: (png: Buffer, name: string) => string;
+  /** Enables reply(text) for a command's run: the words go back to whoever ran the command. */
+  reply?: (text: string) => void;
   /** Enables renderMath()/convertImage(); each returns the new image's id. Options arrive unchecked. */
   media?: {
     math: (tex: string, options: unknown, name: string) => Promise<string>;
@@ -44,8 +46,8 @@ export interface SandboxLimits {
 }
 
 export const AGENT_SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 30_000, memoryBytes: 64 * 1024 * 1024, maxGets: 200 };
-/** A rule runs on every matching event, so it gets less. The wall time includes waiting on discord.get. */
-export const RULE_SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 10_000, memoryBytes: 64 * 1024 * 1024, maxGets: 50 };
+/** Rules get as much as the agent's code; their run limits (per minute, failures in a row) keep them in check. The wall time includes waiting on discord.get. */
+export const RULE_SANDBOX_LIMITS: SandboxLimits = AGENT_SANDBOX_LIMITS;
 
 const PRELUDE = [
   "function call(op, args) { args = args || {}; return { id: args.id, op: op, path: args.path, query: args.query, body: args.body }; }",
@@ -123,6 +125,13 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
         count("convertImage");
         return vm.newString(await media.convert(JSON.parse(vm.getString(source)), JSON.parse(vm.getString(options)), vm.getString(name)));
       }).consume((fn) => vm.setProp(vm.global, "__convert", fn));
+    }
+
+    if (bindings.reply) {
+      const reply = bindings.reply;
+      vm.newFunction("reply", (text) => {
+        reply(String(vm.dump(text)));
+      }).consume((fn) => vm.setProp(vm.global, "reply", fn));
     }
 
     vm.newFunction("log", (...args) => {

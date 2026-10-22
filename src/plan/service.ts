@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
+import { VISIBILITIES } from "../rules/command.ts";
+import type { CommandVisibility } from "../rules/command.ts";
 import type { API } from "@discordjs/core";
 import { DiscordAPIError } from "@discordjs/rest";
 import { InteractionType, MessageFlags } from "discord-api-types/v10";
@@ -75,6 +77,8 @@ export interface RuleRunInput {
   ownerId: string;
   rule: PlanRule;
   drafts: StepDraft[];
+  /** Images the rule's code made, which its posts may name in `files`. */
+  images?: Record<string, Attachment>;
 }
 
 export interface ReviseInput {
@@ -129,8 +133,9 @@ export function fingerprint(resource: Resource, fields: string[]): string {
 }
 
 export function planHash(plan: Omit<Plan, "hash">): string {
-  const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, createdAt, expiresAt } = plan;
-  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, createdAt, expiresAt }));
+  const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, rules, createdAt, expiresAt } = plan;
+  // The rules are approved too, so a change to them (such as who sees a command's replies) changes the hash.
+  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, ...(rules ? { rules } : {}), createdAt, expiresAt }));
 }
 
 /** Fields shown as "before" in the preview, on top of the ones the step depends on. */
@@ -327,11 +332,8 @@ export class Planner {
     const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
     const targets = await this.#targets(input.guildId, steps, input.rule.allow);
     const channels = await this.#channelStates(steps, input.rule.allow);
-    const problems = [
-      ...allowProblems(steps, input.rule.allow, targets, undefined, channels),
-      ...steps.flatMap((s) => permissionProblems(s, ctx)),
-      ...steps.filter((s) => stepFiles(s).length > 0).map((s) => `ステップ ${s.id}: ルールの投稿には画像を付けられません`),
-    ];
+    const files = attachmentsFor(steps, [input.images]);
+    const problems = [...allowProblems(steps, input.rule.allow, targets, undefined, channels), ...steps.flatMap((s) => permissionProblems(s, ctx)), ...files.problems];
     if (problems.length > 0) throw new PlanRejected(problems);
 
     const preconditions = await this.#preconditions(input.guildId, steps);
@@ -346,6 +348,7 @@ export class Planner {
       labels,
       risk: planRisk(steps),
       rule: input.rule,
+      ...(files.attachments ? { attachments: files.attachments } : {}),
       createdAt,
       expiresAt: createdAt,
     };
@@ -511,6 +514,24 @@ export class Planner {
     const why = (e: unknown) => (e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e)).slice(0, 1800);
 
     switch (parsed.action) {
+      case "visibility": {
+        const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+        const target = plan.rules?.find((r) => r.key === parsed.rule && r.trigger.command);
+        if (row.status !== "pending_approval" || expired() || !target || !VISIBILITIES.includes(value as CommandVisibility)) {
+          await ephemeral("この変更はもう変えられません");
+          return true;
+        }
+        const rules = plan.rules!.map((r) => (r === target ? { ...r, trigger: { ...r.trigger, command: { ...r.trigger.command!, visibility: value as CommandVisibility } } } : r));
+        const { hash: _old, ...rest } = plan;
+        const changed: Plan = { ...rest, rules, hash: planHash({ ...rest, rules }) };
+        if (!store.replacePendingPlan(changed)) {
+          await ephemeral("この変更はもう承認待ちではありません");
+          return true;
+        }
+        store.audit(plan.actor, "plan.visibility", { rule: target.key, visibility: value }, plan.id);
+        await api.interactions.updateMessage(interaction.id, interaction.token, this.#render(changed, { status: "pending_approval" }));
+        return true;
+      }
       case "cancel": {
         if (!store.transitionPlan(plan.id, ["pending_approval"], "cancelled", { reason: "依頼者が取り消しました" })) {
           await ephemeral("この変更はもう承認待ちではありません");

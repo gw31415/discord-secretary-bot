@@ -1,5 +1,6 @@
 import { ButtonStyle, ComponentType, MessageFlags } from "discord-api-types/v10";
 import type { APIButtonComponent, APIComponentInContainer, APIMessageTopLevelComponent } from "discord-api-types/v10";
+import { VISIBILITY_CHOICES } from "./command.ts";
 import type { AuditEntry, PlanRow } from "../db.ts";
 import { RISK_LABEL } from "../plan/types.ts";
 import type { RuleDryRun } from "../plan/types.ts";
@@ -9,6 +10,8 @@ import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
+const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
+
 // What /rules shows: the management panel. Everything is drawn from the rule
 // definition and the database; the model's own words appear only as the
 // summary, which another model wrote from the code alone. All of it is
@@ -16,11 +19,11 @@ import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
 export type RuleAction =
   | "home" | "open" | "enable" | "disable" | "dry" | "delete" | "delete2" | "code"
-  | "plans" | "audit" | "halt" | "resume" | "clearstate";
+  | "plans" | "audit" | "halt" | "resume" | "clearstate" | "visibility";
 
 const ACTIONS = new Set<RuleAction>([
   "home", "open", "enable", "disable", "dry", "delete", "delete2", "code",
-  "plans", "audit", "halt", "resume", "clearstate",
+  "plans", "audit", "halt", "resume", "clearstate", "visibility",
 ]);
 
 export function ruleCustomId(action: RuleAction, arg = ""): string {
@@ -72,6 +75,7 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 export function triggerLabel(trigger: Rule["trigger"]): string {
   const label = triggerEvents(trigger)
     .map((e) => {
+      if (e === "COMMAND" && trigger.command) return `\`/${trigger.command.name}\` が実行されたとき${VISIBILITY_LABEL[trigger.command.visibility ?? "auto"]}`;
       const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
       return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
     })
@@ -111,6 +115,7 @@ export function dryRunText(dry: RuleDryRun): string {
       if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
   }
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
+  if (dry.reply !== undefined || dry.images) body.push(`返事: ${clip(dry.reply ?? "", 300)}${dry.images ? `(画像${dry.images}枚)` : ""}`);
   if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${clip(dry.state, 300)}\``);
   if (dry.logs.length > 0) body.push(`-# log: ${clip(dry.logs.slice(0, 5).join(" / "), 300)}`);
   return [head, ...body].join("\n");
@@ -254,7 +259,18 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   buttons.push(button(ruleCustomId("code", rule.id), "コードをファイルで"));
   const second: APIButtonComponent[] = [button(ruleCustomId("home"), "戻る")];
   if (input.can.remove) second.push(button(ruleCustomId("delete", rule.id), "削除", ButtonStyle.Danger));
-  return container(texts, [row(buttons), row(second)]);
+  // The owner picks who sees a command's replies here, without a new version.
+  const visibility: APIComponentInContainer[] = input.can.owner && rule.trigger.command
+    ? [{
+        type: ComponentType.ActionRow,
+        components: [{
+          type: ComponentType.StringSelect,
+          custom_id: ruleCustomId("visibility", rule.id),
+          options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (rule.trigger.command!.visibility ?? "auto") === o.value })),
+        }],
+      }]
+    : [];
+  return container(texts, [...visibility, row(buttons), row(second)]);
 }
 
 const STATUS_LABEL: Record<PlanRow["status"], string> = {

@@ -428,6 +428,14 @@ export class Store {
     })();
   }
 
+  /** Swaps in a changed version of a plan that still waits for approval; false once it does not. */
+  replacePendingPlan(plan: Plan): boolean {
+    const result = this.db
+      .prepare("UPDATE plans SET plan_json = ?, hash = ?, risk = ?, updated_at = ? WHERE id = ? AND status = 'pending_approval'")
+      .run(JSON.stringify(plan), plan.hash, plan.risk, new Date().toISOString(), plan.id);
+    return result.changes === 1;
+  }
+
   getPlan(id: string): PlanRow | undefined {
     const row = this.db.prepare("SELECT * FROM plans WHERE id = ?").get(id) as
       | { plan_json: string; status: PlanStatus; channel_id: string | null; message_id: string | null; reason: string | null; approved_by: string | null }
@@ -558,6 +566,11 @@ export class Store {
     this.db
       .prepare("UPDATE rules SET name = ?, rule_json = ?, version = ?, enabled = 1, consecutive_failures = 0, disabled_reason = NULL, updated_at = ? WHERE id = ?")
       .run(definition.name, JSON.stringify(definitionOf(definition)), version, new Date().toISOString(), id);
+  }
+
+  /** Changes a setting of a rule (not its code or allow list), keeping its version and whether it is on. */
+  updateRuleSettings(id: string, definition: RuleDefinition): void {
+    this.db.prepare("UPDATE rules SET rule_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(definitionOf(definition)), new Date().toISOString(), id);
   }
 
   getRule(id: string): Rule | undefined {

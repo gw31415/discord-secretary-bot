@@ -2,7 +2,7 @@ import { Client, GatewayDispatchEvents, GatewayIntentBits } from "@discordjs/cor
 import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { PresenceUpdateStatus } from "discord-api-types/v10";
-import { judgeAddressed } from "./agent/judge.ts";
+import { judgeAddressed, publicReplyScore } from "./agent/judge.ts";
 import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
@@ -17,7 +17,7 @@ import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
-import { findChatModel } from "./llm/models.ts";
+import { findChatModel, findJudgeModel } from "./llm/models.ts";
 import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
 import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
@@ -102,6 +102,21 @@ async function sendDm(userId: string, content: string): Promise<void> {
   await client.api.channels.createMessage(dm.id, { content, allowed_mentions: { parse: [] } });
 }
 
+// Custom slash commands follow the rules; changes close together register once.
+const commandSyncs = new Map<string, ReturnType<typeof setTimeout>>();
+function syncCommands(guildId: string): void {
+  clearTimeout(commandSyncs.get(guildId));
+  commandSyncs.set(
+    guildId,
+    setTimeout(() => {
+      commandSyncs.delete(guildId);
+      registerCommands(client.api, store, config.applicationId, guildId)
+        .then((changed) => changed && log(`${guildId}: ルールの変更に合わせてギルドコマンドを登録し直しました`))
+        .catch((e) => log(`${guildId}: ギルドコマンドの登録に失敗`, e));
+    }, 2_000),
+  );
+}
+
 const engine = new RuleEngine({
   store,
   caches,
@@ -110,9 +125,10 @@ const engine = new RuleEngine({
   now: () => Date.now(),
   makeReader,
   notifyOwner: sendDm,
+  onRulesChanged: syncCommands,
   log,
 });
-const admin = new RuleAdmin({ store, caches, selfId: () => selfId, now: () => Date.now() });
+const admin = new RuleAdmin({ store, caches, selfId: () => selfId, now: () => Date.now(), onChange: syncCommands });
 const rules = new RuleService({
   api: client.api,
   store,
@@ -128,6 +144,13 @@ const rules = new RuleService({
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
+  },
+  visibilityScore: async ({ ownerId, command, options, reply, images, steps }) => {
+    const ref = store.getSettings(ownerId).judge;
+    const model = ref && findJudgeModel(ref.provider, ref.model);
+    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
+    if (!model || !apiKey) return null;
+    return publicReplyScore({ model, apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
   },
 });
 
@@ -290,6 +313,7 @@ client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
     if (await widenPrompts.handleInteraction(data)) return;
     if (await planner.handleInteraction(data)) return;
     if (await rules.handleCommand(data)) return;
+    if (await rules.handleCustomCommand(data)) return;
     if (await rules.handleInteraction(data)) return;
     await handleInteraction(api, store, data);
   } catch (e) {

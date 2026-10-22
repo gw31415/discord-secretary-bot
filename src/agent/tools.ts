@@ -19,6 +19,8 @@ import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
 import type { Plan, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
+import { MAX_OPTIONS, OPTION_TYPES } from "../rules/command.ts";
+import type { CommandSpec } from "../rules/command.ts";
 import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
 import { MAX_BATCH, MAX_DEBOUNCE_SECONDS, MAX_TRIGGER_EVENTS, triggerSummary } from "../rules/triggers.ts";
 import { MAX_LIMITS, MAX_STATE_JSON } from "../rules/types.ts";
@@ -430,10 +432,33 @@ const RULE_FIELDS = {
       max_consecutive_failures: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.maxConsecutiveFailures })),
     }),
   ),
-  allow: Type.Array(AllowSchema, { minItems: 1, maxItems: MAX_ALLOW_ENTRIES }),
+  allow: Type.Array(AllowSchema, { maxItems: MAX_ALLOW_ENTRIES, description: "COMMAND で返事だけのときは空でかまいません" }),
   params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   sample_event: Type.Optional(Type.Unknown()),
   replaces_rule: Type.Optional(Type.String()),
+  command: Type.Optional(
+    Type.Object(
+      {
+        name: Type.String({ maxLength: 32, description: "コマンド名(小文字・数字・-・_)" }),
+        description: Type.String({ maxLength: 100 }),
+        options: Type.Optional(
+          Type.Array(
+            Type.Object({
+              name: Type.String({ maxLength: 32 }),
+              description: Type.String({ maxLength: 100 }),
+              type: Type.Union(Object.keys(OPTION_TYPES).map((k) => Type.Literal(k))),
+              required: Type.Optional(Type.Boolean()),
+              choices: Type.Optional(Type.Array(Type.Object({ name: Type.String(), value: Type.Union([Type.String(), Type.Number()]) }), { maxItems: 25 })),
+            }),
+            { maxItems: MAX_OPTIONS },
+          ),
+        ),
+        permissions: Type.Optional(Type.Array(Type.String(), { description: "実行する人に必要な Discord 権限名(例: ManageChannels)" })),
+        visibility: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("private"), Type.Literal("public")], { description: "返事を見せる相手。auto(既定)は返事ごとに判定用のモデルが決め、private は実行した人だけ、public はチャンネルの全員" })),
+      },
+      { description: "trigger_event が COMMAND のときのスラッシュコマンド" },
+    ),
+  ),
 };
 const RuleSchema = Type.Object({ ...RULE_FIELDS, code: Type.String({ maxLength: 8000 }) });
 type RuleInput = Static<typeof RuleSchema>;
@@ -465,6 +490,7 @@ function ruleTask(r: CodedRuleInput): string {
     "",
     `きっかけ: ${[r.trigger_event, ...(r.more_trigger_events ?? [])].join("、")}${r.more_trigger_events?.length ? "(どれで動いたかは eventName で分かります)" : ""}`,
     ...(r.schedule ? [`時刻: cron ${r.schedule}(${r.timezone ?? "Asia/Tokyo"})`] : []),
+    ...(r.command ? [`スラッシュコマンド: ${JSON.stringify(r.command)}(オプションは event.options、返事は reply("文"))`] : []),
     ...(r.debounce_seconds ? [`まとめて実行: 最後のイベントから${r.debounce_seconds}秒待って1回だけ動きます。その間のイベントは batch(古い順の [{ eventName, event }])で全部読め、event は最後のものです`] : []),
     `params: ${JSON.stringify(r.params ?? null)}`,
     `許す操作: ${JSON.stringify(r.allow)}`,
@@ -472,6 +498,15 @@ function ruleTask(r: CodedRuleInput): string {
     ...(r.sample_event !== undefined ? [`イベントの例: ${JSON.stringify(r.sample_event).slice(0, 2000)}`] : []),
   ].join("\n");
 }
+
+/** A rule's trial runs draw too, but nothing is kept; formulas are still checked so TeX mistakes show. */
+const RULE_TRIAL_MEDIA: Pick<SandboxBindings, "attach" | "media"> = {
+  attach: () => "img1",
+  media: {
+    math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), "img1"),
+    convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), "img1"),
+  },
+};
 
 /** One coding agent per rule, all at once. */
 async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: SandboxBindings, tools: AgentTool<any>[]): Promise<RuleInput[]> {
@@ -482,7 +517,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask(r), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runSandboxed(code, { ...bindings, event: event ?? null, params: r.params ?? null, state: null }, RULE_SANDBOX_LIMITS),
+          run: (code, event) => runSandboxed(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }, RULE_SANDBOX_LIMITS),
           tools,
         });
         return { ...rest, code };
@@ -503,6 +538,7 @@ function toProposal(r: RuleInput): RuleProposal {
       ...(r.schedule !== undefined ? { schedule: r.schedule } : {}),
       ...(r.timezone !== undefined ? { timezone: r.timezone } : {}),
       ...(r.debounce_seconds ? { debounceSeconds: r.debounce_seconds } : {}),
+      ...(r.command ? { command: r.command as CommandSpec } : {}),
     },
     ...(r.limits
       ? { limits: { ...(r.limits.per_minute ? { perMinute: r.limits.per_minute } : {}), ...(r.limits.max_consecutive_failures ? { maxConsecutiveFailures: r.limits.max_consecutive_failures } : {}) } }
@@ -537,21 +573,23 @@ function rulesFromCode(value: unknown): RuleProposal[] {
 
 const RULES_DESCRIPTION = [
   "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
-  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
+  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
   "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。true はBotの変更すべてで動き、\"other_rules\" はほかのルールや会話からの変更では動くがこのルール自身の変更では動きません(Botの投稿・リアクションでは動きません)。ほかのルールの結果に合わせて直すルール(例: 並べ替えのあとに一覧を作り直す)は \"other_rules\" にします。",
   "  時刻で動かすときは trigger_event(または more_trigger_events)に SCHEDULE を入れ、schedule に cron(分 時 日 月 曜日。例: 毎朝4時は \"0 4 * * *\"、10分おきは \"*/10 * * * *\")を、必要なら timezone(既定 Asia/Tokyo)を書きます。イベントのきっかけと一緒に使えます(例: チャンネルの作成・変更と毎日4時の作り直し)。BOT_READY はBotの起動・再接続のたびに動くので、止まっていた間の変化を取り込めます。",
   "  debounce_seconds: 短い間にイベントがまとめて来るとき(並べ替えでチャンネルの変更が何件も届くなど)に付けると、最後のイベントからその秒数待って1回だけ動きます。コードはその間のイベントを batch(古い順の [{ eventName, event }]。最大" + MAX_BATCH + "件)で読めます。batch はいつもあり、まとめないときは1件です。",
   "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
   "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
-  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log。実行は1回10秒・discord.get 50回まで。ネットワーク・タイマー・乱数はありません。",
+  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。1回4枚まで), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
   "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
   "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, channel?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の、channel はステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の実行直前の状態の JSON Schema です。決まったカテゴリの中のチャンネルにだけ投稿させるなら channel: { properties: { parent_id: { const: \"<カテゴリID>\" } }, required: [\"parent_id\"] } のようにします。コードが出したステップはどれか1つに合わないと実行されません。",
   "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
   "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
   "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
   "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
+  "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 4 } を加えます。",
   "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
+  "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND だけにし、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに作成者の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。変更は作成者の権限で allow の範囲だけ実行されるので、実行した人の権限で絞るときは permissions(例: [\"ManageChannels\"])を付けます。読み取りはそのチャンネルを見られる全員が読めるものに限られます。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
   "  ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
   "  きっかけにできるイベント:",
   triggerSummary(),
@@ -623,7 +661,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
   const rulesDescription = coder
     ? RULES_DESCRIPTION.replace(
         /\n  各要素[^\n]*\n/,
-        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, allow, code_task, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
+        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code_task, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
       ).replace(/\n  code: イベントごとに[^\n]*\n    使えるもの:[^\n]*/, "")
     : RULES_DESCRIPTION;
   const sandboxBindings = bindingsOf(reader);

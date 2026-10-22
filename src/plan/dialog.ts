@@ -5,10 +5,12 @@ import type {
   APIMediaGalleryComponent,
   APIMessageTopLevelComponent,
   APIModalInteractionResponseCallbackData,
+  APIStringSelectComponent,
 } from "discord-api-types/v10";
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
 import { limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
+import { VISIBILITY_CHOICES } from "../rules/command.ts";
 import type { Body } from "./catalog.ts";
 import { dialogFileName } from "./files.ts";
 import { RISK_LABEL } from "./types.ts";
@@ -31,17 +33,40 @@ export type PlanAction =
   | "restore"
   | "keep"
   | "code"
-  | "result";
-const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result"]);
+  | "result"
+  | "visibility";
+const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result", "visibility"]);
 
-export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">): string {
-  return `plan:${action}:${plan.id}:${plan.hash.slice(0, 8)}`;
+/** `rule` names which of the plan's rules a control is for ("visibility.r1"). */
+export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">, rule?: string): string {
+  return `plan:${action}${rule ? `.${rule}` : ""}:${plan.id}:${plan.hash.slice(0, 8)}`;
 }
 
-export function parsePlanCustomId(id: string): { action: PlanAction; planId: string; hash8: string } | null {
-  const m = /^plan:(\w+):([A-Za-z0-9_-]+):([0-9a-f]{8})$/.exec(id);
+export function parsePlanCustomId(id: string): { action: PlanAction; planId: string; hash8: string; rule?: string } | null {
+  const m = /^plan:(\w+)(?:\.(r\d+))?:([A-Za-z0-9_-]+):([0-9a-f]{8})$/.exec(id);
   if (!m || !ACTIONS.has(m[1] as PlanAction)) return null;
-  return { action: m[1] as PlanAction, planId: m[2]!, hash8: m[3]! };
+  return { action: m[1] as PlanAction, planId: m[3]!, hash8: m[4]!, ...(m[2] ? { rule: m[2] } : {}) };
+}
+
+
+/** While the plan waits, who sees each command's replies is picked here; the pick is part of what is approved. */
+function visibilityRows(plan: Plan, state: DialogState): APIActionRowComponent<APIStringSelectComponent>[] {
+  if (state.status !== "pending_approval" || state.actions === false) return [];
+  const commands = (plan.rules ?? []).filter((r) => r.trigger.command);
+  return commands.map((r) => ({
+    type: ComponentType.ActionRow,
+    components: [
+      {
+        type: ComponentType.StringSelect,
+        custom_id: customId("visibility", plan, r.key),
+        options: VISIBILITY_CHOICES.map((o) => ({
+          value: o.value,
+          label: commands.length > 1 ? `/${r.trigger.command!.name}: ${o.label}` : o.label,
+          default: (r.trigger.command!.visibility ?? "auto") === o.value,
+        })),
+      },
+    ],
+  }));
 }
 
 const MAX_LISTED = 15;
@@ -285,13 +310,18 @@ function codeBody(plan: Plan, room: number): string[] {
   });
 }
 
+function replyLine(r: PlanRuleDraft): string {
+  const images = r.dry.images ? `(画像${r.dry.images}枚)` : "";
+  return r.dry.reply || images ? `\n　返事: ${(r.dry.reply ?? "").slice(0, 200)}${images}` : "";
+}
+
 function dryLine(r: PlanRuleDraft): string {
   const where = r.dry.source ? `${r.dry.source}で` : "";
   switch (r.dry.outcome) {
     case "steps":
-      return `ドライラン(${where}試行): ${r.dry.lines.length}種類の変更をします\n${r.dry.lines.slice(0, 3).map((l) => `　${l}`).join("\n")}`;
+      return `ドライラン(${where}試行): ${r.dry.lines.length}種類の変更をします\n${r.dry.lines.slice(0, 3).map((l) => `　${l}`).join("\n")}${replyLine(r)}`;
     case "none":
-      return `ドライラン(${where}試行): 何も変更しません`;
+      return `ドライラン(${where}試行): 何も変更しません${replyLine(r)}`;
     case "pending":
       return "ドライラン: この変更で作るものを使うため、登録後に動きます(コードがエラーにならないことは確かめました)";
     case "no_event":
@@ -374,7 +404,7 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
       {
         type: ComponentType.Container,
         accent_color: color(plan, state.status),
-        components: [{ type: ComponentType.TextDisplay, content: text }, ...gallery(plan), row],
+        components: [{ type: ComponentType.TextDisplay, content: text }, ...gallery(plan), ...visibilityRows(plan, state), row],
       },
     ],
     flags: MessageFlags.IsComponentsV2,
@@ -389,7 +419,8 @@ export function dialogText(rendered: { components: APIMessageTopLevelComponent[]
 
 export function dialogButtons(rendered: { components: APIMessageTopLevelComponent[] }): string[] {
   const container = rendered.components[0] as { components: Array<{ type: number; components?: Array<{ label?: string }> }> };
-  return container.components.find((c) => c.type === ComponentType.ActionRow)?.components?.map((b) => b.label ?? "") ?? [];
+  const rows = container.components.filter((c) => c.type === ComponentType.ActionRow);
+  return rows.find((r) => r.components?.some((b) => (b as { type?: number }).type === ComponentType.Button))?.components?.map((b) => b.label ?? "") ?? [];
 }
 
 export function confirmModal(plan: Plan): APIModalInteractionResponseCallbackData {

@@ -1,4 +1,5 @@
 import type { AllowEntry } from "../plan/types.ts";
+import type { CommandSpec } from "./command.ts";
 
 // An event rule: when `trigger` fires, `code` runs in the sandbox and returns
 // steps, which run without a dialog as long as each fits `allow` and the owner
@@ -45,6 +46,8 @@ export interface RuleTrigger {
    * the code reads every event of it as `batch`.
    */
   debounceSeconds?: number;
+  /** The slash command that starts a COMMAND rule. */
+  command?: CommandSpec;
 }
 
 /** What the owner approves. Any change makes a new version that is approved again. */

@@ -14,6 +14,10 @@ import type { SandboxResult } from "../sandbox.ts";
 import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
 import { createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
+import { MAX_REPLY } from "./command.ts";
+import { fetchImage, imageRefs } from "../agent/images.ts";
+import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
+import type { APIMessage } from "discord-api-types/v10";
 import type { Rule, RunOutcome } from "./types.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
@@ -23,7 +27,8 @@ import type { Rule, RunOutcome } from "./types.ts";
 // the rule opts in, each rule is rate limited, repeated failures switch it off,
 // and anyone with Manage Server can stop every rule in the server at once.
 // SCHEDULE rules fire from tick() once a minute; rules with a debounce wait for
-// a quiet moment and run once on the batch of events.
+// a quiet moment and run once on the batch of events. COMMAND rules run when
+// someone uses their slash command, and the outcome goes back to that person.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
@@ -38,6 +43,8 @@ export interface RuleEngineDeps {
   selfId: () => string;
   now: () => number;
   makeReader: (scope: ReadScope) => Reader;
+  /** A rule switched itself off; slash commands may need registering again. */
+  onRulesChanged?: (guildId: string) => void;
   /** Tells the owner their rule switched itself off. Failures are ignored. */
   notifyOwner?: (userId: string, content: string) => Promise<void>;
   log: (message: string, error?: unknown) => void;
@@ -59,6 +66,24 @@ export interface BatchItem {
  */
 export interface Origin {
   rule: string | null | undefined;
+}
+
+/** How a command's run went, for the reply to whoever ran it. */
+export interface CommandReport {
+  outcome: RunOutcome | "skipped";
+  /** Why it did not run or failed. */
+  error: string | null;
+  /** What the code passed to reply(). */
+  reply: string | null;
+  /** Images the code made for the reply. */
+  images: CommandImage[];
+  steps: number;
+}
+
+/** An image a command's code drew, rendered or converted for its reply. */
+export interface CommandImage {
+  name: string;
+  data: Buffer;
 }
 
 export function haltKey(guildId: string): string {
@@ -283,8 +308,8 @@ export class RuleEngine {
     return true;
   }
 
-  #enqueue(guildId: string, task: () => Promise<void>): void {
-    const next = (this.#queues.get(guildId) ?? Promise.resolve()).then(task).catch((e) => this.deps.log("ルールの実行に失敗", e));
+  #enqueue(guildId: string, task: () => Promise<unknown>): void {
+    const next = (this.#queues.get(guildId) ?? Promise.resolve()).then(async () => void (await task())).catch((e) => this.deps.log("ルールの実行に失敗", e));
     this.#queues.set(guildId, next);
     void next.finally(() => {
       if (this.#queues.get(guildId) === next) this.#queues.delete(guildId);
@@ -296,23 +321,27 @@ export class RuleEngine {
     while (this.#queues.size > 0) await Promise.all(this.#queues.values());
   }
 
-  async #run(ruleId: string, version: number, eventId: string, batch: BatchItem[]): Promise<void> {
+  async #run(ruleId: string, version: number, eventId: string, batch: BatchItem[], reader?: Pick<Reader, "get">): Promise<CommandReport | null> {
     const { store } = this.deps;
     // The rule may have been switched off, changed or stopped while queued.
     const rule = store.getRule(ruleId);
-    if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId)) return;
+    if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId)) return null;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
     const last = batch.at(-1)!;
-    const result = await this.evaluate(rule, last.event, undefined, last.eventName, batch, store.getRuleState(rule.id));
+    const result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND");
+    const reply = result.reply ?? null;
+    const images = result.images ?? [];
     // Kept only when the run went through, so a failed run is retried from the same state.
     const keepState = () => {
       if (result.state) store.setRuleState(rule.id, result.state.value);
     };
     if (result.kind !== "steps") {
       if (result.kind === "none") keepState();
-      store.finishRuleRun(runId, { outcome: result.kind === "none" ? "no_change" : "failed", error: result.kind === "error" ? result.error : null, logs: result.logs });
-      this.#settle(rule, result.kind === "error", result.kind === "error" ? result.error : null);
-      return;
+      const outcome = result.kind === "none" ? "no_change" : "failed";
+      const error = result.kind === "error" ? result.error : null;
+      store.finishRuleRun(runId, { outcome, error, logs: result.logs });
+      this.#settle(rule, result.kind === "error", error);
+      return { outcome, error, reply, images, steps: 0 };
     }
     let outcome: RunOutcome;
     let planId: string | null = null;
@@ -323,6 +352,7 @@ export class RuleEngine {
         ownerId: rule.ownerId,
         rule: { id: rule.id, version: rule.version, name: rule.name, eventId, allow: rule.allow },
         drafts: result.drafts,
+        ...(images.length ? { images: Object.fromEntries(images.map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }])) } : {}),
       });
       planId = done.plan.id;
       outcome = done.status === "succeeded" ? "executed" : "failed";
@@ -335,6 +365,33 @@ export class RuleEngine {
     store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
     store.audit({ kind: "user", userId: rule.ownerId, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     this.#settle(rule, outcome === "failed" || outcome === "rejected", error);
+    return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length };
+  }
+
+  /**
+   * Someone ran a COMMAND rule's slash command. The run waits its turn like any
+   * other in the server; what the code reads is limited to what everyone in the
+   * channel (and the owner) may see, since the reply goes back there.
+   */
+  async runCommand(rule: Rule, event: Data): Promise<CommandReport> {
+    const skipped = (error: string): CommandReport => ({ outcome: "skipped", error, reply: null, images: [], steps: 0 });
+    if (!rule.enabled) return skipped("このコマンドのルールは止まっています");
+    if (this.halted(rule.guildId)) return skipped("このサーバーの全ルールが止められています");
+    const guild = this.deps.caches.get(rule.guildId)?.guild;
+    const channelId = typeof event.channel_id === "string" ? event.channel_id : "";
+    if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event)) return skipped("ルールの作成者がこのチャンネルを見られないため、ここでは動きません");
+    if (!this.#allowRun(rule)) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
+    const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: rule.ownerId, audience: "channel" });
+    return new Promise((resolve) => {
+      this.#enqueue(rule.guildId, async () => {
+        try {
+          resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader)) ?? skipped("このコマンドのルールは止まっています"));
+        } catch (e) {
+          resolve(skipped(e instanceof Error ? e.message : String(e)));
+          throw e;
+        }
+      });
+    });
   }
 
   /** Counts the outcome; too many failures in a row switch the rule off and tell its owner. */
@@ -345,6 +402,7 @@ export class RuleEngine {
     const reason = `${count}回続けて失敗したため自動で止めました`;
     store.setRuleEnabled(rule.id, false, reason);
     store.audit({ kind: "system" }, "rule.auto_disable", { reason, lastError: error?.slice(0, MAX_ERROR) ?? null }, undefined, rule.id);
+    this.deps.onRulesChanged?.(rule.guildId);
     void this.deps.notifyOwner?.(
       rule.ownerId,
       `ルール「${rule.name}」は${count}回続けて失敗したため止めました。最後のエラー: ${(error ?? "").slice(0, 300)}\n直したら \`/rules\` の管理パネルから有効にできます。`,
@@ -362,10 +420,33 @@ export class RuleEngine {
     eventName: string | null = null,
     batch: BatchItem[] = eventName ? [{ eventName, event: event as Data }] : [],
     state: unknown = null,
+    command = eventName === "COMMAND",
   ): Promise<Evaluation> {
     let result: SandboxResult;
+    let replied: string | null = null;
+    const images: CommandImage[] = [];
     try {
       const source = reader ?? this.ownerReader(rule.guildId, rule.ownerId);
+      // Images for a command's reply or the run's posts (`files: ["img1"]`):
+      // drawn, formulas, or converted from this run's images or a message's
+      // attachments the reader may open.
+      const keep = (data: Buffer, name: string) => (images.push({ data, name }), `img${images.length}`);
+      const load = async (raw: unknown): Promise<Buffer> => {
+        if (typeof raw === "string") {
+          const found = /^img(\d+)$/.exec(raw) && images[Number(raw.slice(3)) - 1];
+          if (!found) throw new Error(`画像 ${raw} はありません。この実行で作った画像のIDを指定してください`);
+          return found.data;
+        }
+        const ref = raw as { message_id?: unknown; channel_id?: unknown; index?: unknown } | null;
+        if (typeof ref?.message_id !== "string" || typeof ref.channel_id !== "string") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
+        const message = (await source.get(`/channels/${ref.channel_id}/messages/${ref.message_id}`, {})) as APIMessage | null;
+        const index = typeof ref.index === "number" ? ref.index : 0;
+        const found = message && imageRefs(message).at(index);
+        if (!found) throw new Error(`メッセージ ${ref.message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
+        const image = await fetchImage(found);
+        if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
+        return image.data;
+      };
       result = await (this.deps.run ?? runSandboxed)(
         rule.code,
         {
@@ -377,6 +458,15 @@ export class RuleEngine {
           state,
           params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
+          ...(command ? { reply: (text: string) => void (replied = (replied ? `${replied}\n${text}` : text).slice(0, MAX_REPLY)) } : {}),
+          attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
+          media: {
+            math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.png`),
+            convert: async (source: unknown, raw: unknown, name: string) => {
+              const { data, format } = await convertImage(await load(source), parseOptions(ConvertOptionsSchema, raw));
+              return keep(data, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+            },
+          },
         },
         RULE_SANDBOX_LIMITS,
       );
@@ -387,7 +477,7 @@ export class RuleEngine {
     if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {
       return { kind: "error", error: `setState の値はJSONで${MAX_STATE_JSON}文字までです`, logs: result.logs };
     }
-    const saved = result.state ? { state: result.state } : {};
+    const saved = { ...(result.state ? { state: result.state } : {}), ...(replied !== null ? { reply: replied } : {}), ...(images.length ? { images } : {}) };
     const value = result.value as { steps?: unknown; rules?: unknown[] } | null | undefined;
     if (value === undefined || value === null) return { kind: "none", logs: result.logs, ...saved };
     if (Array.isArray(value.rules) && value.rules.length > 0) return { kind: "error", error: "ルールの中からルールは作れません", logs: result.logs };
@@ -403,12 +493,15 @@ export class RuleEngine {
 
   /** The owner left the server: their rules stop, since nobody's permissions back them any more. */
   ownerLeft(guildId: string, userId: string): void {
+    let changed = false;
     for (const rule of this.deps.store.listRules(guildId, userId)) {
       if (!rule.enabled) continue;
       const reason = "作成者がサーバーを抜けたため自動で止めました";
       this.deps.store.setRuleEnabled(rule.id, false, reason);
       this.deps.store.audit({ kind: "system" }, "rule.auto_disable", { reason }, undefined, rule.id);
+      changed = true;
     }
+    if (changed) this.deps.onRulesChanged?.(guildId);
   }
 
   /** Forgets old bookkeeping. Called every minute. */
@@ -434,11 +527,11 @@ function defaultClearTimer(handle: unknown): void {
   if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
-/** `state` is set when the code called setState: what to keep if the run goes through. */
+/** `state` is set when the code called setState: what to keep if the run goes through. `reply` is what a command's code passed to reply(). */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown } }
-  | { kind: "none"; logs: string[]; state?: { value: unknown } }
-  | { kind: "error"; error: string; logs: string[]; state?: undefined };
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; images?: CommandImage[] }
+  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; images?: CommandImage[] }
+  | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; images?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {

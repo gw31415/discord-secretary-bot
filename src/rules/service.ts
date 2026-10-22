@@ -1,5 +1,7 @@
 import type { API } from "@discordjs/core";
 import { InteractionType, MessageFlags } from "discord-api-types/v10";
+import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
+import type { CommandReport } from "./engine.ts";
 import type { APIInteraction, APIMessage } from "discord-api-types/v10";
 import type { Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
@@ -14,12 +16,17 @@ import { badRefs, normalizeSteps, permissionProblems, PlanRejected, planRisk, vi
 import { AdminDenied } from "./admin.ts";
 import type { RuleAdmin } from "./admin.ts";
 import { allowProblems } from "./allow.ts";
+import { attachmentsFor } from "../plan/files.ts";
 import type { RuleEngine } from "./engine.ts";
 import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
+import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
+import type { CommandSpec, CommandVisibility } from "./command.ts";
+import { VISIBILITY_CHOICES } from "./command.ts";
+import { defaultVisibility, showsToAll } from "../agent/judge.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
-import type { Rule, RuleDefinition, RuleProposal, RuleRun } from "./types.ts";
+import type { Rule, RuleDefinition, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
@@ -35,12 +42,14 @@ export interface RuleServiceDeps {
   store: Store;
   caches: Pick<GuildCaches, "get">;
   admin: RuleAdmin;
-  engine: Pick<RuleEngine, "evaluate" | "ownerReader">;
+  engine: Pick<RuleEngine, "evaluate" | "ownerReader" | "runCommand">;
   selfId: () => string;
   now: () => number;
   log: (message: string, error?: unknown) => void;
   /** Explains rule code from the code alone, paid for by the owner. */
   summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
+  /** How likely a command's reply is meant for everyone (0 to 1), by the owner's judge model; null without one. */
+  visibilityScore?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<number | null>;
 }
 
 type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
@@ -94,6 +103,10 @@ export class RuleService {
   /** A real event to try the rule on, read with `reader`; otherwise the agent's sample. */
   async sample(guildId: string, ownerId: string, channelId: string, draft: Pick<RuleProposal, "trigger" | "sampleEvent">, reader: Pick<Reader, "get">): Promise<{ event: unknown; source: string | null }> {
     const event = draft.trigger.event;
+    if (event === "COMMAND" && draft.trigger.command) {
+      const owner = this.deps.caches.get(guildId)?.guild?.members.get(ownerId);
+      return { event: sampleCommandEvent(draft.trigger.command, guildId, channelId, owner, draft.sampleEvent), source: draft.sampleEvent !== undefined ? "AIが用意したオプションであなたが実行したとき" : "あなたがここで実行したとき" };
+    }
     // Events the bot makes itself need no sample: the dry run makes one like the real thing.
     const synthetic = syntheticEvent(event, guildId, draft.trigger, this.deps.now());
     if (synthetic) return { event: synthetic, source: "いま発火したとしたときのイベント" };
@@ -126,7 +139,7 @@ export class RuleService {
     const state = saved && this.deps.store.getRule(saved)?.ownerId === ownerId ? this.deps.store.getRuleState(saved) : null;
     const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
-    const kept = result.state ? { state: JSON.stringify(result.state.value) } : {};
+    const kept = { ...(result.state ? { state: JSON.stringify(result.state.value) } : {}), ...(result.reply !== undefined ? { reply: result.reply } : {}), ...(result.images?.length ? { images: result.images.length } : {}) };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs, ...kept };
     const guild = this.#guild(guildId);
     let steps;
@@ -140,6 +153,7 @@ export class RuleService {
       ...allowProblems(steps, rule.allow),
       ...steps.flatMap((s) => permissionProblems(s, ctx)),
       ...(shareable ? steps.flatMap((s) => visibilityProblems(s, shareable)) : []),
+      ...attachmentsFor(steps, [Object.fromEntries((result.images ?? []).map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }]))]).problems,
     ];
     const label = cacheLabel(guild);
     const labels: Record<string, string> = {};
@@ -171,6 +185,9 @@ export class RuleService {
       for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
       const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, summary: null, limits: ruleLimits(r.limits) };
       if (triggerIssues.length === 0) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
+      if (r.trigger.command && triggerIssues.length === 0) {
+        own.push(...this.commandNameProblems(input.guildId, r.trigger.command.name, r.replaces, input.rules.slice(0, i).map((o) => o.trigger.command?.name)));
+      }
       for (const id of pinnedIds(r)) {
         if (!input.shareable.has(id)) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
       }
@@ -215,7 +232,7 @@ export class RuleService {
       drafts.push({
         key: `r${i + 1}`,
         name: r.name.slice(0, 60),
-        trigger: r.trigger,
+        trigger: await this.#withVisibility(input.ownerId, r, dry),
         allow: r.allow,
         code: r.code,
         ...(r.params ? { params: r.params } : {}),
@@ -229,6 +246,39 @@ export class RuleService {
     }
     if (problems.length > 0) throw new PlanRejected(problems);
     return drafts;
+  }
+
+  /**
+   * A command whose request did not say who sees its replies starts the dialog
+   * on the judge model's pick, from the dry run's reply; the requester can change it there.
+   */
+  async #withVisibility(ownerId: string, r: { trigger: RuleTrigger; sampleEvent?: unknown }, dry: RuleDryRun): Promise<RuleTrigger> {
+    const command = r.trigger.command;
+    if (!command || command.visibility) return r.trigger;
+    let visibility: CommandVisibility = "private";
+    try {
+      const score = await this.deps.visibilityScore?.({
+        ownerId,
+        command,
+        options: ((r.sampleEvent as { options?: Record<string, unknown> } | undefined)?.options ?? {}),
+        reply: dry.reply ?? "",
+        images: dry.images ?? 0,
+        steps: dry.lines.length,
+      });
+      if (typeof score === "number") visibility = defaultVisibility(score);
+    } catch (e) {
+      this.deps.log(`コマンド /${command.name} の公開の既定値を決められませんでした`, e);
+    }
+    return { ...r.trigger, command: { ...command, visibility } };
+  }
+
+  /** A command name must be free in the server, counting this plan's earlier rules; `replaces` may keep its own. */
+  commandNameProblems(guildId: string, name: string, replaces: string | undefined, earlier: Array<string | undefined> = []): string[] {
+    const others = this.deps.store.enabledRules(guildId, "COMMAND").filter((rule) => rule.id !== replaces);
+    const taken = new Set([...others.map((rule) => rule.trigger.command?.name ?? ""), ...earlier.filter((n): n is string => !!n)]);
+    const problems = commandProblems({ name, description: "-" }, taken).filter((p) => p.includes("使っています"));
+    if (!taken.has(name) && others.length >= MAX_CUSTOM_COMMANDS) problems.push(`コマンドは1つのサーバーに${MAX_CUSTOM_COMMANDS}個までです`);
+    return problems;
   }
 
   /** Registers a plan's rule once its steps have run. Ownership is checked again on the filled-in values. */
@@ -283,6 +333,62 @@ export class RuleService {
     if (!userId || !interaction.guild_id) return true;
     await this.deps.api.interactions.reply(interaction.id, interaction.token, this.#home(interaction.guild_id, userId));
     return true;
+  }
+
+  /** A custom slash command: runs its rule and tells whoever ran it how it went. */
+  async handleCustomCommand(interaction: APIInteraction): Promise<boolean> {
+    const name = commandName(interaction);
+    if (!name || RESERVED_COMMANDS.has(name)) return false;
+    const { api, store } = this.deps;
+    const guildId = interaction.guild_id;
+    const member = interaction.member;
+    if (!guildId || !member) return true;
+    const rule = store.enabledRules(guildId, "COMMAND").find((r) => r.trigger.command?.name === name);
+    const ephemeral = (content: string) => api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+    if (!rule?.trigger.command) {
+      await ephemeral("このコマンドは今は使えません(ルールが止まっているか、削除されました)");
+      return true;
+    }
+    const needed = permissionBits(rule.trigger.command.permissions);
+    // Discord sends the member's permissions in this channel with the interaction.
+    if (needed && (BigInt(member.permissions) & needed) !== needed) {
+      await ephemeral(`このコマンドを使うには ${rule.trigger.command.permissions!.join(", ")} の権限が必要です`);
+      return true;
+    }
+    const spec = rule.trigger.command;
+    const visibility = spec.visibility ?? "auto";
+    // The deferred reply's visibility is fixed now, so "auto" starts private and
+    // moves to a public follow-up if the judge says so.
+    await api.interactions.defer(interaction.id, interaction.token, visibility === "public" ? {} : { flags: MessageFlags.Ephemeral });
+    const event = commandEvent(interaction);
+    let report: CommandReport;
+    try {
+      report = await this.deps.engine.runCommand(rule, event);
+    } catch (e) {
+      this.deps.log(`コマンド /${name} の実行に失敗`, e);
+      report = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, images: [], steps: 0 };
+    }
+    const content = commandReplyText(rule.name, report);
+    const files = commandFailed(report) ? [] : report.images.map((i) => ({ name: i.name, data: i.data }));
+    const body = { content, allowed_mentions: { parse: [] }, ...(files.length ? { files } : {}) };
+    if (visibility === "auto" && (report.reply || files.length) && !commandFailed(report) && (await this.#showToAll(rule, spec, event, report))) {
+      await api.interactions.followUp(interaction.application_id, interaction.token, body);
+      await api.interactions.deleteReply(interaction.application_id, interaction.token);
+    } else {
+      await api.interactions.editReply(interaction.application_id, interaction.token, body);
+    }
+    return true;
+  }
+
+  /** The owner's judge model decides; without one, or on any error, the reply stays private. */
+  async #showToAll(rule: Rule, spec: CommandSpec, event: Record<string, unknown>, report: CommandReport): Promise<boolean> {
+    if (!this.deps.visibilityScore) return false;
+    try {
+      return showsToAll((await this.deps.visibilityScore({ ownerId: rule.ownerId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", images: report.images.length, steps: report.steps })) ?? 0);
+    } catch (e) {
+      this.deps.log(`コマンド /${spec.name} の公開判定に失敗`, e);
+      return false;
+    }
   }
 
   #home(guildId: string, userId: string, notice?: string): Rendered {
@@ -352,6 +458,13 @@ export class RuleService {
         case "delete":
           await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
           return true;
+        case "visibility": {
+          const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
+          const label = VISIBILITY_CHOICES.find((o) => o.value === rule.trigger.command?.visibility)?.label ?? "";
+          await update(this.#detail(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
+          return true;
+        }
         case "clearstate": {
           const rule = this.deps.admin.get(guildId, userId, parsed.arg);
           if (rule.ownerId !== userId) {
@@ -410,4 +523,20 @@ export class RuleService {
       allowed_mentions: { parse: [] },
     });
   }
+}
+
+/** What whoever ran a command sees: the code's reply, or how the run went. */
+function commandFailed(report: CommandReport): boolean {
+  return report.outcome === "failed" || report.outcome === "rejected" || report.outcome === "skipped" || report.outcome === "rate_limited";
+}
+
+export function commandReplyText(ruleName: string, report: CommandReport): string {
+  const status = commandFailed(report)
+    ? `⚠️ 実行できませんでした: ${(report.error ?? "不明なエラー").slice(0, 500)}`
+    : report.reply || report.images.length
+      ? null
+      : report.outcome === "executed"
+        ? `「${ruleName}」を実行しました(${report.steps}件の変更)`
+        : "変更することはありませんでした";
+  return [report.reply, status].filter((t): t is string => !!t).join("\n").slice(0, 2000);
 }
