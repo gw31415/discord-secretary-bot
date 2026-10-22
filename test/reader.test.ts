@@ -138,3 +138,14 @@ test("channels and roles come from the Gateway cache once it is loaded, and repe
   await reader.get(`/guilds/${GUILD}/members/3`);
   assert.deepEqual(calls.map((c) => c.path), [`/guilds/${GUILD}/members/3`]);
 });
+
+test("the bot's own writes reach the cache before their Gateway events do", async () => {
+  const cache = new GuildCache(GUILD);
+  cache.loadGuild({ id: GUILD, owner_id: "1", members: [], threads: [], voice_states: [], roles: [], channels: [] } as never);
+  cache.applyWrite("POST /guilds/{guild}/channels", { guild: GUILD }, { id: "70", type: 2, name: "📞", guild_id: GUILD, permission_overwrites: [] });
+  assert.equal(cache.raw!.channels.get("70")!.name, "📞");
+  assert.equal(cache.guild!.channels.get("70")!.name, "📞");
+  cache.applyWrite("DELETE /channels/{channel}", { channel: "70" }, undefined);
+  assert.equal(cache.raw!.channels.has("70"), false);
+  assert.equal(cache.guild!.channels.has("70"), false);
+});

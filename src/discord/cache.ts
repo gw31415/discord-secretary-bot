@@ -115,6 +115,32 @@ export class GuildCache {
     this.guild?.members.delete(userId);
   }
 
+  /**
+   * Takes in a write the bot just made, from the REST response. The Gateway
+   * event for it can arrive a moment later, and reads in between (a rule run
+   * right after a create) must already see the change.
+   */
+  applyWrite(op: string, params: Record<string, unknown>, response: unknown): void {
+    const res = response as { id?: string; type?: number } | null | undefined;
+    switch (op) {
+      case "POST /guilds/{guild}/channels":
+      case "PATCH /channels/{channel}":
+      case "POST /channels/{channel}/threads":
+        if (res?.id && typeof res.type === "number") this.upsertChannel(res as APIChannel);
+        break;
+      case "DELETE /channels/{channel}":
+        this.deleteChannel(String(params.channel));
+        break;
+      case "POST /guilds/{guild}/roles":
+      case "PATCH /guilds/{guild}/roles/{role}":
+        if (res?.id) this.upsertRole(res as APIRole);
+        break;
+      case "DELETE /guilds/{guild}/roles/{role}":
+        this.deleteRole(String(params.role));
+        break;
+    }
+  }
+
   member(userId: string): MemberState | undefined {
     return this.guild?.members.get(userId);
   }

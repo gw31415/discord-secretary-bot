@@ -79,7 +79,10 @@ const planner = new Planner({
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code });
   },
-  onWrite: (plan, step, response) => engine.noteWrite(plan, step, response),
+  onWrite: (plan, step, response) => {
+    caches.get(plan.guildId)?.applyWrite(step.op, step.pathParams, response);
+    engine.noteWrite(plan, step, response);
+  },
   rules: {
     prepare: (input) => rules.prepare(input),
     register: (guildId, ownerId, draft) => rules.register(guildId, ownerId, draft),
