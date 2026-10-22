@@ -19,7 +19,7 @@ import { auditView, detailView, homeView, parseRuleCustomId, plansView } from ".
 import type { Rendered } from "./panel.ts";
 import { isTrigger } from "./triggers.ts";
 import { DEFAULT_LIMITS } from "./types.ts";
-import type { Rule, RuleDefinition, RuleProposal } from "./types.ts";
+import type { Rule, RuleDefinition, RuleProposal, RuleRun } from "./types.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
@@ -239,6 +239,16 @@ export class RuleService {
   }
 
   /** The rules of the speaker's that the agent may read here, for a request to change one. */
+  /**
+   * Recent runs of the owner's rule. Errors and logs can carry event data, so they
+   * follow the rule's own visibility: null when the rule is not theirs or not shown here.
+   */
+  runsFor(guildId: string, ownerId: string, ruleId: string, shareable: Set<string>, limit: number): RuleRun[] | null {
+    const item = this.rulesFor(guildId, ownerId, shareable).find((r) => r.rule.id === ruleId);
+    if (!item?.shown) return null;
+    return this.deps.store.recentRuleRuns(ruleId, limit);
+  }
+
   rulesFor(guildId: string, ownerId: string, shareable: Set<string>): Array<{ rule: Rule; shown: boolean }> {
     return this.deps.store.listRules(guildId, ownerId).map((rule) => ({ rule, shown: pinnedIds(rule).every((id) => shareable.has(id)) }));
   }

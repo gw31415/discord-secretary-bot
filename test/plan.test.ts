@@ -689,7 +689,7 @@ test("propose_plan refuses steps and code together, and points out rule code pas
   const { readTools } = await import("../src/agent/tools.ts");
   const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => [] } as never;
   const proposed: unknown[] = [];
-  const tool = readTools(fakeReader, { images: false, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [] } })
+  const tool = readTools(fakeReader, { images: false, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [], runs: () => null } })
     .find((t) => t.name === "propose_plan")!;
   await assert.rejects(tool.execute("t", { steps: [{ op: "POST /guilds/{guild}/channels", body: { name: "x" } }], code: "return plan([])" }), /同時に使えません/);
   await assert.rejects(tool.execute("t", { code: "return event.channel_id" }), /rules\[\]\.code/);
@@ -704,7 +704,7 @@ test("with a coding model, the agent describes code and the coder writes and fix
   const asked: Array<{ kind: string; task: string; errors: string[] }> = [];
   const coderOf = (answers: Record<string, string[]>) => ({
     label: "fake",
-    async write(kind: "read" | "plan" | "rule", task: string, check: (code: string) => Promise<string | null>) {
+    async write(kind: "read" | "plan" | "rule", task: string, { check }: { check: (code: string) => Promise<string | null> }) {
       const entry = { kind, task, errors: [] as string[] };
       asked.push(entry);
       const list = answers[kind]!;
@@ -719,7 +719,7 @@ test("with a coding model, the agent describes code and the coder writes and fix
   });
   const proposed: unknown[][] = [];
   const tools = (coder: ReturnType<typeof coderOf>) =>
-    readTools(fakeReader, { images: false, coder, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [] } });
+    readTools(fakeReader, { images: false, coder, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [], runs: () => null } });
 
   // run_code takes a task; the coder's first try throws and its second is run.
   const coder = coderOf({

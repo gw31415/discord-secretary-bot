@@ -152,6 +152,7 @@ const conversations = new Conversations({
   propose: (input) => planner.propose(input),
   rules: {
     list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
+    runs: (guildId, ownerId, ruleId, shareable, limit) => rules.runsFor(guildId, ownerId, ruleId, shareable, limit),
   },
   onAwake: () => presence.refresh(),
   log,

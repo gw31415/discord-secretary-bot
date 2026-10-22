@@ -15,7 +15,7 @@ import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
-import type { Rule } from "./rules/types.ts";
+import type { Rule, RuleRun } from "./rules/types.ts";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -46,6 +46,7 @@ export interface ConversationDeps {
   /** Event rules, proposed inside plans. Absent means the agent cannot propose them. */
   rules?: {
     list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean }>;
+    runs: (guildId: string, ownerId: string, ruleId: string, shareable: Set<string>, limit: number) => RuleRun[] | null;
   };
   /** A conversation woke or was extended. */
   onAwake?: () => void;
@@ -357,6 +358,7 @@ export class Conversations {
         rules: this.deps.rules
           ? {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
+              runs: (ruleId, limit) => this.deps.rules!.runs(input.guildId, speaker, ruleId, reader.shareable(), limit),
             }
           : undefined,
       });

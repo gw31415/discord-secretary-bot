@@ -1,16 +1,29 @@
-import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
+import { Agent } from "@earendil-works/pi-agent-core";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { Type } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { lightestThinking, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { triggerSummary } from "../rules/triggers.ts";
 
-// A separate model the speaker picked for writing code. The conversation model
-// describes what the code should do; the coder writes it and fixes its own errors.
-// It sees only the task, never the conversation.
+// A second agent, on the model the speaker picked for writing code. The conversation
+// agent describes what the code should do; this agent tries code against the server
+// (read-only), submits it, and fixes its own errors. It sees only the task, never
+// the conversation. Several can run at once (one per rule in a plan).
 
 export type CodeKind = "read" | "plan" | "rule";
 
 /** Runs or checks the code; returns null when it is fine, or the error to fix. */
 export type CodeCheck = (code: string) => Promise<string | null>;
+
+export interface CodeEnv {
+  /** Checks submitted code: runs it, or for rule code parses it. */
+  check: CodeCheck;
+  /** Runs read-only code for the coder to look around; `event` stands in for a rule's event. */
+  run: (code: string, event?: unknown) => Promise<{ ok: boolean; value?: unknown; error?: string; logs: string[] }>;
+  /** More read-only tools, such as the speaker's rules and their run history. */
+  tools?: AgentTool<any>[];
+}
 
 export interface CodeResult {
   code: string;
@@ -20,7 +33,7 @@ export interface CodeResult {
 export interface Coder {
   /** The model's name, shown with the code it wrote. */
   label: string;
-  write(kind: CodeKind, task: string, check: CodeCheck, signal?: AbortSignal): Promise<CodeResult>;
+  write(kind: CodeKind, task: string, env: CodeEnv, signal?: AbortSignal): Promise<CodeResult>;
 }
 
 export class CodeFailed extends Error {
@@ -31,12 +44,16 @@ export class CodeFailed extends Error {
   }
 }
 
+/** Submissions that fail before the coder gives up. */
 export const MAX_CODE_ATTEMPTS = 3;
+const MAX_CODE_TURNS = 12;
 const MAX_OUTPUT_TOKENS = 8000;
+const MAX_TRY_OUTPUT = 8000;
 
 const COMMON = [
-  "あなたはDiscordサーバー管理Botのコードを書く係です。依頼に合う JavaScript の関数本体だけを書きます。",
-  "- 出力は ```js と ``` で囲んだコードブロック1つだけにします。説明は不要です。",
+  "あなたはDiscordサーバー管理Botのコードを書く係です。依頼に合う JavaScript の関数本体を書き、submit_code で提出します。",
+  "- データの形がわからないときは、try_code で読み取りのコードを試して確かめてから書きます(try_code は何も変更しません)。",
+  "- 提出したコードがエラーになったら、エラーを読んで直して出し直します。提出が通ったら終わりです。説明の文章は不要です。",
   "- コードは関数本体として実行され、最後に return した値が結果になります。async/await・Promise・タイマー・ネットワーク・乱数・import はありません。",
   "- 使えるもの: guild(サーバーIDの文字列), actor, discord.get(route, { query }) (同期関数。Discord REST API の GET を読み、JSONを返す。例: discord.get(`/guilds/${guild}/roles`)), log(...)。",
   "- 読める経路は Discord REST API の GET のうち許可されたものだけで、結果は権限と公開範囲に合わせて絞られます。ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
@@ -61,6 +78,8 @@ const RULE = [
   "使える操作:",
 ];
 
+const RULE_DEBUG = "\n\n既存のルールを直すときや、ルールが動かない理由を調べるときは、list_rules で今のコードを、rule_runs で実行履歴(結果・エラー・log)を確かめてから書きます。";
+
 function systemPrompt(kind: CodeKind): string {
   if (kind === "read") return [...COMMON, "- このコードは読み取りだけです。調べた結果を return します。"].join("\n");
   if (kind === "plan") return [...COMMON, ...PLAN, catalogSummary()].join("\n");
@@ -82,30 +101,93 @@ function textOf(m: AssistantMessage): string {
     .trim();
 }
 
+function clip(value: string): string {
+  return value.length > MAX_TRY_OUTPUT ? `${value.slice(0, MAX_TRY_OUTPUT)}\n…(長いため省略)` : value;
+}
+
+function reply(text: string, extra: { isError?: boolean; terminate?: boolean } = {}) {
+  return { content: [{ type: "text" as const, text }], details: {}, ...extra };
+}
+
 export function llmCoder(model: Model<Api>, apiKey: string): Coder {
   return {
     label: model.name ?? model.id,
-    async write(kind, task, check, signal) {
-      const reasoning = lightestThinking(model);
-      const messages: Message[] = [{ role: "user", content: task, timestamp: Date.now() }];
+    async write(kind, task, env, signal) {
+      let accepted: string | null = null;
       let last: string | null = null;
+      let failures = 0;
       let error = "";
-      for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt++) {
-        const res = await llm.completeSimple(
+
+      const tryCode: AgentTool<any> = {
+        name: "try_code",
+        label: "コードを試す",
+        description: kind === "rule"
+          ? "読み取り専用のコードを今のサーバーで試し、return した値を返します。event を渡すと、そのイベントが起きたものとして動きます。"
+          : "読み取り専用のコードを今のサーバーで試し、return した値を返します。",
+        parameters: Type.Object({
+          code: Type.String({ description: "関数本体" }),
+          ...(kind === "rule" ? { event: Type.Optional(Type.Unknown({ description: "試すイベントのペイロード" })) } : {}),
+        }),
+        execute: async (_id, input) => {
+          const params = input as { code: string; event?: unknown };
+          const result = await env.run(params.code, params.event);
+          const logs = result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : "";
+          if (!result.ok) return reply(`${result.error}${logs}`, { isError: true });
+          return reply(clip(`${JSON.stringify(result.value, null, 1)}${logs}`));
+        },
+      };
+      const submitCode: AgentTool<any> = {
+        name: "submit_code",
+        label: "コードを提出",
+        description: "完成したコードを提出します。エラーなら理由が返るので、直して出し直します。",
+        parameters: Type.Object({ code: Type.String({ description: "関数本体" }) }),
+        execute: async (_id, input) => {
+          const params = input as { code: string };
+          last = params.code;
+          const problem = await env.check(params.code);
+          if (problem === null) {
+            accepted = params.code;
+            return reply("受け付けました。", { terminate: true });
+          }
+          error = problem;
+          if (++failures >= MAX_CODE_ATTEMPTS) return reply(problem, { isError: true, terminate: true });
+          return reply(`エラーになりました。直して出し直してください。\n${problem}`, { isError: true });
+        },
+      };
+
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: systemPrompt(kind) + (env.tools?.some((t) => t.name === "rule_runs") ? RULE_DEBUG : ""),
           model,
-          { systemPrompt: systemPrompt(kind), messages },
-          { apiKey, signal: signal ?? AbortSignal.timeout(120_000), maxTokens: Math.min(MAX_OUTPUT_TOKENS, model.maxTokens || MAX_OUTPUT_TOKENS), ...(reasoning ? { reasoning } : {}) },
-        );
-        if (res.stopReason === "error") throw new CodeFailed(`コード用モデルの呼び出しに失敗しました: ${res.errorMessage ?? ""}`, last);
-        const code = extractCode(textOf(res));
-        if (!code) throw new CodeFailed("コード用モデルがコードを返しませんでした", last);
-        last = code;
-        const problem = await check(code);
-        if (problem === null) return { code, attempts: attempt };
-        error = problem;
-        messages.push(res, { role: "user", content: `実行するとエラーになりました。直したコードを書いてください。\n${problem}`, timestamp: Date.now() });
+          tools: [tryCode, submitCode, ...(env.tools ?? [])], thinkingLevel: lightestThinking(model) ?? "off" },
+        getApiKey: () => apiKey,
+        toolExecution: "sequential",
+        streamFn: (m, context, options) =>
+          llm.streamSimple(m, context, { ...options, apiKey, maxTokens: Math.min(MAX_OUTPUT_TOKENS, m.maxTokens || MAX_OUTPUT_TOKENS) }),
+      });
+      let turns = 0;
+      agent.subscribe((event) => {
+        if (event.type === "turn_end" && ++turns >= MAX_CODE_TURNS) agent.abort();
+      });
+      const timeout = signal ?? AbortSignal.timeout(180_000);
+      timeout.addEventListener("abort", () => agent.abort(), { once: true });
+      await agent.prompt(task);
+
+      if (accepted !== null) return { code: accepted, attempts: failures + 1 };
+      // A model that answers with a code block instead of calling the tool still gets one check.
+      if (failures === 0) {
+        const lastMessage = agent.state.messages.findLast((m) => m.role === "assistant") as AssistantMessage | undefined;
+        if (lastMessage?.stopReason === "error") throw new CodeFailed(`コード用モデルの呼び出しに失敗しました: ${lastMessage.errorMessage ?? ""}`, last);
+        const code = lastMessage ? extractCode(textOf(lastMessage)) : "";
+        if (code) {
+          const problem = await env.check(code);
+          if (problem === null) return { code, attempts: 1 };
+          last = code;
+          error = problem;
+        }
       }
-      throw new CodeFailed(`コード用モデルが${MAX_CODE_ATTEMPTS}回書き直してもエラーが残りました: ${error}`, last);
+      if (failures >= MAX_CODE_ATTEMPTS) throw new CodeFailed(`コード用モデルが${MAX_CODE_ATTEMPTS}回書き直してもエラーが残りました: ${error}`, last);
+      throw new CodeFailed(last ? `コード用モデルが完成させられませんでした: ${error || "手順が多すぎます"}` : "コード用モデルがコードを提出しませんでした", last);
     },
   };
 }

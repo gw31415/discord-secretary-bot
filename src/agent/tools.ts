@@ -7,8 +7,8 @@ import { ChannelType, ComponentType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";
 import { downloadImages, imageRefs, MAX_IMAGES } from "./images.ts";
 import { CodeFailed, syntaxError } from "./coder.ts";
-import type { Coder, CodeKind } from "./coder.ts";
-import { AGENT_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
+import type { CodeEnv, Coder, CodeKind } from "./coder.ts";
+import { AGENT_SANDBOX_LIMITS, RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { SandboxBindings } from "../sandbox.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
@@ -17,7 +17,7 @@ import { PlanRejected } from "../plan/validate.ts";
 import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
 import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
 import { triggerSummary } from "../rules/triggers.ts";
-import type { Rule, RuleProposal } from "../rules/types.ts";
+import type { Rule, RuleProposal, RuleRun } from "../rules/types.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
 // narrows results to what may be shown in the channel the reply goes to.
@@ -91,6 +91,8 @@ export type Propose = (drafts: StepDraft[], code?: string, rules?: RuleProposal[
 export interface RuleTools {
   /** The speaker's rules in this server; `shown` is false when its contents may not appear in this channel. */
   list: () => Array<{ rule: Rule; shown: boolean }>;
+  /** Recent runs of one of the speaker's rules; null when it is not theirs or not shown here. */
+  runs: (ruleId: string, limit: number) => RuleRun[] | null;
 }
 
 export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
@@ -193,6 +195,8 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   });
 
   const coder = options.coder;
+  // The coding agent reads the speaker's rules and runs too, so it can debug them.
+  const coderTools = options.rules ? ruleReadTools(options.rules) : [];
   const runCodeTask = tool({
     name: "run_code",
     label: "コードで調べる",
@@ -204,9 +208,13 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     parameters: Type.Object({ task: Type.String({ description: "何を調べて何を返すコードか" }) }),
     execute: async (_id, params) => {
       let result: Awaited<ReturnType<typeof runSandboxed>> | undefined;
-      const { code } = await writeCode(coder!, "read", params.task, async (code) => {
-        result = await runSandboxed(code, sandboxBindings, AGENT_SANDBOX_LIMITS);
-        return result.ok ? null : `${result.error}${result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : ""}`;
+      const { code } = await writeCode(coder!, "read", params.task, {
+        check: async (code) => {
+          result = await runSandboxed(code, sandboxBindings, AGENT_SANDBOX_LIMITS);
+          return result.ok ? null : `${result.error}${result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : ""}`;
+        },
+        run: (code) => runSandboxed(code, sandboxBindings, AGENT_SANDBOX_LIMITS),
+        tools: coderTools,
       });
       const logs = result!.logs.length > 0 ? `\nlog:\n${result!.logs.join("\n")}` : "";
       return text(`コード:\n${code}\n\n結果:\n${JSON.stringify(result!.value, null, 1)}${logs}`);
@@ -233,8 +241,8 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
 
   const tools = [readMessages, searchMessages, listChannels, findMembers, coder ? runCodeTask : runCode];
   if (options.images) tools.push(viewImages);
-  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder));
-  if (options.rules) tools.push(listRules(options.rules));
+  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools));
+  if (options.rules) tools.push(...ruleReadTools(options.rules));
   return tools;
 }
 
@@ -267,9 +275,9 @@ type CodedRuleInput = Static<typeof CodedRuleSchema>;
 const CODER_LIMIT_NOTE = "コード用のモデルは会話を見ていないので、使うID・名前・条件・作るものの内容を全部書いてください。";
 
 /** Has the coder write code, turning its failure into an error the agent can act on. */
-async function writeCode(coder: Coder, kind: CodeKind, task: string, check: (code: string) => Promise<string | null>) {
+async function writeCode(coder: Coder, kind: CodeKind, task: string, env: CodeEnv) {
   try {
-    return await coder.write(kind, task, check);
+    return await coder.write(kind, task, env);
   } catch (e) {
     if (e instanceof CodeFailed) {
       throw new Error(`${e.message}${e.code ? `\n最後に書いたコード:\n${e.code}` : ""}\n依頼の書き方(task)を具体的にして、もう一度試してください。`);
@@ -286,22 +294,29 @@ function ruleTask(r: CodedRuleInput): string {
     `きっかけ: ${r.trigger_event}`,
     `params: ${JSON.stringify(r.params ?? null)}`,
     `許す操作: ${JSON.stringify(r.allow)}`,
+    ...(r.replaces_rule ? [`直すルール: ${r.replaces_rule}(list_rules・rule_runs で今のコードと実行履歴を見られます)`] : []),
     ...(r.sample_event !== undefined ? [`イベントの例: ${JSON.stringify(r.sample_event).slice(0, 2000)}`] : []),
   ].join("\n");
 }
 
-async function codeRules(coder: Coder, rules: CodedRuleInput[]): Promise<RuleInput[]> {
-  const out: RuleInput[] = [];
-  for (const [i, r] of rules.entries()) {
-    const { code_task: _task, ...rest } = r;
-    try {
-      const { code } = await writeCode(coder, "rule", ruleTask(r), async (code) => syntaxError(code));
-      out.push({ ...rest, code });
-    } catch (e) {
-      throw new Error(`rules[${i}](${r.name}): ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  return out;
+/** One coding agent per rule, all at once. */
+async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: SandboxBindings, tools: AgentTool<any>[]): Promise<RuleInput[]> {
+  return Promise.all(
+    rules.map(async (r, i) => {
+      const { code_task: _task, ...rest } = r;
+      try {
+        const { code } = await writeCode(coder, "rule", ruleTask(r), {
+          // Rule code only runs on events, so a submission is parsed rather than run.
+          check: async (code) => syntaxError(code),
+          run: (code, event) => runSandboxed(code, { ...bindings, event: event ?? null, params: r.params ?? null }, RULE_SANDBOX_LIMITS),
+          tools,
+        });
+        return { ...rest, code };
+      } catch (e) {
+        throw new Error(`rules[${i}](${r.name}): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }),
+  );
 }
 
 function toProposal(r: RuleInput): RuleProposal {
@@ -351,6 +366,43 @@ const RULES_DESCRIPTION = [
   triggerSummary(),
 ].join("\n");
 
+/** Reading the speaker's rules and their runs; the coding agent gets these too, for debugging rules. */
+function ruleReadTools(rules: RuleTools): AgentTool<any>[] {
+  return [listRules(rules), ruleRuns(rules)];
+}
+
+function ruleRuns(rules: RuleTools): AgentTool<any> {
+  return tool({
+    name: "rule_runs",
+    label: "ルールの実行履歴",
+    description:
+      "話し手のルールの実行履歴を新しい順に返します(時刻・結果・作った変更のID・エラー・log)。結果は no_change(変更なし)、executed(実行した)、rejected(allow や権限で拒否)、failed(コードのエラーなど)、rate_limited(回数制限)のどれかです。履歴が空なら、まだイベントが来ていません。ルールが動かない理由を調べるときに使います。",
+    parameters: Type.Object({
+      rule_id: Type.String(),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+    }),
+    execute: async (_id, params) => {
+      const runs = rules.runs(params.rule_id, params.limit ?? 10);
+      if (runs === null) throw new Error("このルールは話し手のものではないか、このチャンネルでは内容を扱えません");
+      if (runs.length === 0) return text("実行履歴はありません(まだイベントが来ていません)");
+      return text(
+        runs
+          .map((r) =>
+            JSON.stringify({
+              at: r.startedAt,
+              version: r.ruleVersion,
+              outcome: r.outcome,
+              ...(r.planId ? { plan: r.planId } : {}),
+              ...(r.error ? { error: r.error } : {}),
+              ...(r.logs.length ? { logs: r.logs } : {}),
+            }),
+          )
+          .join("\n"),
+      );
+    },
+  });
+}
+
 function listRules(rules: RuleTools): AgentTool<any> {
   return tool({
     name: "list_rules",
@@ -373,7 +425,7 @@ function listRules(rules: RuleTools): AgentTool<any> {
   });
 }
 
-function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder): AgentTool<any> {
+function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = []): AgentTool<any> {
   const codeLine = coder
     ? `code_task: 今すぐ行う変更を作るコードの依頼(steps と同時には使えません)。コード用のモデルが読み取り専用のJavaScriptを書いて実行し、変更の一覧を作ります。何を読んで、どんな条件で、どの対象に何をするかを書きます。${CODER_LIMIT_NOTE}`
     : `code: 今すぐ行う変更を作る読み取り専用のJavaScript(steps と同時には使えません)。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`;
@@ -419,7 +471,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       if ((params.code || params.code_task) && params.steps?.length) {
         throw new Error(`steps と ${codeField} は同時に使えません。今すぐ行う変更はどちらか一方にまとめてください(ルールのコードは rules[].${codeField} に書きます)`);
       }
-      const ruleInputs = coder ? await codeRules(coder, (params.rules ?? []) as CodedRuleInput[]) : ((params.rules ?? []) as RuleInput[]);
+      const ruleInputs = coder ? await codeRules(coder, (params.rules ?? []) as CodedRuleInput[], sandboxBindings, coderTools) : ((params.rules ?? []) as RuleInput[]);
       let rules: RuleProposal[] = ruleInputs.map(toProposal);
 
       // Runs plan code; the error comes back as text so the coder can fix it.
@@ -446,7 +498,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       let drafts: StepDraft[];
       let code = params.code;
       if (coder && params.code_task) {
-        code = (await writeCode(coder, "plan", params.code_task, runPlan)).code;
+        code = (await writeCode(coder, "plan", params.code_task, { check: runPlan, run: (c) => runSandboxed(c, sandboxBindings, AGENT_SANDBOX_LIMITS), tools: coderTools })).code;
       } else if (code) {
         const problem = await runPlan(code);
         if (problem) throw new Error(problem);
