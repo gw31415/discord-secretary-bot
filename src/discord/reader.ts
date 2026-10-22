@@ -138,7 +138,9 @@ export class Reader {
 
   /** Generic GET used by the sandbox. Only allowlisted routes are served. */
   async get(route: string, query: Query = {}): Promise<unknown> {
-    const path = route.replace(/^GET\s+/, "").split("?")[0]!;
+    const path = route.replace(/^GET /, "");
+    // Strict: the query goes in its own argument, so the route is only ever a bare path.
+    if (path.includes("?")) throw new ReadDenied("クエリは discord.get(route, { query: { ... } }) の query に渡してください");
     for (const [pattern, bits] of GUILD_PERMISSION_ROUTES) {
       const m = pattern.exec(path);
       if (!m) continue;

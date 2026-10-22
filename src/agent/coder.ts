@@ -5,6 +5,7 @@ import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { lightestThinking, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { triggerSummary } from "../rules/triggers.ts";
+import { runSandboxed } from "../sandbox.ts";
 
 // A second agent, on the model the speaker picked for writing code. The conversation
 // agent describes what the code should do; this agent tries code against the server
@@ -192,13 +193,16 @@ export function llmCoder(model: Model<Api>, apiKey: string): Coder {
   };
 }
 
-/** Parses without running: catches syntax errors in rule code, which only runs on events. */
-export function syntaxError(code: string): string | null {
-  try {
-    // Constructing a Function only compiles it; the body never runs here.
-    new Function("event", "params", "guild", "actor", "discord", "call", "plan", "log", code);
-    return null;
-  } catch (e) {
-    return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-  }
+/**
+ * Parses without running: catches syntax errors in rule code, which only runs on events.
+ * The parse happens inside the sandbox too, so rule code is never handed to Node itself.
+ */
+export async function syntaxError(code: string): Promise<string | null> {
+  // Defining the function compiles its body without calling it.
+  const result = await runSandboxed(
+    `return typeof function (event, params) {\n${code}\n};`,
+    { guildId: "0", actor: { kind: "user", userId: "0" }, get: async () => { throw new Error("構文チェック中は読めません"); } },
+    { wallTimeMs: 2_000, memoryBytes: 16 * 1024 * 1024, maxGets: 0 },
+  );
+  return result.ok ? null : (result.error ?? "構文エラー");
 }

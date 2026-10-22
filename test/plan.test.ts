@@ -764,6 +764,6 @@ test("with a coding model, the agent describes code and the coder writes and fix
 
   assert.equal(extractCode("説明\n```js\nreturn 1\n```\n```javascript\nreturn 2\n```"), "return 2");
   assert.equal(extractCode("return 3"), "return 3");
-  assert.equal(syntaxError("return event.x"), null);
-  assert.match(syntaxError("return (")!, /SyntaxError/);
+  assert.equal(await syntaxError("return event.x"), null);
+  assert.match((await syntaxError("return ("))!, /SyntaxError/);
 });

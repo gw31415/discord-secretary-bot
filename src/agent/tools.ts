@@ -307,7 +307,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
       try {
         const { code } = await writeCode(coder, "rule", ruleTask(r), {
           // Rule code only runs on events, so a submission is parsed rather than run.
-          check: async (code) => syntaxError(code),
+          check: (code) => syntaxError(code),
           run: (code, event) => runSandboxed(code, { ...bindings, event: event ?? null, params: r.params ?? null }, RULE_SANDBOX_LIMITS),
           tools,
         });

@@ -149,3 +149,41 @@ test("the bot's own writes reach the cache before their Gateway events do", asyn
   assert.equal(cache.raw!.channels.has("70"), false);
   assert.equal(cache.guild!.channels.has("70"), false);
 });
+
+test("hostile routes never reach Discord, and Discord is only ever asked to GET allowlisted shapes", async () => {
+  // A REST client with only `get`: any other method would throw.
+  const calls: string[] = [];
+  const rest = { get: async (path: string) => (calls.push(path), []) } as unknown as REST;
+  const reader = makeReader(rest, "10", "2");
+  const hostile = [
+    `/guilds/${GUILD}/webhooks`, `/guilds/${GUILD}/roles/../webhooks`, `/guilds/${GUILD}/roles/`, `/guilds/${GUILD}/roles?x=1/../../webhooks`,
+    `/guilds/${GUILD}/roles%2F..%2Fwebhooks`, `/guilds/${GUILD}//roles`, `//evil.example/guilds/${GUILD}/roles`, `https://evil.example/guilds/${GUILD}/roles`,
+    ` /guilds/${GUILD}/roles`, `/guilds/${GUILD}/roles\n/x`, `/guilds/${GUILD}/roles\n`, `/guilds/${GUILD}/roles#/webhooks`, `/Guilds/${GUILD}/roles`,
+    `/guilds/１２３/roles`, `/guilds/${GUILD}/roles\u0000`, `/users/@me`, `/users/@me/guilds`, `/applications/1/commands`, `/gateway/bot`,
+    `/channels/10/webhooks`, `/channels/10/invites`, `/channels/10/messages/1/reactions/x`, `/guilds/999/roles`, `/guilds/${GUILD}/members/2/../../bans`,
+    `POST /guilds/${GUILD}/roles`, `DELETE /channels/10`, `/channels/11/messages`, `/channels/10/messages/../../11/messages`, "", "/",
+  ];
+  for (const route of hostile) await assert.rejects(reader.get(route), Error, `not refused: ${JSON.stringify(route)}`);
+  // Queries cannot change the path or method either.
+  await reader.get(`/guilds/${GUILD}/members`, { "../webhooks": "1", limit: "1&x=/../webhooks" } as never);
+  const SHAPES = [/^\/guilds\/\d+\/members$/];
+  for (const path of calls) assert.ok(SHAPES.some((p) => p.test(path)), `unexpected call ${path}`);
+  assert.equal(calls.length, 1);
+});
+
+test("sandboxed code has no way out besides discord.get", async () => {
+  const { runSandboxed, AGENT_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const routes: string[] = [];
+  const bindings = { guildId: GUILD, actor: { kind: "user" as const, userId: "2" }, get: async (route: string) => (routes.push(route), null) };
+  const probe = await runSandboxed(
+    `return ["fetch","require","process","std","os","XMLHttpRequest","WebSocket","setTimeout","Deno","Bun","module","global"].filter((n) => typeof globalThis[n] !== "undefined")`,
+    bindings, AGENT_SANDBOX_LIMITS,
+  );
+  assert.deepEqual(probe.value, []);
+  for (const code of [`return import("os")`, `return new Function("return this")().process.exit()`, `return (function(){ return this })().require("fs")`]) {
+    const r = await runSandboxed(code, bindings, AGENT_SANDBOX_LIMITS);
+    // Either it fails, or it yields nothing from the host.
+    assert.ok(!r.ok || r.value === undefined || JSON.stringify(r.value) === "{}", `escaped: ${code} → ${JSON.stringify(r)}`);
+  }
+  assert.deepEqual(routes, []);
+});
