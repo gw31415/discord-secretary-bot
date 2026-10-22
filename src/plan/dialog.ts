@@ -250,7 +250,7 @@ function codeBody(plan: Plan, room: number): string[] {
     const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
     const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
     const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;
-    return [`**${title}**(会話を見ていない別のAIがコードだけを読んで書いたものです)\n${explained}`, fenced("js", shown)];
+    return [`**${title}**\n${explained}`, fenced("js", shown)];
   });
 }
 

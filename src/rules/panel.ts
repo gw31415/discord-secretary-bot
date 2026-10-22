@@ -104,7 +104,7 @@ function definitionTexts(d: Pick<Rule, "ownerId" | "trigger" | "allow" | "code" 
     `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · 1分に${d.limits.perMinute}回まで · ${d.limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`,
     `**許す操作**(これ以外の変更は実行されません)\n${allowLines(d.allow, label).join("\n")}`,
     d.params ? `**params**(コードが読む値)\n${paramsText(d.params, label)}` : "",
-    `**コードの説明**(依頼を見ていない別のAIがコードだけを読んで書いたものです)\n${d.summary ?? "説明を作れませんでした。コードを読んで確かめてください。"}`,
+    `**コードの説明**\n${d.summary ?? "説明を作れませんでした。コードを読んで確かめてください。"}`,
     fenced("js", d.code.length > MAX_CODE ? `${d.code.slice(0, MAX_CODE)}\n// …(続きは「コードをファイルで」)` : d.code),
   ];
 }

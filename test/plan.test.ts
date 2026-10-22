@@ -497,7 +497,7 @@ test("a plan made from code opens on the code and its explanation, and switches 
   assert.deepEqual(summarized, [code]);
   assert.deepEqual(plan.source, { code, summary: "全員に @Mod を付けます。" });
   const opened = replies.at(-1)!.body;
-  assert.match(dialogText(opened), /コードだけを読んで[\s\S]*全員に @Mod を付けます。[\s\S]*```js\nconst ids/);
+  assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*```js\nconst ids/);
   assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "結果を見る", "JSONを見る"]);
 
   // Anyone may switch the view; it stays switched when the dialog is redrawn.
