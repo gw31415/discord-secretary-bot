@@ -1,4 +1,5 @@
 import { Value } from "typebox/value";
+import { POST_OPS } from "./files.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { basePermissions, channelPermissions } from "../discord/permissions.ts";
 import { CATALOG, MAX_DMS_PER_PLAN, pathParamNames, permissionNames } from "./catalog.ts";
@@ -87,7 +88,14 @@ export function normalizeSteps(drafts: StepDraft[], guildId: string, planId: str
       const candidate = replaceRefs(body, () => PLACEHOLDER_ID);
       if (!Value.Check(spec.body, candidate)) {
         const problems = [...Value.Errors(spec.body, candidate)].slice(0, 3).map((e) => `${e.instancePath || "/"} ${e.message}`);
-        errors.push(`${where}: 本文が仕様に合いません: ${problems.join("; ")}`);
+        // Posts take images and mentions their own way; say so instead of leaving the schema error alone.
+        const hints = POST_OPS.has(spec.op) && typeof body === "object" && body !== null
+          ? [
+              ..."attachments" in body ? ["画像は attachments ではなく files に画像のID(\"img1\" など)を並べます"] : [],
+              ..."allowed_mentions" in body ? ["allowed_mentions は付けません(本文で名指ししたユーザーだけに通知されます)"] : [],
+            ]
+          : [];
+        errors.push(`${where}: 本文が仕様に合いません: ${problems.join("; ")}${hints.length ? `(${hints.join("。")})` : ""}`);
       }
     }
 
