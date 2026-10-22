@@ -10,7 +10,7 @@ import type {
 import type { ReadScopeSetting, Store } from "../db.ts";
 import { isWebTool, WEB_TOOLS, webToolWarning } from "../agent/web.ts";
 import type { WebTool } from "../agent/web.ts";
-import { findModel, isClassifier, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels } from "./models.ts";
+import { findModel, isClassifier, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 
 export type { ModelRole };
@@ -30,6 +30,8 @@ export const CUSTOM_ID = {
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
   modelSelect: (role: ModelRole, p: ProviderId | "all", page: number) => `llm:model:${role}:${p}:${page}`,
   webSelect: "llm:web:tool",
+  typedModelSelect: "llm:typed:role",
+  typedModelModal: (role: ModelRole) => `llm:typedmodal:${role}`,
   readScopeSelect: "llm:read:scope",
 } as const;
 
@@ -61,9 +63,12 @@ const SELECT_LIMIT = 25;
 function roleSelects(store: Store, userId: string, role: ModelRole, placeholder: string, unset?: { label: string; description: string }): APIActionRowComponent<APIStringSelectComponent>[] {
   const providers = store.listKeys(userId).map((k) => k.provider).filter(isProviderId);
   const current = store.getSettings(userId)[role];
+  // A model typed in for OpenRouter is listed alone, so the menu shows what is chosen.
+  const typed = current && TYPED_MODEL_PROVIDERS.has(current.provider) && providers.includes(current.provider) ? findModel(role, current.provider, current.model) : undefined;
   const options = [
     ...(unset ? [{ label: unset.label, value: MODEL_UNSET, description: unset.description, default: !current }] : []),
-    ...providers.flatMap((provider) =>
+    ...(typed ? [{ label: typed.name.slice(0, 100), value: `${current!.provider}/${typed.id}`.slice(0, 100), description: `${PROVIDERS[current!.provider].label} · ${typed.id}`.slice(0, 100), default: true }] : []),
+    ...providers.filter((provider) => !TYPED_MODEL_PROVIDERS.has(provider)).flatMap((provider) =>
       selectableModels(provider, role).map((model) => ({
         label: (isClassifier(model) ? `${model.name}(判定専用)` : model.name).slice(0, 100),
         value: `${provider}/${model.id}`,
@@ -147,6 +152,7 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     body.push({ type: ComponentType.TextDisplay, content: "**モデル**\n先にAPIキーを登録すると、モデルを選べるようになります。" });
   }
 
+  if (judge.length > 0 || keys.has("openrouter")) body.push(...typedModelSelect(store, userId));
   body.push(...webSection(store, userId), readScopeSelect(store, userId));
 
   body.push(
@@ -254,6 +260,57 @@ export function readScopeLabel(scope: ReadScopeSetting): string {
   return READ_SCOPES[scope].label;
 }
 
+const ROLE_LABEL: Record<ModelRole, string> = { response: "応答に使う", judge: "宛先判定に使う", code: "コードを書く", reaction: "リアクションを選ぶ" };
+
+export function roleLabel(role: ModelRole): string {
+  return ROLE_LABEL[role];
+}
+
+// OpenRouter has hundreds of models, so its models are typed in rather than listed.
+// Only a select, without its own heading: the panel is near Discord's 40-component limit.
+function typedModelSelect(store: Store, userId: string): APIComponentInContainer[] {
+  const providers = [...TYPED_MODEL_PROVIDERS].filter((p) => store.listKeys(userId).some((k) => k.provider === p));
+  if (providers.length === 0) return [];
+  const label = providers.map((p) => PROVIDERS[p].label).join("・");
+  return [{
+    type: ComponentType.ActionRow,
+    components: [{
+      type: ComponentType.StringSelect,
+      custom_id: CUSTOM_ID.typedModelSelect,
+      placeholder: `${label}のモデルをIDで選ぶ`.slice(0, 150),
+      options: (Object.keys(ROLE_LABEL) as ModelRole[]).map((role) => ({
+        label: `${label}: ${ROLE_LABEL[role]}モデルをIDで指定`.slice(0, 100),
+        description: (role === "judge" || role === "reaction" ? "例: ~typesafe/jev-latest、anthropic/claude-haiku-5-5" : "例: anthropic/claude-sonnet-5、google/gemini-3-pro").slice(0, 100),
+        value: role,
+      })),
+    }],
+  }];
+}
+
+export function typedModelModal(role: ModelRole): APIModalInteractionResponseCallbackData {
+  return {
+    custom_id: CUSTOM_ID.typedModelModal(role),
+    title: `OpenRouter: ${ROLE_LABEL[role]}モデル`.slice(0, 45),
+    components: [
+      {
+        type: ComponentType.ActionRow,
+        components: [
+          {
+            type: ComponentType.TextInput,
+            custom_id: "model",
+            label: "モデルID(openrouter.ai/models に載っているもの)",
+            style: TextInputStyle.Short,
+            required: true,
+            min_length: 3,
+            max_length: 90,
+            placeholder: role === "judge" || role === "reaction" ? "~typesafe/jev-latest" : "anthropic/claude-sonnet-5",
+          },
+        ],
+      },
+    ],
+  };
+}
+
 export function keyModal(provider: KeyProviderId): APIModalInteractionResponseCallbackData {
   return {
     custom_id: CUSTOM_ID.keyModal(provider),
@@ -285,7 +342,9 @@ export type PanelAction =
   | { kind: "selectModel"; role: ModelRole; provider: ProviderId; model: string }
   | { kind: "clearModel"; role: "code" | "reaction" }
   | { kind: "selectWeb"; tool: WebTool }
-  | { kind: "selectReadScope"; scope: ReadScopeSetting };
+  | { kind: "selectReadScope"; scope: ReadScopeSetting }
+  | { kind: "openTypedModelModal"; role: ModelRole }
+  | { kind: "submitTypedModel"; role: ModelRole };
 
 /** Parses a custom_id (and select value) into an action. Unknown ids return null. */
 export function parseCustomId(customId: string, values: string[] = []): PanelAction | null {
@@ -300,6 +359,9 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "key" && isKeyProviderId(arg)) return { kind: "openKeyModal", provider: arg };
   if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
   if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
+  const isRole = (r: string | undefined): r is ModelRole => r === "response" || r === "judge" || r === "code" || r === "reaction";
+  if (kind === "typed" && arg === "role") return isRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
+  if (kind === "typedmodal" && isRole(arg)) return { kind: "submitTypedModel", role: arg };
   if (kind === "read" && arg === "scope") {
     const scope = values[0];
     return scope === "ask" || scope === "always" ? { kind: "selectReadScope", scope } : null;

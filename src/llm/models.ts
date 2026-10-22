@@ -2,6 +2,7 @@ import { createModels, isModelType } from "@earendil-works/pi-ai";
 import type { Api, ClassifierApi, ClassifierModel, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { typesafeProvider } from "@earendil-works/pi-ai/providers/typesafe";
 import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
 
@@ -13,9 +14,14 @@ export const PROVIDERS = {
   zai: { label: "GLM Coding Plan" },
   // Chat models through the Responses API, plus the Decisions API (gpt-6-luna) for judgment and reactions.
   openai: { label: "OpenAI" },
+  // Hundreds of models from many vendors (chat and classifiers such as Jev), chosen by typing the id.
+  openrouter: { label: "OpenRouter" },
 } as const;
 
 export type ProviderId = keyof typeof PROVIDERS;
+
+/** Providers with too many models for a select menu; the person types the model id instead. */
+export const TYPED_MODEL_PROVIDERS: ReadonlySet<ProviderId> = new Set(["openrouter"]);
 
 /** Every key a person can register: the LLM providers, plus services the agent's tools call. */
 export const KEY_PROVIDERS = {
@@ -44,6 +50,7 @@ llm.setProvider(anthropicProvider());
 llm.setProvider(typesafeProvider());
 llm.setProvider(zaiProvider());
 llm.setProvider(openaiProvider());
+llm.setProvider(openrouterProvider());
 
 // Dated snapshots duplicate their alias (claude-sonnet-4-5 vs claude-sonnet-4-5-20250929)
 // and only lengthen the select menus.
