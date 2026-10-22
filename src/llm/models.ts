@@ -1,6 +1,7 @@
 import { createModels, isModelType } from "@earendil-works/pi-ai";
 import type { Api, ClassifierApi, ClassifierModel, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { typesafeProvider } from "@earendil-works/pi-ai/providers/typesafe";
 import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
 
@@ -10,6 +11,8 @@ export const PROVIDERS = {
   typesafe: { label: "TypeSafe" },
   // pi-ai's "zai" provider is Z.AI's GLM Coding Plan endpoint (api.z.ai/api/coding).
   zai: { label: "GLM Coding Plan" },
+  // Chat models through the Responses API, plus the Decisions API (gpt-6-luna) for judgment and reactions.
+  openai: { label: "OpenAI" },
 } as const;
 
 export type ProviderId = keyof typeof PROVIDERS;
@@ -40,16 +43,23 @@ export const llm = createModels();
 llm.setProvider(anthropicProvider());
 llm.setProvider(typesafeProvider());
 llm.setProvider(zaiProvider());
+llm.setProvider(openaiProvider());
 
 // Dated snapshots duplicate their alias (claude-sonnet-4-5 vs claude-sonnet-4-5-20250929)
 // and only lengthen the select menus.
-const DATED_SNAPSHOT = /-\d{8}$/;
+const DATED_SNAPSHOT = /-\d{8}$|-\d{4}-\d{2}-\d{2}$/;
+// OpenAI lists every model it ever served; the menus offer the current general-purpose
+// ones (GPT-5.5 and later, without Pro). A model chosen before stays valid.
+const OPENAI_CURRENT = /^gpt-(5\.[5-9]|[6-9])(\.\d+)?(-(luna|sol|terra|astra))?$/;
 
 export function selectableModels(provider: ProviderId, role: ModelRole): JudgeModel[] {
-  const chat = llm.getModels(provider).filter((m) => !DATED_SNAPSHOT.test(m.id));
+  const chat = llm.getModels(provider).filter((m) => !DATED_SNAPSHOT.test(m.id) && (provider !== "openai" || OPENAI_CURRENT.test(m.id)));
   // Judging and choosing reactions also take classifiers.
   if (role !== "judge" && role !== "reaction") return chat;
-  return [...llm.getModelsOfType("classifier", provider), ...chat];
+  // A classifier shadows a chat model of the same id (gpt-6-luna): settings store only the id,
+  // and findJudgeModel picks the classifier.
+  const classifiers = llm.getModelsOfType("classifier", provider);
+  return [...classifiers, ...chat.filter((m) => !classifiers.some((c) => c.id === m.id))];
 }
 
 export function findChatModel(provider: ProviderId, modelId: string): Model<Api> | undefined {

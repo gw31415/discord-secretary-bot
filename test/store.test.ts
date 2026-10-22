@@ -56,6 +56,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setApiKey("u1", "typesafe", "ts-abcdefgh5678");
   store.setApiKey("u1", "zai", "glm-abcdefgh9012");
   store.setApiKey("u1", "tavily", "tvly-abcdefgh3456");
+  store.setApiKey("u1", "openai", "sk-proj-abcdefgh7890");
   // A warning line is the most the web section ever adds.
   store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
   store.setWebTool("u1", "anthropic");
@@ -76,18 +77,22 @@ test("every selectable model is offered, with unique custom ids, within the comp
   walk(panel.components);
   assert.ok(components <= 40, `${components} components`);
   assert.equal(new Set(selects.map((s) => s.custom_id)).size, selects.length);
+  // Discord rejects a select whose options repeat a value (gpt-6-luna is both a chat model and a classifier).
+  for (const s of selects) assert.equal(new Set(s.options.map((o) => o.value)).size, s.options.length, s.custom_id);
   const offered = (role: string) =>
     new Set(selects.filter((s) => s.custom_id.startsWith(`llm:model:${role}:`)).flatMap((s) => s.options.map((o) => o.value)));
   const code = selects.filter((s) => s.custom_id.startsWith("llm:model:code:")).flatMap((s) => s.options.map((o) => o.value));
   assert.equal(code[0], "none");
-  assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length);
+  assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length + selectableModels("openai", "code").length);
   for (const role of ["response", "judge"] as const) {
-    for (const provider of ["anthropic", "typesafe", "zai"] as const) {
+    for (const provider of ["anthropic", "typesafe", "zai", "openai"] as const) {
       for (const m of selectableModels(provider, role)) assert.ok(offered(role).has(`${provider}/${m.id}`), `${role} ${provider}/${m.id}`);
     }
   }
   assert.ok(offered("response").has("anthropic/claude-opus-5-5"));
   assert.ok(offered("judge").has("typesafe/jev-latest"), "Jev is offered for judgment");
+  assert.ok(offered("judge").has("openai/gpt-6-luna"), "the Decisions API is offered for judgment");
+  assert.ok(!offered("response").has("openai/gpt-4"), "old OpenAI models stay out of the menus");
   assert.ok(!offered("response").has("typesafe/jev-latest"), "a classifier cannot answer");
   assert.ok(offered("reaction").has("typesafe/jev-latest"), "Jev is offered for reactions");
   const reaction = selects.filter((s) => s.custom_id.startsWith("llm:model:reaction:")).flatMap((s) => s.options.map((o) => o.value));
@@ -104,7 +109,13 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:judge", ["anthropic/not-a-model"]), null);
   assert.equal(parseCustomId("llm:model:judge:typesafe:0", ["typesafe/jev-latest"])?.kind, "selectModel");
   assert.equal(parseCustomId("llm:model:response:typesafe:0", ["typesafe/jev-latest"]), null);
-  assert.equal(parseCustomId("llm:key:openai"), null);
+  assert.equal(parseCustomId("llm:key:mistral"), null);
+  assert.deepEqual(parseCustomId("llm:key:set", ["openai"]), { kind: "openKeyModal", provider: "openai" });
+  assert.deepEqual(parseCustomId("llm:key:delete", ["tavily"]), { kind: "deleteKey", provider: "tavily" });
+  assert.equal(parseCustomId("llm:key:delete", ["mistral"]), null);
+  // OpenAI: chat models for answers, and the Decisions API (gpt-6-luna) for judgment.
+  assert.equal(parseCustomId("llm:model:response:all:0", ["openai/gpt-6-sol"])?.kind, "selectModel");
+  assert.equal(parseCustomId("llm:model:judge:all:0", ["openai/gpt-6-luna"])?.kind, "selectModel");
   assert.deepEqual(parseCustomId("llm:key:tavily"), { kind: "openKeyModal", provider: "tavily" });
   assert.deepEqual(parseCustomId("llm:web:tool", ["tavily"]), { kind: "selectWeb", tool: "tavily" });
   assert.equal(parseCustomId("llm:web:tool", ["bing"]), null);

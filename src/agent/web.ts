@@ -48,6 +48,7 @@ export function resolveWebAccess(choice: WebTool, model: ProviderId, keyOf: (p: 
 /** Why the chosen web tool will not work with these settings, or null if it will. */
 export function webToolWarning(choice: WebTool, model: ProviderId | undefined, keys: ReadonlySet<KeyProviderId>): string | null {
   if (choice === "off" || !model) return null;
+  if (choice === "auto" && model !== "anthropic" && model !== "zai") return "応答モデルの標準のWebツールがないため、Webは使われません。Tavilyを選ぶと使えます。";
   if (choice === "anthropic" && model !== "anthropic") return "応答モデルがClaudeではないため、Webは使われません。";
   if (choice === "zai" && !keys.has("zai")) return "GLM Coding Planのキーがないため、Webは使われません。";
   if (choice === "tavily" && !keys.has("tavily")) return "Tavilyのキーがないため、Webは使われません。";

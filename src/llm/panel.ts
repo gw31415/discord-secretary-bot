@@ -10,7 +10,7 @@ import type {
 import type { ReadScopeSetting, Store } from "../db.ts";
 import { isWebTool, WEB_TOOLS, webToolWarning } from "../agent/web.ts";
 import type { WebTool } from "../agent/web.ts";
-import { findModel, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels } from "./models.ts";
+import { findModel, isClassifier, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 
 export type { ModelRole };
@@ -24,8 +24,8 @@ export type { ModelRole };
 const MODEL_UNSET = "none";
 
 export const CUSTOM_ID = {
-  keyButton: (p: KeyProviderId) => `llm:key:${p}`,
-  deleteButton: (p: KeyProviderId) => `llm:delkey:${p}`,
+  keySetSelect: "llm:key:set",
+  keyDeleteSelect: "llm:key:delete",
   keyModal: (p: KeyProviderId) => `llm:keymodal:${p}`,
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
   modelSelect: (role: ModelRole, p: ProviderId | "all", page: number) => `llm:model:${role}:${p}:${page}`,
@@ -65,7 +65,7 @@ function roleSelects(store: Store, userId: string, role: ModelRole, placeholder:
     ...(unset ? [{ label: unset.label, value: MODEL_UNSET, description: unset.description, default: !current }] : []),
     ...providers.flatMap((provider) =>
       selectableModels(provider, role).map((model) => ({
-        label: model.name.slice(0, 100),
+        label: (isClassifier(model) ? `${model.name}(判定専用)` : model.name).slice(0, 100),
         value: `${provider}/${model.id}`,
         description: `${PROVIDERS[provider].label} · ${model.id}`.slice(0, 100),
         default: current?.provider === provider && current.model === model.id,
@@ -94,21 +94,39 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     const note = p === "tavily" ? "(Web検索用)" : "";
     return `${KEY_PROVIDERS[p].label}${note}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
   });
-  // One row per provider: an action row holds at most five buttons.
-  const buttonRows = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p): APIComponentInContainer => {
-    const registered = keys.has(p);
-    const list: APIButtonComponent[] = [
-      { type: ComponentType.Button, style: ButtonStyle.Primary, custom_id: CUSTOM_ID.keyButton(p), label: `${KEY_PROVIDERS[p].label}のキーを${registered ? "差し替え" : "登録"}` },
-    ];
-    if (registered) list.push({ type: ComponentType.Button, style: ButtonStyle.Danger, custom_id: CUSTOM_ID.deleteButton(p), label: `${KEY_PROVIDERS[p].label}のキーを削除` });
-    return { type: ComponentType.ActionRow, components: list };
-  });
+  // Two selects instead of a button row per provider: the panel is near Discord's 40-component limit.
+  const keySelects: APIComponentInContainer[] = [
+    {
+      type: ComponentType.ActionRow,
+      components: [{
+        type: ComponentType.StringSelect,
+        custom_id: CUSTOM_ID.keySetSelect,
+        placeholder: "キーを登録・差し替える",
+        options: (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p) => ({
+          label: `${KEY_PROVIDERS[p].label}のキーを${keys.has(p) ? "差し替える" : "登録する"}`,
+          value: p,
+        })),
+      }],
+    },
+  ];
+  const registered = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).filter((p) => keys.has(p));
+  if (registered.length > 0) {
+    keySelects.push({
+      type: ComponentType.ActionRow,
+      components: [{
+        type: ComponentType.StringSelect,
+        custom_id: CUSTOM_ID.keyDeleteSelect,
+        placeholder: "キーを削除する",
+        options: registered.map((p) => ({ label: `${KEY_PROVIDERS[p].label}のキーを削除する`, value: p })),
+      }],
+    });
+  }
 
   const body: APIComponentInContainer[] = [
     { type: ComponentType.TextDisplay, content: "## 設定\nあなたのAPIキー・モデルなどの設定です。この画面はあなたにだけ見えています。" },
     { type: ComponentType.Separator },
     { type: ComponentType.TextDisplay, content: `**APIキー**\n${keyLines.join("\n")}` },
-    ...buttonRows,
+    ...keySelects,
     { type: ComponentType.Separator },
   ];
 
@@ -119,8 +137,8 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
       { type: ComponentType.TextDisplay, content: "**応答に使うモデル**(必須)\nBotがあなたに返事をするときに使います。" },
       ...(response.length > 0
         ? response
-        : [{ type: ComponentType.TextDisplay, content: "-# 応答に使えるモデルがありません。Claude APIのキーを登録してください。" } satisfies APIComponentInContainer]),
-      { type: ComponentType.TextDisplay, content: "**宛先判定に使うモデル**(必須)\nあなたが起こした会話で、発言がBot宛てかを判定するときに使います。軽いモデルか、判定専用のJev(TypeSafe)がおすすめです。" },
+        : [{ type: ComponentType.TextDisplay, content: "-# 応答に使えるモデルがありません。Claude API・GLM Coding Plan・OpenAIのどれかのキーを登録してください。" } satisfies APIComponentInContainer]),
+      { type: ComponentType.TextDisplay, content: "**宛先判定に使うモデル**(必須)\nあなたが起こした会話で、発言がBot宛てかを判定するときに使います。軽いモデルか、判定専用のJev(TypeSafe)・GPT-6 Luna(OpenAIのDecisions API)がおすすめです。" },
       ...judge,
       ...codeSection(store, userId),
       ...reactionSection(store, userId),
@@ -165,7 +183,7 @@ function reactionSection(store: Store, userId: string): APIComponentInContainer[
   const current = store.getSettings(userId).reaction;
   const text = current
     ? `**リアクションを選ぶモデル**(任意)\nBotがあなたに答える前に ${current.model} が、文章で返すかリアクションだけで返すかと、どの絵文字にするかを選びます。Botの発言にあなたが付けたリアクションへの応じ方も選びます。`
-    : "**リアクションを選ぶモデル**(任意)\n未設定なので、応答に使うモデルが必要に応じてリアクションで返します。選ぶと、文章かリアクションかをそのモデルが先に決めます。Jev(TypeSafe)のような判定専用のモデルが向いています。";
+    : "**リアクションを選ぶモデル**(任意)\n未設定なので、応答に使うモデルが必要に応じてリアクションで返します。選ぶと、文章かリアクションかをそのモデルが先に決めます。Jev(TypeSafe)やGPT-6 Luna(OpenAIのDecisions API)のような判定専用のモデルが向いています。";
   return [
     { type: ComponentType.TextDisplay, content: text },
     ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", { label: "応答に使うモデルに任せる", description: "リアクション用のモデルを使いません" }),
@@ -273,6 +291,12 @@ export type PanelAction =
 export function parseCustomId(customId: string, values: string[] = []): PanelAction | null {
   const [ns, kind, arg] = customId.split(":");
   if (ns !== "llm" || !arg) return null;
+  if (kind === "key" && (arg === "set" || arg === "delete")) {
+    const provider = values[0] ?? "";
+    if (!isKeyProviderId(provider)) return null;
+    return arg === "set" ? { kind: "openKeyModal", provider } : { kind: "deleteKey", provider };
+  }
+  // Buttons on panels opened before the key selects.
   if (kind === "key" && isKeyProviderId(arg)) return { kind: "openKeyModal", provider: arg };
   if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
   if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
