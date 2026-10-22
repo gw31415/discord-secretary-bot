@@ -694,6 +694,23 @@ test("rules are checked at proposal: refs must point to the plan's steps, and a 
   assert.equal(t.calls.length, 0);
 });
 
+test("a new version of a rule shows what it did before and what it will do", async () => {
+  const t = setup();
+  withRules(t);
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "x" };
+  const first = await t.planner.propose({ ...base, drafts: [], rules: [CLEANUP_RULE] });
+  await t.planner.handleInteraction(click(first, "run", "1"));
+  await settle(() => t.store.getPlan(first.id)!.status === "succeeded");
+  const old = t.store.listRules(GUILD)[0]!;
+  t.store.db.prepare("UPDATE rules SET rule_json = json_set(rule_json, '$.summary', ?) WHERE id = ?").run("前の説明です。", old.id);
+
+  const plan = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, trigger: { event: "VOICE_STATE_UPDATE" } }] });
+  const text = dialogText(renderDialog(plan, { status: "pending_approval" }));
+  assert.match(text, /変更前: 前の説明です。/);
+  assert.match(text, /変更後: 説明です。/);
+  assert.match(text, /変わる設定: きっかけ/);
+});
+
 test("propose_plan refuses steps and code together, and points out rule code passed as plan code", async () => {
   const { readTools } = await import("../src/agent/tools.ts");
   const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => [] } as never;

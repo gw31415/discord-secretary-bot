@@ -123,7 +123,13 @@ export interface PlanRuleDraft {
   /** Written from the code alone by a model that did not see the request. */
   summary: string | null;
   /** An existing rule of the owner's this is a new version of. */
-  replaces?: { id: string; name: string; version: number };
+  replaces?: {
+    id: string;
+    name: string;
+    version: number;
+    /** The version being replaced, so the dialog can show before and after. Absent when it may not be shown here. */
+    before?: { summary: string | null; trigger: RuleTrigger; allow: AllowEntry[]; params?: Record<string, unknown> };
+  };
   /** The dry run at proposal. */
   dry: RuleDryRun;
   /** Kept so proposing the plan again can dry-run the same way. */

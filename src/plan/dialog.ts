@@ -268,7 +268,11 @@ function fenced(lang: string, body: string): string {
 function codeBody(plan: Plan, room: number): string[] {
   const parts: Array<{ title: string; code: string; summary: string | null }> = [
     ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
-    ...(plan.rules ?? []).map((r) => ({ title: `ルール「${r.name}」のコードの説明`, code: r.code, summary: r.summary })),
+    ...(plan.rules ?? []).map((r) => ({
+      title: `ルール「${r.name}」のコードの説明`,
+      code: r.code,
+      summary: r.replaces?.before && r.summary ? `変更前: ${r.replaces.before.summary ?? "説明はありません"}\n変更後: ${r.summary}` : r.summary,
+    })),
   ];
   const share = Math.floor(room / Math.max(1, parts.length));
   return parts.flatMap(({ title, code, summary }) => {
@@ -295,6 +299,26 @@ function dryLine(r: PlanRuleDraft): string {
   }
 }
 
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** For a new version of a rule: what it did before and what it will do, then which settings changed. */
+function beforeAfter(r: PlanRuleDraft): string[] {
+  if (!r.replaces) return [];
+  const before = r.replaces.before;
+  if (!before) return ["変更前: この場所では前の版の内容を表示できません"];
+  const unexplained = "説明はありません";
+  const changed = [
+    !same(before.trigger, r.trigger) ? `きっかけ(${triggerLabel(before.trigger)} → ${triggerLabel(r.trigger)})` : null,
+    !same(before.allow, r.allow) ? "許す操作" : null,
+    !same(before.params ?? null, r.params ?? null) ? "params" : null,
+  ].filter((c): c is string => c !== null);
+  return [
+    `変更前: ${before.summary ?? unexplained}`,
+    `変更後: ${r.summary ?? unexplained}`,
+    changed.length > 0 ? `変わる設定: ${changed.join("、")}` : "コード以外の設定は変わりません",
+  ];
+}
+
 /** The rules a plan registers, drawn only from their definitions. */
 function ruleTexts(plan: Plan): string[] {
   if (!plan.rules?.length) return [];
@@ -306,6 +330,7 @@ function ruleTexts(plan: Plan): string[] {
       [
         `**${r.name}**${r.replaces ? `(「${r.replaces.name}」v${r.replaces.version} を置き換え)` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
         `きっかけ: ${triggerLabel(r.trigger)}`,
+        ...beforeAfter(r),
         `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n")}`,
         ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),
         dryLine(r),

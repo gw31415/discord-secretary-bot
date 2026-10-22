@@ -171,7 +171,16 @@ export class RuleService {
         const rule = this.deps.store.getRule(r.replaces);
         if (!rule || rule.guildId !== input.guildId) own.push(`ルール ${r.replaces} が見つかりません`);
         else if (rule.ownerId !== input.ownerId) own.push("ルールを直せるのは作成者だけです");
-        else replaces = { id: rule.id, name: rule.name, version: rule.version };
+        else {
+          // The old version's contents follow the same visibility as the new one's.
+          const shown = pinnedIds(rule).every((id) => input.shareable.has(id));
+          replaces = {
+            id: rule.id,
+            name: rule.name,
+            version: rule.version,
+            ...(shown ? { before: { summary: rule.summary, trigger: rule.trigger, allow: rule.allow, ...(rule.params ? { params: rule.params } : {}) } } : {}),
+          };
+        }
       }
       if (own.length > 0) {
         problems.push(...own.map((p) => `${where}: ${p}`));
