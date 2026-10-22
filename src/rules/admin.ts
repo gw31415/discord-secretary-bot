@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { VISIBILITIES } from "./command.ts";
+import type { CommandVisibility } from "./command.ts";
 import { PermissionFlagsBits as P } from "discord-api-types/v10";
 import type { AuditEntry, PlanRow, Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
@@ -172,6 +174,17 @@ export class RuleAdmin {
       this.deps.store.audit(actor, "rule.disable", { guildId, owner: rule.ownerId }, undefined, rule.id);
     }
     this.deps.onChange?.(guildId);
+    return this.deps.store.getRule(rule.id)!;
+  }
+
+  /** Who sees a command's replies; a setting its owner changes from the panel without a new version. */
+  setVisibility(guildId: string, userId: string, ruleId: string, visibility: CommandVisibility): Rule {
+    const rule = this.#rule(guildId, ruleId);
+    if (rule.ownerId !== userId) throw new AdminDenied("返事を見せる相手を変えられるのは作成者だけです");
+    if (!rule.trigger.command) throw new AdminDenied("このルールはコマンドではありません");
+    if (!VISIBILITIES.includes(visibility)) throw new AdminDenied("選べない値です");
+    this.deps.store.updateRuleSettings(rule.id, { ...rule, trigger: { ...rule.trigger, command: { ...rule.trigger.command, visibility } } });
+    this.deps.store.audit({ kind: "user", userId, via: "panel" }, "rule.visibility", { guildId, visibility }, undefined, rule.id);
     return this.deps.store.getRule(rule.id)!;
   }
 

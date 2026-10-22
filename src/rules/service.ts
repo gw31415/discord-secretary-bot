@@ -23,6 +23,7 @@ import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
 import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
 import type { CommandSpec, CommandVisibility } from "./command.ts";
+import { VISIBILITY_CHOICES } from "./command.ts";
 import { defaultVisibility, showsToAll } from "../agent/judge.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
 import type { Rule, RuleDefinition, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
@@ -457,6 +458,13 @@ export class RuleService {
         case "delete":
           await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
           return true;
+        case "visibility": {
+          const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
+          const label = VISIBILITY_CHOICES.find((o) => o.value === rule.trigger.command?.visibility)?.label ?? "";
+          await update(this.#detail(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
+          return true;
+        }
         case "clearstate": {
           const rule = this.deps.admin.get(guildId, userId, parsed.arg);
           if (rule.ownerId !== userId) {

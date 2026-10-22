@@ -102,6 +102,7 @@ function world(visibilityScore?: (input: any) => Promise<number | null>) {
       defer: async (_id: string, _t: string, body: unknown) => void calls.push(["defer", body]),
       editReply: async (_a: string, _t: string, body: unknown) => void calls.push(["edit", body]),
       followUp: async (_a: string, _t: string, body: unknown) => void calls.push(["followUp", body]),
+      updateMessage: async (_id: string, _t: string, body: unknown) => void calls.push(["update", body]),
       deleteReply: async () => void calls.push(["delete", null]),
     },
     applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]) },
@@ -230,4 +231,24 @@ test("a command's code can make images for its reply and its posts", async () =>
   assert.ok(edit.files![0]!.data.length > 100);
   assert.deepEqual(Object.keys(w.runs[0].images), ["img1"]);
   assert.equal(w.runs[0].images.img1.name, "eq.png");
+});
+
+test("the owner changes who sees a command's replies from /rules, keeping the version and the code", async () => {
+  const w = world();
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { ...SPEC, visibility: "auto" } } });
+  const pick = (userId: string, value: string) => ({
+    id: "i2", token: "tok", application_id: "app", type: InteractionType.MessageComponent, guild_id: GUILD,
+    member: { user: { id: userId }, roles: [], permissions: "0" },
+    data: { custom_id: `rule:visibility:${rule.id}`, component_type: 3, values: [value] },
+  }) as never;
+  await w.service.handleInteraction(pick("2", "public"));
+  assert.equal(w.store.getRule(rule.id)!.trigger.command!.visibility, "auto");
+  await w.service.handleInteraction(pick("1", "public"));
+  const after = w.store.getRule(rule.id)!;
+  assert.equal(after.trigger.command!.visibility, "public");
+  assert.equal(after.version, rule.version);
+  assert.equal(after.code, rule.code);
+  const view = JSON.stringify(w.calls.at(-1)![1]);
+  assert.match(view, /返事を全員に見せる」にしました/);
+  assert.throws(() => w.admin.setVisibility(GUILD, "1", rule.id, "everyone" as never), /選べない/);
 });

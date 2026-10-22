@@ -1,5 +1,6 @@
 import { ButtonStyle, ComponentType, MessageFlags } from "discord-api-types/v10";
 import type { APIButtonComponent, APIComponentInContainer, APIMessageTopLevelComponent } from "discord-api-types/v10";
+import { VISIBILITY_CHOICES } from "./command.ts";
 import type { AuditEntry, PlanRow } from "../db.ts";
 import { RISK_LABEL } from "../plan/types.ts";
 import type { RuleDryRun } from "../plan/types.ts";
@@ -18,11 +19,11 @@ const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用の
 
 export type RuleAction =
   | "home" | "open" | "enable" | "disable" | "dry" | "delete" | "delete2" | "code"
-  | "plans" | "audit" | "halt" | "resume" | "clearstate";
+  | "plans" | "audit" | "halt" | "resume" | "clearstate" | "visibility";
 
 const ACTIONS = new Set<RuleAction>([
   "home", "open", "enable", "disable", "dry", "delete", "delete2", "code",
-  "plans", "audit", "halt", "resume", "clearstate",
+  "plans", "audit", "halt", "resume", "clearstate", "visibility",
 ]);
 
 export function ruleCustomId(action: RuleAction, arg = ""): string {
@@ -258,7 +259,18 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   buttons.push(button(ruleCustomId("code", rule.id), "コードをファイルで"));
   const second: APIButtonComponent[] = [button(ruleCustomId("home"), "戻る")];
   if (input.can.remove) second.push(button(ruleCustomId("delete", rule.id), "削除", ButtonStyle.Danger));
-  return container(texts, [row(buttons), row(second)]);
+  // The owner picks who sees a command's replies here, without a new version.
+  const visibility: APIComponentInContainer[] = input.can.owner && rule.trigger.command
+    ? [{
+        type: ComponentType.ActionRow,
+        components: [{
+          type: ComponentType.StringSelect,
+          custom_id: ruleCustomId("visibility", rule.id),
+          options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (rule.trigger.command!.visibility ?? "auto") === o.value })),
+        }],
+      }]
+    : [];
+  return container(texts, [...visibility, row(buttons), row(second)]);
 }
 
 const STATUS_LABEL: Record<PlanRow["status"], string> = {

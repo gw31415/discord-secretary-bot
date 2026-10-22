@@ -10,6 +10,7 @@ import type {
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
 import { limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
+import { VISIBILITY_CHOICES } from "../rules/command.ts";
 import type { Body } from "./catalog.ts";
 import { dialogFileName } from "./files.ts";
 import { RISK_LABEL } from "./types.ts";
@@ -47,11 +48,6 @@ export function parsePlanCustomId(id: string): { action: PlanAction; planId: str
   return { action: m[1] as PlanAction, planId: m[3]!, hash8: m[4]!, ...(m[2] ? { rule: m[2] } : {}) };
 }
 
-const VISIBILITY_OPTIONS = [
-  { value: "public", label: "返事を全員に見せる" },
-  { value: "private", label: "返事は実行した人だけに見せる" },
-  { value: "auto", label: "返事ごとにモデルが判定する" },
-] as const;
 
 /** While the plan waits, who sees each command's replies is picked here; the pick is part of what is approved. */
 function visibilityRows(plan: Plan, state: DialogState): APIActionRowComponent<APIStringSelectComponent>[] {
@@ -63,7 +59,7 @@ function visibilityRows(plan: Plan, state: DialogState): APIActionRowComponent<A
       {
         type: ComponentType.StringSelect,
         custom_id: customId("visibility", plan, r.key),
-        options: VISIBILITY_OPTIONS.map((o) => ({
+        options: VISIBILITY_CHOICES.map((o) => ({
           value: o.value,
           label: commands.length > 1 ? `/${r.trigger.command!.name}: ${o.label}` : o.label,
           default: (r.trigger.command!.visibility ?? "auto") === o.value,

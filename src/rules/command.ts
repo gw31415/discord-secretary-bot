@@ -44,6 +44,13 @@ export interface CommandSpec {
 export const VISIBILITIES = ["auto", "private", "public"] as const;
 export type CommandVisibility = (typeof VISIBILITIES)[number];
 
+/** The choices on the confirmation dialog and the /rules panel. */
+export const VISIBILITY_CHOICES = [
+  { value: "public", label: "返事を全員に見せる" },
+  { value: "private", label: "返事は実行した人だけに見せる" },
+  { value: "auto", label: "返事ごとにモデルが判定する" },
+] as const satisfies ReadonlyArray<{ value: CommandVisibility; label: string }>;
+
 /** The bot's own commands; custom ones cannot take these names. */
 export const RESERVED_COMMANDS = new Set(["settings", "rules"]);
 /** Custom commands per server, well under Discord's 100. */

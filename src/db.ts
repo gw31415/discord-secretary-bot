@@ -568,6 +568,11 @@ export class Store {
       .run(definition.name, JSON.stringify(definitionOf(definition)), version, new Date().toISOString(), id);
   }
 
+  /** Changes a setting of a rule (not its code or allow list), keeping its version and whether it is on. */
+  updateRuleSettings(id: string, definition: RuleDefinition): void {
+    this.db.prepare("UPDATE rules SET rule_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(definitionOf(definition)), new Date().toISOString(), id);
+  }
+
   getRule(id: string): Rule | undefined {
     const row = this.db.prepare("SELECT * FROM rules WHERE id = ?").get(id) as RuleDbRow | undefined;
     return row && toRule(row);
