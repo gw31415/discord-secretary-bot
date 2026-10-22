@@ -7,7 +7,7 @@ import type {
   APIModalInteractionResponseCallbackData,
   APIStringSelectComponent,
 } from "discord-api-types/v10";
-import type { Store } from "../db.ts";
+import type { ReadScopeSetting, Store } from "../db.ts";
 import { isWebTool, WEB_TOOLS, webToolWarning } from "../agent/web.ts";
 import type { WebTool } from "../agent/web.ts";
 import { findModel, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels } from "./models.ts";
@@ -30,6 +30,7 @@ export const CUSTOM_ID = {
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
   modelSelect: (role: ModelRole, p: ProviderId | "all", page: number) => `llm:model:${role}:${p}:${page}`,
   webSelect: "llm:web:tool",
+  readScopeSelect: "llm:read:scope",
 } as const;
 
 export interface SetupStatus {
@@ -128,7 +129,7 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     body.push({ type: ComponentType.TextDisplay, content: "**モデル**\n先にAPIキーを登録すると、モデルを選べるようになります。" });
   }
 
-  body.push(...webSection(store, userId));
+  body.push(...webSection(store, userId), readScopeSelect(store, userId));
 
   body.push(
     { type: ComponentType.Separator },
@@ -178,7 +179,16 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
   const warning = webToolWarning(settings.web, settings.response?.provider, keys);
   return [
     { type: ComponentType.Separator },
-    { type: ComponentType.TextDisplay, content: "**Webツール**\nBotがWebを検索したりページを読んだりするときに使います。" },
+    // The warning shares the heading's text display: the panel is at Discord's 40-component limit.
+    {
+      type: ComponentType.TextDisplay,
+      content: [
+        "**Webツールと読み取り**",
+        "Webツールは、BotがWebを検索したりページを読んだりするときに使います。",
+        "Botはふつう、そのチャンネルを見られる全員が見られる情報だけを使います。あなたへの返答でそれ以上が要るとき、あなたが見られる範囲まで広げてよいかを下で選べます。",
+        ...(warning ? [`-# ⚠️ ${warning}`] : []),
+      ].join("\n"),
+    },
     {
       type: ComponentType.ActionRow,
       components: [{
@@ -193,8 +203,37 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
         })),
       }],
     },
-    ...(warning ? [{ type: ComponentType.TextDisplay, content: `-# ⚠️ ${warning}` } satisfies APIComponentInContainer] : []),
   ];
+}
+
+const READ_SCOPES: Record<ReadScopeSetting, { label: string; description: string }> = {
+  ask: { label: "毎回確認する", description: "チャンネルの全員が見られる範囲の外が必要になったら、ボタンで聞きます" },
+  always: { label: "常に許可する", description: "必要になったら、確認せずにあなたが見られる範囲まで読みます" },
+};
+
+// Replies normally read only what everyone in the channel can see; this decides
+// how the bot may go up to the speaker's own permissions when it needs to.
+// Only a select, without its own heading: the panel is at Discord's 40-component limit.
+function readScopeSelect(store: Store, userId: string): APIComponentInContainer {
+  const current = store.getSettings(userId).readScope;
+  return {
+    type: ComponentType.ActionRow,
+    components: [{
+      type: ComponentType.StringSelect,
+      custom_id: CUSTOM_ID.readScopeSelect,
+      placeholder: "読み取りを広げるとき",
+      options: (Object.keys(READ_SCOPES) as ReadScopeSetting[]).map((scope) => ({
+        label: `読み取りを広げるとき: ${READ_SCOPES[scope].label}`,
+        description: READ_SCOPES[scope].description,
+        value: scope,
+        default: current === scope,
+      })),
+    }],
+  };
+}
+
+export function readScopeLabel(scope: ReadScopeSetting): string {
+  return READ_SCOPES[scope].label;
 }
 
 export function keyModal(provider: KeyProviderId): APIModalInteractionResponseCallbackData {
@@ -227,7 +266,8 @@ export type PanelAction =
   | { kind: "submitKey"; provider: KeyProviderId }
   | { kind: "selectModel"; role: ModelRole; provider: ProviderId; model: string }
   | { kind: "clearModel"; role: "code" | "reaction" }
-  | { kind: "selectWeb"; tool: WebTool };
+  | { kind: "selectWeb"; tool: WebTool }
+  | { kind: "selectReadScope"; scope: ReadScopeSetting };
 
 /** Parses a custom_id (and select value) into an action. Unknown ids return null. */
 export function parseCustomId(customId: string, values: string[] = []): PanelAction | null {
@@ -236,6 +276,10 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "key" && isKeyProviderId(arg)) return { kind: "openKeyModal", provider: arg };
   if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
   if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
+  if (kind === "read" && arg === "scope") {
+    const scope = values[0];
+    return scope === "ask" || scope === "always" ? { kind: "selectReadScope", scope } : null;
+  }
   if (kind === "web" && arg === "tool") {
     const tool = values[0] ?? "";
     return isWebTool(tool) ? { kind: "selectWeb", tool } : null;
