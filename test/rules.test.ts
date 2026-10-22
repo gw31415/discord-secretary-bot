@@ -233,3 +233,23 @@ test("rule custom ids round-trip and refuse unknown actions", () => {
   assert.equal(parseRuleCustomId("rule:save:abc"), null);
   assert.equal(parseRuleCustomId("plan:run:abc:12345678"), null);
 });
+
+test("a madeInRun field takes only a value from an earlier step of the same run", () => {
+  const allow = [
+    { op: "POST /guilds/{guild}/channels", body: { properties: { name: { pattern: "^📞" }, type: { const: 2 } }, additionalProperties: false }, maxStepsPerRun: 1 },
+    { op: "PATCH /guilds/{guild}/members/{user}", body: { properties: { channel_id: { madeInRun: true } }, required: ["channel_id"], additionalProperties: false }, maxStepsPerRun: 1 },
+  ];
+  assert.deepEqual(allowShapeProblems(allow), []);
+  const room = { op: "POST /guilds/{guild}/channels", id: "room", body: { name: "📞1", type: 2 } };
+  const move = (channel: unknown) => normalizeSteps([room, { op: "PATCH /guilds/{guild}/members/{user}", path: { user: "3" }, body: { channel_id: channel } }], GUILD, "p");
+  // Moving into the room this run makes fits, at proposal and once the id is known.
+  const steps = move({ $ref: "steps.room.result.id" });
+  assert.deepEqual(allowProblems(steps, allow), []);
+  const resolved = { ...steps[1]!, body: { channel_id: "777" } };
+  assert.deepEqual(allowProblems([resolved], allow, undefined, [steps[1]!]), []);
+  // A fixed channel does not, nor does a resolved value without its ref.
+  assert.equal(allowProblems(move("555"), allow).length, 1);
+  assert.equal(allowProblems([resolved], allow).length, 1);
+  // Nor does leaving the required field out, or adding another field.
+  assert.equal(allowProblems(normalizeSteps([{ op: "PATCH /guilds/{guild}/members/{user}", path: { user: "3" }, body: { nick: "x" } }], GUILD, "p"), allow).length, 1);
+});
