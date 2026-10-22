@@ -4,8 +4,8 @@ import type { APIInteraction } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
 import { modalValue } from "./discord/modal.ts";
 import { WEB_TOOLS } from "./agent/web.ts";
-import { KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
-import { keyModal, parseCustomId, readScopeLabel, renderPanel } from "./llm/panel.ts";
+import { findModel, KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
+import { keyModal, parseCustomId, readScopeLabel, renderPanel, roleLabel, typedModelModal } from "./llm/panel.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
 // within 3 seconds; everything here is a local DB operation, so no defer is needed.
@@ -51,7 +51,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         if (hasKey) {
           store.setModel(userId, action.role, { provider: action.provider, model: action.model });
           store.audit(actor, "llm.model.set", { role: action.role, provider: action.provider, model: action.model });
-          notice = `${{ response: "応答に使う", judge: "宛先判定に使う", code: "コードを書く", reaction: "リアクションを選ぶ" }[action.role]}モデルを ${action.model} にしました`;
+          notice = `${roleLabel(action.role)}モデルを ${action.model} にしました`;
         } else {
           notice = `${PROVIDERS[action.provider].label}のキーが登録されていません`;
         }
@@ -65,6 +65,9 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
         return;
       }
+      case "openTypedModelModal":
+        await api.interactions.createModal(interaction.id, interaction.token, typedModelModal(action.role));
+        return;
       case "selectWeb": {
         store.setWebTool(userId, action.tool);
         store.audit(actor, "llm.web.set", { tool: action.tool });
@@ -92,6 +95,21 @@ export async function handleInteraction(api: API, store: Store, interaction: API
 
   if (interaction.type === InteractionType.ModalSubmit) {
     const action = parseCustomId(interaction.data.custom_id);
+    if (action?.kind === "submitTypedModel") {
+      const model = modalValue(interaction, "model")?.trim().replace(/^openrouter\//, "") ?? "";
+      let notice: string;
+      if (!store.listKeys(userId).some((k) => k.provider === "openrouter")) {
+        notice = "OpenRouterのキーが登録されていません";
+      } else if (!findModel(action.role, "openrouter", model)) {
+        notice = `OpenRouterに「${model.slice(0, 90)}」という${action.role === "judge" || action.role === "reaction" ? "" : "会話用の"}モデルは見つかりません。openrouter.ai/models のIDを確かめてください`;
+      } else {
+        store.setModel(userId, action.role, { provider: "openrouter", model });
+        store.audit(actor, "llm.model.set", { role: action.role, provider: "openrouter", model });
+        notice = `${roleLabel(action.role)}モデルを ${model} にしました`;
+      }
+      await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
+      return;
+    }
     if (action?.kind !== "submitKey") return;
     const key = modalValue(interaction, "key")?.trim();
     if (!key) return;

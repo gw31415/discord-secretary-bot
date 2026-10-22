@@ -57,6 +57,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setApiKey("u1", "zai", "glm-abcdefgh9012");
   store.setApiKey("u1", "tavily", "tvly-abcdefgh3456");
   store.setApiKey("u1", "openai", "sk-proj-abcdefgh7890");
+  store.setApiKey("u1", "openrouter", "sk-or-abcdefgh1357");
   // A warning line is the most the web section ever adds.
   store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
   store.setWebTool("u1", "anthropic");
@@ -110,6 +111,11 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:judge:typesafe:0", ["typesafe/jev-latest"])?.kind, "selectModel");
   assert.equal(parseCustomId("llm:model:response:typesafe:0", ["typesafe/jev-latest"]), null);
   assert.equal(parseCustomId("llm:key:mistral"), null);
+  // OpenRouter models are typed in: the select opens a modal for the role.
+  assert.deepEqual(parseCustomId("llm:typed:role", ["judge"]), { kind: "openTypedModelModal", role: "judge" });
+  assert.equal(parseCustomId("llm:typed:role", ["boss"]), null);
+  assert.deepEqual(parseCustomId("llm:typedmodal:response"), { kind: "submitTypedModel", role: "response" });
+  assert.equal(parseCustomId("llm:model:judge:all:0", ["openrouter/~typesafe/jev-latest"])?.kind, "selectModel");
   assert.deepEqual(parseCustomId("llm:key:set", ["openai"]), { kind: "openKeyModal", provider: "openai" });
   assert.deepEqual(parseCustomId("llm:key:delete", ["tavily"]), { kind: "deleteKey", provider: "tavily" });
   assert.equal(parseCustomId("llm:key:delete", ["mistral"]), null);
@@ -164,4 +170,26 @@ test("a Tavily key alone does not complete setup, and the web tool defaults to t
   store.setWebTool("u1", "tavily");
   assert.equal(store.getSettings("u1").web, "tavily");
   assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1")), /llm:model:response:tavily/);
+});
+
+test("OpenRouter models are typed in, and the one chosen is shown in its role's menu", () => {
+  const store = new Store(":memory:", master);
+  store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
+  store.setApiKey("u1", "openrouter", "sk-or-abcdefgh1357");
+  const before = JSON.stringify(renderPanel(store, "u1"));
+  assert.match(before, /llm:typed:role/);
+  assert.doesNotMatch(before, /"openrouter\//, "hundreds of models stay out of the menus");
+  store.setModel("u1", "response", { provider: "openrouter", model: "anthropic/claude-sonnet-5" });
+  const after = renderPanel(store, "u1");
+  const values: Array<{ value: string; default?: boolean }> = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== "object") return;
+    const c = node as { custom_id?: string; options?: Array<{ value: string; default?: boolean }>; components?: unknown };
+    if (c.custom_id?.startsWith("llm:model:response:")) values.push(...(c.options ?? []));
+    walk(c.components);
+  };
+  walk(after.components);
+  assert.deepEqual(values.filter((o) => o.value.startsWith("openrouter/")), [{ value: "openrouter/anthropic/claude-sonnet-5", default: true, label: values.find((o) => o.value.startsWith("openrouter/"))!.label, description: "OpenRouter · anthropic/claude-sonnet-5" } as never]);
+  assert.ok(setupStatus(store, "u1").missing.every((m) => !m.startsWith("応答")));
 });
