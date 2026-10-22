@@ -24,7 +24,7 @@ export function isRef(value: unknown): value is Ref {
   return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 1 && typeof (value as Ref).$ref === "string";
 }
 
-/** A PNG drawn with attach_image, ready to upload; `data` is base64 so it can live inside a plan. */
+/** An image fetched with attach_image, ready to upload; `data` is base64 so it can live inside a plan. */
 export interface Attachment {
   name: string;
   data: string;

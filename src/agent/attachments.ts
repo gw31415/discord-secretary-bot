@@ -1,27 +1,48 @@
-import { Type } from "@earendil-works/pi-ai";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { renderImage } from "../render.ts";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { MAX_IMAGES_PER_REPLY } from "../plan/types.ts";
 import type { Attachment } from "../plan/types.ts";
 
-// Images the agent draws while answering. Each gets an id ("img1"); the ones a
-// proposed change posts go with the change, and the rest go out with the reply.
+// The place where tools put images for the bot to post. A tool that makes or
+// fetches an image adds it here and gets an id ("img1"); images a proposed
+// change names in a post's `files` go with that change, and the rest go out
+// with the reply. No tool fills it yet: tools plug in through `ImageTools`.
 
-function fileName(raw: string | undefined, id: string): string {
-  const base = (raw ?? "").replace(/\.png$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
-  return `${base || id}.png`;
+/** An image a tool made; `name` carries the extension. */
+export interface ImageFile {
+  data: Buffer;
+  name: string;
+}
+
+const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/** Tools that add images to the reply's box; `seesImages` says whether to show them to the model. */
+export type ImageTools = (box: ImageBox, seesImages: boolean) => AgentTool<any>[];
+
+export function mimeOf(name: string): string | undefined {
+  return MIME[name.split(".").pop()!.toLowerCase()];
 }
 
 export class ImageBox {
   #items = new Map<string, Attachment>();
   #taken = new Set<string>();
 
-  add(png: Buffer, name?: string): string {
+  /** Throws once the reply has its fill, so a tool can stop before making an image. */
+  checkRoom(): void {
     if (this.#items.size >= MAX_IMAGES_PER_REPLY) throw new Error(`画像は1回の返答で${MAX_IMAGES_PER_REPLY}枚までです`);
+  }
+
+  add(file: ImageFile): string {
+    this.checkRoom();
+    if (!mimeOf(file.name)) throw new Error("PNG・JPEG・GIF・WebP の画像だけ添付できます");
+    if (file.data.length > MAX_IMAGE_BYTES) throw new Error("画像は8MBまでです");
     const id = `img${this.#items.size + 1}`;
-    let file = fileName(name, id);
-    if ([...this.#items.values()].some((a) => a.name === file)) file = `${file.slice(0, -4)}-${id}.png`;
-    this.#items.set(id, { name: file, data: png.toString("base64") });
+    const dot = file.name.lastIndexOf(".");
+    const base = file.name.slice(0, dot).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || id;
+    const ext = file.name.slice(dot + 1).toLowerCase();
+    let name = `${base}.${ext}`;
+    if ([...this.#items.values()].some((a) => a.name === name)) name = `${base}-${id}.${ext}`;
+    this.#items.set(id, { name, data: file.data.toString("base64") });
     return id;
   }
 
@@ -40,30 +61,15 @@ export class ImageBox {
   }
 }
 
-export function imageTool(box: ImageBox, seesImages: boolean): AgentTool<any> {
-  const parameters = Type.Object({
-    tex: Type.Optional(Type.String({ description: "数式のTeX(ディスプレイ数式として描画。$ は不要)。例: \\int_0^1 x^2\\,dx = \\frac{1}{3}" })),
-    svg: Type.Optional(Type.String({ description: "SVG全体。width・height か viewBox を付けます。外部の画像・フォント・CSSは読めません" })),
-    name: Type.Optional(Type.String({ description: "ファイル名(英数字)。例: formula" })),
-  });
+/** What an image tool returns after adding its image: the id, and the image itself when the model can see it. */
+export function attachedResult(box: ImageBox, file: ImageFile, seesImages: boolean): AgentToolResult<{ id: string }> {
+  const id = box.add(file);
+  const name = box.all()[id]!.name;
   return {
-    name: "attach_image",
-    label: "画像を作る",
-    description:
-      "TeX の数式か SVG から PNG 画像を作ります。作った画像は返答に添付されます。propose_plan の投稿(DM含む)に付けるときは、そのステップの body に files: [\"img1\"] のように画像のIDを入れます(そのときは返答には付きません)。",
-    parameters,
-    execute: async (_id, input) => {
-      const params = input as { tex?: string; svg?: string; name?: string };
-      const image = renderImage({ ...(params.tex !== undefined ? { tex: params.tex } : {}), ...(params.svg !== undefined ? { svg: params.svg } : {}) });
-      const id = box.add(image.png, params.name);
-      const text = `画像 ${id}(${box.all()[id]!.name}、${image.width}×${image.height})を作りました。`;
-      return {
-        content: [
-          { type: "text" as const, text },
-          ...(seesImages ? [{ type: "image" as const, data: image.png.toString("base64"), mimeType: "image/png" }] : []),
-        ],
-        details: {},
-      };
-    },
+    content: [
+      { type: "text", text: `画像 ${id}(${name})を用意しました。返答に添付されます。propose_plan の投稿に付けるときは body の files に "${id}" を入れます。` },
+      ...(seesImages ? [{ type: "image" as const, data: file.data.toString("base64"), mimeType: mimeOf(name)! }] : []),
+    ],
+    details: { id },
   };
 }

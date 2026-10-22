@@ -16,7 +16,7 @@ export function stepFiles(step: Pick<Step, "op" | "body">): string[] {
 
 /**
  * The images a plan's posts name, looked up in order in `sources` (the images
- * drawn for this reply, then those of the plan it replaces). Also checks that
+ * attached in this reply, then those of the plan it replaces). Also checks that
  * every post has text or an image.
  */
 export function attachmentsFor(steps: Step[], sources: Array<Record<string, Attachment> | undefined>): { attachments?: Record<string, Attachment>; problems: string[] } {
@@ -57,11 +57,11 @@ export function uploadsFor(plan: Pick<Plan, "attachments">, step: Pick<Step, "op
 }
 
 /** The dialog's file name for an image: ids are unique within a plan, names may not be. */
-export function dialogFileName(id: string): string {
-  return `${id}.png`;
+export function dialogFileName(id: string, attachment: Attachment): string {
+  return `${id}.${attachment.name.split(".").pop()}`;
 }
 
 /** Every image in the plan, for showing them in the dialog. */
 export function dialogUploads(plan: Pick<Plan, "attachments">): Array<{ name: string; data: Buffer }> {
-  return Object.entries(plan.attachments ?? {}).map(([id, a]) => ({ name: dialogFileName(id), data: Buffer.from(a.data, "base64") }));
+  return Object.entries(plan.attachments ?? {}).map(([id, a]) => ({ name: dialogFileName(id, a), data: Buffer.from(a.data, "base64") }));
 }

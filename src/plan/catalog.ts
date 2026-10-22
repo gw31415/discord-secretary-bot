@@ -12,7 +12,7 @@ import type { Risk, StepDraft } from "./types.ts";
 const Id = Type.String({ pattern: "^\\d{1,20}$" });
 const Bits = Type.String({ pattern: "^\\d{1,20}$", description: "権限ビットの10進文字列" });
 const Content = Type.String({ minLength: 1, maxLength: 2000 });
-/** Images drawn with attach_image in the same reply, by id; content or files must be present. */
+/** Images attached with attach_image in the same reply, by id; content or files must be present. */
 const Files = Type.Array(Type.String({ pattern: FILE_ID_PATTERN }), { minItems: 1, maxItems: MAX_IMAGES_PER_REPLY, uniqueItems: true, description: "attach_image で作った画像のID" });
 const MessageBody = Type.Object({ content: Type.Optional(Content), files: Type.Optional(Files) }, { additionalProperties: false });
 

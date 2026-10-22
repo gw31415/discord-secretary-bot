@@ -8,8 +8,7 @@ import type { ImageRef } from "./images.ts";
 import { readTools } from "./tools.ts";
 import type { Propose, RuleTools } from "./tools.ts";
 import type { Coder } from "./coder.ts";
-import { imageTool } from "./attachments.ts";
-import type { ImageBox } from "./attachments.ts";
+import type { ImageBox, ImageTools } from "./attachments.ts";
 import { retryFailedCall } from "./retry.ts";
 import { ANTHROPIC_WEB_TOOLS, webTools } from "./web.ts";
 import type { WebAccess } from "./web.ts";
@@ -41,8 +40,10 @@ export interface RespondInput {
   onProgress?: (text: string) => Promise<void>;
   /** Carries the speaker's follow-ups and edits into the running agent. */
   inbox?: Inbox;
-  /** Images the agent draws for the reply or a proposed post; absent means it cannot draw. */
+  /** Where image tools put images for the reply or a proposed post. */
   attachments?: ImageBox;
+  /** Tools that make or fetch images into `attachments`. */
+  imageTools?: ImageTools;
 }
 
 export interface RespondResult {
@@ -132,7 +133,7 @@ const WEB = [
   "- サーバーの中の情報(メッセージ・メンバー・設定など)を検索語やURLに入れて外へ送らないでください。",
 ];
 
-function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web: boolean, rules: boolean, draws = false): string {
+function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web: boolean, rules: boolean, attaches = false): string {
   return [
     `あなたはDiscordサーバーの管理者Bot「${botName}」です。メンバーの質問に、サーバーの情報を調べて答えます。${writes ? "頼まれれば、承認を経てサーバーの設定を変えることもできます。" : ""}`,
     "",
@@ -149,7 +150,7 @@ function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web
     "- 調べものや一覧を頼まれたときだけ、必要な分だけ長く書いて構いません(Markdown可)。",
     `- 人が連投するように、返答を複数の投稿に分けても構いません。分けるところに ${MESSAGE_BREAK} だけの行を入れます。分けるのは話題や区切りが変わるときだけにしてください。`,
     "- 話し手と同じ言語で答えます。",
-    ...(draws ? ["- 数式・表・図は、文字で書くより見やすいときに attach_image で画像にして返答に添付できます。画像を付けたら、本文で同じものを繰り返さないでください。"] : []),
+    ...(attaches ? ["- 画像を用意するツールで作った画像は、返答に添付されます。propose_plan の投稿に付けるときは、その画像のIDを body の files に入れます。画像を付けたら、本文で同じものを繰り返さないでください。"] : []),
     "- ツールを使うときは、使う前に何をするかを一言(「〜を調べます」など1文)書いてください。その文は途中経過としてすぐ投稿されます。最後の返答で同じことを繰り返さないでください。",
     "- 作業中に届いた [追いコメント] や [編集] は、話し手が依頼を足したり直したりしたものです。次の手順から反映し、依頼と関係なければ無視します。",
     seesImages
@@ -228,14 +229,15 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   // Claude's server tools only exist on Anthropic's API.
   const web = input.web?.kind === "anthropic" && model.provider !== "anthropic" ? null : input.web;
   const seesImages = model.input.includes("image");
+  const imageTools = input.attachments && input.imageTools ? input.imageTools(input.attachments, seesImages) : [];
   const agent = new Agent({
     initialState: {
-      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.attachments),
+      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, imageTools.length > 0),
       model,
       tools: [
         ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder }),
         ...(web ? webTools(web, input.fetch) : []),
-        ...(input.attachments ? [imageTool(input.attachments, seesImages)] : []),
+        ...imageTools,
       ],
       thinkingLevel: lightestThinking(model) ?? "off",
     },
