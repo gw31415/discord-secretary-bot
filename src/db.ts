@@ -129,6 +129,10 @@ const MIGRATIONS: string[] = [
   CREATE INDEX rule_runs_rule ON rule_runs (rule_id, id);
   CREATE INDEX audit_log_at ON audit_log (at);
   `,
+  `
+  ALTER TABLE user_settings ADD COLUMN code_provider TEXT;
+  ALTER TABLE user_settings ADD COLUMN code_model TEXT;
+  `,
 ];
 
 export interface ModelRef {
@@ -139,6 +143,8 @@ export interface ModelRef {
 export interface UserSettings {
   response: ModelRef | null;
   judge: ModelRef | null;
+  /** Writes the agent's code (run_code, plans, rules). Unset means the response model writes it. */
+  code: ModelRef | null;
   /** The web service the agent uses. Unset means the response model's own. */
   web: WebTool;
 }
@@ -296,13 +302,14 @@ export class Store {
 
   getSettings(userId: string): UserSettings {
     const row = this.db.prepare("SELECT * FROM user_settings WHERE user_id = ?").get(userId) as
-      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; web_tool: string | null }
+      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; code_provider: string | null; code_model: string | null; web_tool: string | null }
       | undefined;
     const ref = (provider: string | null | undefined, model: string | null | undefined): ModelRef | null =>
       provider && model && isProviderId(provider) ? { provider, model } : null;
     return {
       response: ref(row?.default_provider, row?.default_model),
       judge: ref(row?.judge_provider, row?.judge_model),
+      code: ref(row?.code_provider, row?.code_model),
       web: row?.web_tool && isWebTool(row.web_tool) ? row.web_tool : "auto",
     };
   }
@@ -312,8 +319,8 @@ export class Store {
     this.db.prepare("UPDATE user_settings SET web_tool = ? WHERE user_id = ?").run(tool, userId);
   }
 
-  setModel(userId: string, role: "response" | "judge", ref: ModelRef | null): void {
-    const [providerCol, modelCol] = role === "response" ? ["default_provider", "default_model"] : ["judge_provider", "judge_model"];
+  setModel(userId: string, role: "response" | "judge" | "code", ref: ModelRef | null): void {
+    const [providerCol, modelCol] = { response: ["default_provider", "default_model"], judge: ["judge_provider", "judge_model"], code: ["code_provider", "code_model"] }[role];
     this.db.prepare("INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING").run(userId);
     this.db
       .prepare(`UPDATE user_settings SET ${providerCol} = ?, ${modelCol} = ? WHERE user_id = ?`)

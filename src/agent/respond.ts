@@ -7,6 +7,7 @@ import { downloadImages } from "./images.ts";
 import type { ImageRef } from "./images.ts";
 import { readTools } from "./tools.ts";
 import type { Propose, RuleTools } from "./tools.ts";
+import type { Coder } from "./coder.ts";
 import { ANTHROPIC_WEB_TOOLS, webTools } from "./web.ts";
 import type { WebAccess } from "./web.ts";
 
@@ -31,6 +32,8 @@ export interface RespondInput {
   propose?: Propose;
   /** Event rules: propose_plan may carry them, and list_rules reads the speaker's own. */
   rules?: RuleTools;
+  /** The speaker's coding model; absent means the agent writes its code itself. */
+  coder?: Coder;
   /** Posts what the agent says it is about to do, while it works. */
   onProgress?: (text: string) => Promise<void>;
   /** Carries the speaker's follow-ups and edits into the running agent. */
@@ -208,7 +211,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
       systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules),
       model,
       tools: [
-        ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules }),
+        ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder }),
         ...(web ? webTools(web, input.fetch) : []),
       ],
       thinkingLevel: lightestThinking(model) ?? "off",

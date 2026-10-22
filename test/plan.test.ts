@@ -695,3 +695,66 @@ test("propose_plan refuses steps and code together, and points out rule code pas
   await assert.rejects(tool.execute("t", { code: "return event.channel_id" }), /rules\[\]\.code/);
   assert.equal(proposed.length, 0);
 });
+
+test("with a coding model, the agent describes code and the coder writes and fixes it", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const { extractCode, syntaxError } = await import("../src/agent/coder.ts");
+  const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => [{ id: "7", name: "general" }] } as never;
+  // Hands out its answers in order, recording what it was asked and the errors it was shown.
+  const asked: Array<{ kind: string; task: string; errors: string[] }> = [];
+  const coderOf = (answers: Record<string, string[]>) => ({
+    label: "fake",
+    async write(kind: "read" | "plan" | "rule", task: string, check: (code: string) => Promise<string | null>) {
+      const entry = { kind, task, errors: [] as string[] };
+      asked.push(entry);
+      const list = answers[kind]!;
+      for (const [i, code] of list.entries()) {
+        const problem = await check(code);
+        if (problem === null) return { code, attempts: i + 1 };
+        entry.errors.push(problem);
+      }
+      const { CodeFailed } = await import("../src/agent/coder.ts");
+      throw new CodeFailed("直せませんでした", list.at(-1)!);
+    },
+  });
+  const proposed: unknown[][] = [];
+  const tools = (coder: ReturnType<typeof coderOf>) =>
+    readTools(fakeReader, { images: false, coder, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [] } });
+
+  // run_code takes a task; the coder's first try throws and its second is run.
+  const coder = coderOf({
+    read: ["return nope.length", "return discord.get(`/guilds/${guild}/channels`).length"],
+    plan: ["return plan([call('POST /guilds/{guild}/channels', { body: { name: 'vc作成', type: 2 } })])"],
+    rule: ["if (!event.channel_id) return null; return plan([])"],
+  });
+  const run = tools(coder).find((t) => t.name === "run_code")!;
+  assert.ok("task" in (run.parameters as { properties: object }).properties);
+  const out = await run.execute("t", { task: "チャンネルの数を返す" });
+  assert.match((out.content[0] as { text: string }).text, /結果:\n1/);
+  assert.equal(asked[0]!.errors.length, 1);
+
+  const propose = tools(coder).find((t) => t.name === "propose_plan")!;
+  const props = (propose.parameters as { properties: Record<string, unknown> }).properties;
+  assert.ok("code_task" in props && !("code" in props));
+  await propose.execute("t", {
+    code_task: "vc作成 というボイスチャンネルを作る",
+    rules: [{ name: "通話部屋", trigger_event: "VOICE_STATE_UPDATE", allow: [{ op: "POST /guilds/{guild}/channels" }], code_task: "vc作成 に入った人の部屋を作る", params: { lobby: "1" } }],
+  });
+  const [drafts, code, rules] = proposed[0] as [Array<{ op: string }>, string, Array<{ code: string; name: string }>];
+  assert.equal(drafts[0]!.op, "POST /guilds/{guild}/channels");
+  assert.match(code, /vc作成/);
+  assert.equal(rules[0]!.code, "if (!event.channel_id) return null; return plan([])");
+  // The rule's task carries its trigger, params and allow, since the coder sees nothing else.
+  const ruleAsk = asked.find((a) => a.kind === "rule")!;
+  assert.match(ruleAsk.task, /VOICE_STATE_UPDATE/);
+  assert.match(ruleAsk.task, /"lobby":"1"/);
+
+  // When the coder gives up, the agent sees why and the last code.
+  const stuck = tools(coderOf({ read: ["return nope", "return nope"], plan: [], rule: [] })).find((t) => t.name === "run_code")!;
+  await assert.rejects(stuck.execute("t", { task: "x" }), /直せませんでした[\s\S]*return nope[\s\S]*task/);
+
+  assert.equal(extractCode("説明\n```js\nreturn 1\n```\n```javascript\nreturn 2\n```"), "return 2");
+  assert.equal(extractCode("return 3"), "return 3");
+  assert.equal(syntaxError("return event.x"), null);
+  assert.match(syntaxError("return (")!, /SyntaxError/);
+});

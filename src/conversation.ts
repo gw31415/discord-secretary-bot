@@ -9,6 +9,7 @@ import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
 import { findChatModel, findJudgeModel } from "./llm/models.ts";
+import { llmCoder } from "./agent/coder.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
@@ -297,6 +298,11 @@ export class Conversations {
     const ref = store.getSettings(speaker).response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
+    const codeRef = store.getSettings(speaker).code;
+    const codeModel = codeRef && findChatModel(codeRef.provider, codeRef.model);
+    const codeKey = codeRef && store.getApiKey(speaker, codeRef.provider);
+    // A coding model whose key was removed falls back to the response model.
+    const coder = codeModel && codeKey ? llmCoder(codeModel, codeKey) : undefined;
     const web = this.deps.webSearch
       ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p))
       : null;
@@ -316,7 +322,7 @@ export class Conversations {
     };
     let progress = 0;
     let text: string;
-    let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}`, web: web?.kind ?? null };
+    let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}`, ...(coder ? { codeModel: `${codeRef!.provider}/${codeRef!.model}` } : {}), web: web?.kind ?? null };
     try {
       const result = await this.deps.respond({
         model,
@@ -329,6 +335,7 @@ export class Conversations {
         images: input.images,
         web,
         inbox,
+        coder,
         onProgress: async (content) => {
           await post(content);
           await this.deps.typing(channelId).catch(() => undefined);

@@ -59,6 +59,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   // A warning line is the most the web section ever adds.
   store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
   store.setWebTool("u1", "anthropic");
+  store.setModel("u1", "code", { provider: "anthropic", model: selectableModels("anthropic", "code")[0]!.id });
   const panel = renderPanel(store, "u1");
   assert.match(JSON.stringify(panel), /応答モデルがClaudeではない/);
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
@@ -77,6 +78,9 @@ test("every selectable model is offered, with unique custom ids, within the comp
   assert.equal(new Set(selects.map((s) => s.custom_id)).size, selects.length);
   const offered = (role: string) =>
     new Set(selects.filter((s) => s.custom_id.startsWith(`llm:model:${role}:`)).flatMap((s) => s.options.map((o) => o.value)));
+  const code = selects.filter((s) => s.custom_id.startsWith("llm:model:code:")).flatMap((s) => s.options.map((o) => o.value));
+  assert.equal(code[0], "none");
+  assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length);
   for (const role of ["response", "judge"] as const) {
     for (const provider of ["anthropic", "typesafe", "zai"] as const) {
       for (const m of selectableModels(provider, role)) assert.ok(offered(role).has(`${provider}/${m.id}`), `${role} ${provider}/${m.id}`);
@@ -101,6 +105,10 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:web:tool", ["bing"]), null);
   assert.equal(parseCustomId("llm:model:response:tavily:0", ["tavily/search"]), null);
   assert.equal(parseCustomId("plan:run:1"), null);
+  // The code model is optional: one select across providers, led by "leave it to the response model".
+  assert.deepEqual(parseCustomId("llm:model:code:all:0", ["none"]), { kind: "clearCodeModel" });
+  assert.equal(parseCustomId("llm:model:code:all:0", ["typesafe/jev-latest"]), null);
+  assert.equal(parseCustomId("llm:model:code:all:0", ["zai/glm-5.2"])?.kind, "selectModel");
 });
 
 test("the audit log keeps actions without secrets", () => {

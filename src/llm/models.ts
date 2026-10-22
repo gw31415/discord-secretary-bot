@@ -22,7 +22,7 @@ export const KEY_PROVIDERS = {
 } as const;
 
 export type KeyProviderId = keyof typeof KEY_PROVIDERS;
-export type ModelRole = "response" | "judge";
+export type ModelRole = "response" | "judge" | "code";
 
 /** Answers use a chat model; judgment takes a chat model or a classifier. */
 export type JudgeModel = Model<Api> | ClassifierModel<ClassifierApi>;
@@ -47,7 +47,7 @@ const DATED_SNAPSHOT = /-\d{8}$/;
 
 export function selectableModels(provider: ProviderId, role: ModelRole): JudgeModel[] {
   const chat = llm.getModels(provider).filter((m) => !DATED_SNAPSHOT.test(m.id));
-  if (role === "response") return chat;
+  if (role !== "judge") return chat;
   return [...llm.getModelsOfType("classifier", provider), ...chat];
 }
 
@@ -60,7 +60,7 @@ export function findJudgeModel(provider: ProviderId, modelId: string): JudgeMode
 }
 
 export function findModel(role: ModelRole, provider: ProviderId, modelId: string): JudgeModel | undefined {
-  return role === "response" ? findChatModel(provider, modelId) : findJudgeModel(provider, modelId);
+  return role === "judge" ? findJudgeModel(provider, modelId) : findChatModel(provider, modelId);
 }
 
 export function isClassifier(model: JudgeModel): model is ClassifierModel<ClassifierApi> {
