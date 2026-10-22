@@ -6,13 +6,14 @@ import { modalValue } from "./discord/modal.ts";
 import { WEB_TOOLS } from "./agent/web.ts";
 import { findModel, KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
 import { keyModal, parseCustomId, readScopeLabel, renderPanel, roleLabel, typedModelModal } from "./llm/panel.ts";
+import type { PanelPage } from "./llm/panel.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
 // within 3 seconds; everything here is a local DB operation, so no defer is needed.
 
-function panelUpdate(store: Store, userId: string, notice?: string) {
+function panelUpdate(store: Store, userId: string, notice: string | undefined, page: PanelPage) {
   // UPDATE_MESSAGE cannot change the ephemeral flag, so only Components V2 is sent.
-  const panel = renderPanel(store, userId, notice);
+  const panel = renderPanel(store, userId, notice, page);
   return { ...panel, flags: MessageFlags.IsComponentsV2 };
 }
 
@@ -32,6 +33,9 @@ export async function handleInteraction(api: API, store: Store, interaction: API
     const action = parseCustomId(interaction.data.custom_id, values);
     if (!action) return;
     switch (action.kind) {
+      case "page":
+        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, undefined, action.page));
+        return;
       case "openKeyModal":
         await api.interactions.createModal(interaction.id, interaction.token, keyModal(action.provider));
         return;
@@ -41,7 +45,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを削除しました`),
+          panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを削除しました`, "keys"),
         );
         return;
       }
@@ -55,14 +59,14 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         } else {
           notice = `${PROVIDERS[action.provider].label}のキーが登録されていません`;
         }
-        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
+        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, "models"));
         return;
       }
       case "clearModel": {
         store.setModel(userId, action.role, null);
         store.audit(actor, "llm.model.set", { role: action.role, provider: null, model: null });
-        const notice = action.role === "code" ? "コードは応答に使うモデルが書くようにしました" : "リアクションは応答に使うモデルが選ぶようにしました";
-        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
+        const notice = { judge: "判定は言語モデルがするようにしました", code: "コードは言語モデルが書くようにしました", reaction: "リアクションは言語モデルが選ぶようにしました" }[action.role];
+        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, "models"));
         return;
       }
       case "openTypedModelModal":
@@ -74,7 +78,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`),
+          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`, "home"),
         );
         return;
       }
@@ -84,7 +88,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `読み取りを広げる許可を「${readScopeLabel(action.scope)}」にしました`),
+          panelUpdate(store, userId, `読み取りを広げる許可を「${readScopeLabel(action.scope)}」にしました`, "home"),
         );
         return;
       }
@@ -107,7 +111,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         store.audit(actor, "llm.model.set", { role: action.role, provider: "openrouter", model });
         notice = `${roleLabel(action.role)}モデルを ${model} にしました`;
       }
-      await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
+      await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, "models"));
       return;
     }
     if (action?.kind !== "submitKey") return;
@@ -118,7 +122,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
     await api.interactions.updateMessage(
       interaction.id,
       interaction.token,
-      panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを保存しました`),
+      panelUpdate(store, userId, `${KEY_PROVIDERS[action.provider].label}のキーを保存しました`, "keys"),
     );
   }
 }

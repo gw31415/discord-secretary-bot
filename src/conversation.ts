@@ -13,7 +13,7 @@ import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import type { ChooseInput, ReactionChoice } from "./agent/react.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
-import { findChatModel, findJudgeModel } from "./llm/models.ts";
+import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
 import { llmCoder } from "./agent/coder.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
@@ -97,7 +97,7 @@ export type Decision =
   | { kind: "judge"; judgeUserId: string };
 
 export const SETUP_NOTICE =
-  "このBotと話すには、サーバーで `/settings` を実行して、APIキー・応答に使うモデル・宛先判定に使うモデルを設定してください。";
+  "このBotと話すには、サーバーで `/settings` を実行して、APIキーと言語モデルを設定してください。";
 
 interface ChannelContext {
   /** Every recent message, oldest first, so the model can follow the conversation. */
@@ -228,7 +228,7 @@ export class Conversations {
 
   async #addressed(judgeUserId: string, transcript: string[], message: GuildMessage): Promise<boolean> {
     const { store } = this.deps;
-    const ref = store.getSettings(judgeUserId).judge;
+    const ref = judgeRef(store.getSettings(judgeUserId));
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(judgeUserId, ref.provider);
     if (!model || !apiKey) return false; // The waker's setup broke; stay quiet rather than guess.
@@ -277,11 +277,11 @@ export class Conversations {
     this.deps.onAwake?.();
   }
 
-  /** The speaker's reaction model, or for a reaction without one, their judge model. */
+  /** The speaker's reaction model, or for a reaction without one, their judge model (or language model). */
   #reactionModel(userId: string, kind: ChooseInput["kind"]): { model: JudgeModel; apiKey: string; label: string } | null {
     const { store } = this.deps;
     const settings = store.getSettings(userId);
-    const ref = settings.reaction ?? (kind === "reaction" ? settings.judge : null);
+    const ref = settings.reaction ?? (kind === "reaction" ? judgeRef(settings) : null);
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(userId, ref.provider);
     return model && apiKey ? { model, apiKey, label: `${ref.provider}/${ref.model}` } : null;

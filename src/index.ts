@@ -17,7 +17,7 @@ import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
-import { findChatModel, findJudgeModel } from "./llm/models.ts";
+import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
 import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
 import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
@@ -146,7 +146,7 @@ const rules = new RuleService({
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
   },
   visibilityScore: async ({ ownerId, command, options, reply, images, steps }) => {
-    const ref = store.getSettings(ownerId).judge;
+    const ref = judgeRef(store.getSettings(ownerId));
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
     if (!model || !apiKey) return null;

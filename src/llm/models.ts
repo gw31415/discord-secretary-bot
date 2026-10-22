@@ -81,6 +81,11 @@ export function findModel(role: ModelRole, provider: ProviderId, modelId: string
   return role === "judge" || role === "reaction" ? findJudgeModel(provider, modelId) : findChatModel(provider, modelId);
 }
 
+/** The judge model, or the default language model when none is set. */
+export function judgeRef<T>(settings: { response: T | null; judge: T | null }): T | null {
+  return settings.judge ?? settings.response;
+}
+
 export function isClassifier(model: JudgeModel): model is ClassifierModel<ClassifierApi> {
   return isModelType(model, "classifier");
 }

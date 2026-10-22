@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
-import { findChatModel, lightestThinking, selectableModels } from "../src/llm/models.ts";
+import { findChatModel, judgeRef, lightestThinking, selectableModels } from "../src/llm/models.ts";
 import { parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
 
 const master = randomBytes(32);
@@ -26,14 +26,17 @@ test("keys are stored encrypted and summarized by last four characters", () => {
   assert.equal(store.getApiKey("u1", "anthropic"), undefined);
 });
 
-test("setup is complete only with a key and both models", () => {
+test("setup needs a key and the language model; the judge model is optional", () => {
   const store = new Store(":memory:", master);
   assert.equal(setupStatus(store, "u1").complete, false);
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
+  assert.deepEqual(setupStatus(store, "u1").missing, ["言語モデル"]);
   store.setModel("u1", "response", { provider: "anthropic", model: "claude-sonnet-4-5" });
-  assert.deepEqual(setupStatus(store, "u1").missing, ["宛先判定に使うモデル"]);
+  assert.equal(setupStatus(store, "u1").complete, true);
+  assert.deepEqual(judgeRef(store.getSettings("u1")), { provider: "anthropic", model: "claude-sonnet-4-5" }, "the language model judges");
   store.setModel("u1", "judge", { provider: "anthropic", model: "claude-haiku-4-5" });
   assert.equal(setupStatus(store, "u1").complete, true);
+  assert.equal(judgeRef(store.getSettings("u1"))!.model, "claude-haiku-4-5");
   store.deleteApiKey("u1", "anthropic");
   assert.equal(setupStatus(store, "u1").complete, false, "models without their provider's key do not count");
 });
@@ -42,7 +45,7 @@ test("the model select menus stay within Discord's 25 options", () => {
   const store = new Store(":memory:", master);
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "typesafe", "ts-abcdefgh5678");
-  const panel = JSON.stringify(renderPanel(store, "u1"));
+  const panel = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
   for (const match of panel.matchAll(/"options":\[(.*?)\]\}/g)) {
     assert.ok((match[1]!.match(/"value"/g) ?? []).length <= 25);
   }
@@ -62,8 +65,8 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
   store.setWebTool("u1", "anthropic");
   store.setModel("u1", "code", { provider: "anthropic", model: selectableModels("anthropic", "code")[0]!.id });
-  const panel = renderPanel(store, "u1");
-  assert.match(JSON.stringify(panel), /応答モデルがClaudeではない/);
+  assert.match(JSON.stringify(renderPanel(store, "u1")), /応答モデルがClaudeではない/);
+  const panel = renderPanel(store, "u1", undefined, "models");
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
   const walk = (node: unknown): void => {
@@ -133,6 +136,11 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:code:all:0", ["zai/glm-5.2"])?.kind, "selectModel");
   // The reaction model is optional too, and takes a classifier.
   assert.deepEqual(parseCustomId("llm:model:reaction:all:0", ["none"]), { kind: "clearModel", role: "reaction" });
+  // The judge model may be left to the language model; the language model may not.
+  assert.deepEqual(parseCustomId("llm:model:judge:all:0", ["none"]), { kind: "clearModel", role: "judge" });
+  assert.equal(parseCustomId("llm:model:response:all:0", ["none"]), null);
+  assert.deepEqual(parseCustomId("llm:page:models"), { kind: "page", page: "models" });
+  assert.equal(parseCustomId("llm:page:secret"), null);
   assert.equal(parseCustomId("llm:model:reaction:all:0", ["typesafe/jev-latest"])?.kind, "selectModel");
 });
 
@@ -176,11 +184,11 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   const store = new Store(":memory:", master);
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "openrouter", "sk-or-abcdefgh1357");
-  const before = JSON.stringify(renderPanel(store, "u1"));
+  const before = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
   assert.match(before, /llm:typed:role/);
   assert.doesNotMatch(before, /"openrouter\//, "hundreds of models stay out of the menus");
   store.setModel("u1", "response", { provider: "openrouter", model: "anthropic/claude-sonnet-5" });
-  const after = renderPanel(store, "u1");
+  const after = renderPanel(store, "u1", undefined, "models");
   const values: Array<{ value: string; default?: boolean; label?: string }> = [];
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) return node.forEach(walk);
@@ -191,5 +199,21 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   };
   walk(after.components);
   assert.deepEqual(values.filter((o) => o.value.startsWith("openrouter/")), [{ value: "openrouter/anthropic/claude-sonnet-5", default: true, label: values.find((o) => o.value.startsWith("openrouter/"))!.label, description: "OpenRouter · anthropic/claude-sonnet-5" } as never]);
-  assert.ok(setupStatus(store, "u1").missing.every((m) => !m.startsWith("応答")));
+  assert.ok(setupStatus(store, "u1").missing.every((m) => !m.startsWith("言語")));
+});
+
+test("the settings panel moves between its pages with buttons, each well within Discord's limits", () => {
+  const store = new Store(":memory:", master);
+  for (const [p, k] of [["anthropic", "sk-ant-abcdefgh1234"], ["typesafe", "ts-abcdefgh5678"], ["zai", "glm-abcdefgh9012"], ["tavily", "tvly-abcdefgh3456"], ["openai", "sk-proj-abcdefgh7890"], ["openrouter", "sk-or-abcdefgh1357"]] as const) store.setApiKey("u1", p, k);
+  store.setModel("u1", "response", { provider: "anthropic", model: "claude-sonnet-4-5" });
+  const count = (node: unknown): number => Array.isArray(node) ? node.reduce((n, c) => n + count(c), 0) : node && typeof node === "object" ? (typeof (node as { type?: unknown }).type === "number" ? 1 : 0) + count((node as { components?: unknown }).components) : 0;
+  const home = JSON.stringify(renderPanel(store, "u1"));
+  assert.match(home, /llm:page:keys/);
+  assert.match(home, /llm:page:models/);
+  assert.match(home, /判定モデル\*\*: 言語モデルを使う/);
+  assert.doesNotMatch(home, /llm:model:/);
+  const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
+  assert.match(keys, /llm:key:set/);
+  assert.match(keys, /llm:page:home/);
+  for (const page of ["home", "keys", "models"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
 });
