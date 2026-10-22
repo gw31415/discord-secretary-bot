@@ -496,7 +496,7 @@ export class Planner {
       });
       return true;
     }
-    if (parsed.action === "code" || parsed.action === "result") {
+    if (parsed.action === "code" || parsed.action === "result" || parsed.action === "details") {
       // Anyone who sees the dialog may switch what it shows.
       this.#shown.set(plan.id, { ...this.#shown.get(plan.id), view: parsed.action });
       const steps = row.status === "pending_approval" ? undefined : store.getSteps(plan.id);

@@ -34,8 +34,9 @@ export type PlanAction =
   | "keep"
   | "code"
   | "result"
+  | "details"
   | "visibility";
-const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result", "visibility"]);
+const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result", "details", "visibility"]);
 
 /** `rule` names which of the plan's rules a control is for ("visibility.r1"). */
 export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">, rule?: string): string {
@@ -193,12 +194,15 @@ export function needsTypedConfirm(plan: Plan): boolean {
   return typedConfirmSteps(plan).length > 0;
 }
 
-/** "code": the code and its explanation; "result": the steps it produced. */
-export type DialogView = "code" | "result";
+/**
+ * "result": the summary every dialog opens on (what changes, what each rule does);
+ * "code": the code with its explanation; "details": the exact calls and each rule's allow, params and limits.
+ */
+export type DialogView = "code" | "result" | "details";
 
 export interface DialogState {
   status: PlanStatus;
-  /** For a plan made from code; it opens on the code. */
+  /** Which page is shown; every dialog opens on the summary. */
   view?: DialogView;
   steps?: StepRow[];
   reason?: string | null;
@@ -252,27 +256,42 @@ function button(id: string, text: string, style: ButtonStyle.Primary | ButtonSty
 
 function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
   const out: APIButtonComponent[] = [];
-  if (state.actions !== false) {
-    switch (state.status) {
-      case "pending_approval":
-        out.push(button(customId("run", plan), "実行", plan.risk === "destructive" ? ButtonStyle.Danger : ButtonStyle.Primary));
-        out.push(button(customId("revise", plan), "修正", ButtonStyle.Secondary));
-        out.push(button(customId("cancel", plan), "取り消し", ButtonStyle.Secondary));
-        break;
-      case "failed":
-        out.push(button(customId("resume", plan), "再開", ButtonStyle.Primary));
-        out.push(button(customId("restore", plan), "復元", ButtonStyle.Secondary));
-        out.push(button(customId("keep", plan), "そのまま", ButtonStyle.Secondary));
-        break;
-      case "cancelled":
-      case "aborted":
-        out.push(button(customId("redo", plan), "出し直す", ButtonStyle.Secondary));
-        break;
-    }
+  if (state.actions === false) return out;
+  switch (state.status) {
+    case "pending_approval":
+      out.push(button(customId("run", plan), "実行", plan.risk === "destructive" ? ButtonStyle.Danger : ButtonStyle.Primary));
+      out.push(button(customId("revise", plan), "修正", ButtonStyle.Secondary));
+      out.push(button(customId("cancel", plan), "取り消し", ButtonStyle.Secondary));
+      break;
+    case "failed":
+      out.push(button(customId("resume", plan), "再開", ButtonStyle.Primary));
+      out.push(button(customId("restore", plan), "復元", ButtonStyle.Secondary));
+      out.push(button(customId("keep", plan), "そのまま", ButtonStyle.Secondary));
+      break;
+    case "cancelled":
+    case "aborted":
+      out.push(button(customId("redo", plan), "出し直す", ButtonStyle.Secondary));
+      break;
   }
-  if (hasCode(plan)) {
-    out.push(viewOf(plan, state) === "code" ? button(customId("result", plan), "結果を見る", ButtonStyle.Secondary) : button(customId("code", plan), "コードを見る", ButtonStyle.Secondary));
-  }
+  return out;
+}
+
+const VIEW_LABEL: Record<DialogView, string> = { result: "概要", code: "コード", details: "詳細" };
+
+/** The pages this plan has: code only when it was made from code or registers rules, details only when there is more to show. */
+function views(plan: Plan): DialogView[] {
+  const out: DialogView[] = ["result"];
+  if (hasCode(plan)) out.push("code");
+  if (plan.rules?.length || (plan.source && plan.steps.length > 0)) out.push("details");
+  return out;
+}
+
+function navButtons(plan: Plan, state: DialogState): APIButtonComponent[] {
+  const current = viewOf(plan, state);
+  const pages = views(plan);
+  const out: APIButtonComponent[] = pages.length > 1
+    ? pages.map((v) => ({ ...button(customId(v, plan), VIEW_LABEL[v], v === current ? ButtonStyle.Primary : ButtonStyle.Secondary), disabled: v === current }))
+    : [];
   out.push(button(customId("json", plan), "JSONを見る", ButtonStyle.Secondary));
   return out;
 }
@@ -281,10 +300,9 @@ function hasCode(plan: Plan): boolean {
   return !!plan.source || !!plan.rules?.length;
 }
 
-/** A plan from code opens on the code; one with rules but no code opens on what it does. */
 function viewOf(plan: Plan, state: DialogState): DialogView {
-  if (!hasCode(plan)) return "result";
-  return state.view ?? (plan.source ? "code" : "result");
+  const view = state.view ?? "result";
+  return views(plan).includes(view) ? view : "result";
 }
 
 /** Keeps a code block from being closed by its own content. */
@@ -351,37 +369,53 @@ function beforeAfter(r: PlanRuleDraft): string[] {
   ];
 }
 
-/** The rules a plan registers, drawn only from their definitions. */
-function ruleTexts(plan: Plan): string[] {
+/** The rules a plan registers, in short: when each runs, what it does, and how its dry run went. */
+function ruleSummaries(plan: Plan): string[] {
   if (!plan.rules?.length) return [];
   const owner = label(plan, plan.actor.userId);
-  const lookup = (id: string) => label(plan, id);
   return [
-    `**登録するルール**(${owner} の権限で、人の確認なしに動きます)`,
+    `**登録するルール**(${owner} の権限で、人の確認なしに動きます。許す操作などは「詳細」)`,
     ...plan.rules.map((r) =>
       [
         `**${r.name}**${r.replaces ? `(「${r.replaces.name}」v${r.replaces.version} を置き換え)` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
         `きっかけ: ${triggerLabel(r.trigger)}`,
-        ...(r.limits ? [limitsLabel(r.limits)] : []),
-        ...beforeAfter(r),
-        `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n")}`,
-        ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),
+        ...(r.replaces ? beforeAfter(r) : [r.summary ?? "説明を作れませんでした。「コード」で確かめてください。"]),
         dryLine(r),
       ].join("\n"),
     ),
   ];
 }
 
+/** Each rule's full definition, drawn only from it. */
+function ruleDetails(plan: Plan): string[] {
+  if (!plan.rules?.length) return [];
+  const lookup = (id: string) => label(plan, id);
+  return plan.rules.map((r) =>
+    [
+      `**${r.name}**`,
+      ...(r.limits ? [limitsLabel(r.limits)] : []),
+      `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n") || "なし(返事だけします)"}`,
+      ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),
+    ].join("\n"),
+  );
+}
+
 function resultBody(plan: Plan, state: DialogState): string[] {
   const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps);
   const listed = lines.slice(0, MAX_LISTED);
   if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「JSONを見る」)`);
+  const explained = plan.source ? [`**コードの説明**\n${plan.source.summary ?? "説明を作れませんでした。「コード」で確かめてください。"}`] : [];
+  return [...explained, ...listed, ...ruleSummaries(plan)];
+}
+
+function detailsBody(plan: Plan): string[] {
+  const out: string[] = [];
   if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
     const json = JSON.stringify(plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) })));
-    if (json.length <= MAX_STEPS_JSON) listed.push(fenced("json", json));
+    out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fenced("json", json) : "長いため「JSONを見る」で確かめてください"}`);
   }
-  return [...listed, ...ruleTexts(plan)];
+  return [...out, ...ruleDetails(plan)];
 }
 
 /** The images the plan posts, uploaded with the dialog so the approver sees them. */
@@ -396,15 +430,18 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
   const counts = [`${plan.steps.length}件`, ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join(" · ");
   const header = `${title}\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts} · \`${plan.id}\``;
   const status = statusLine(plan, state);
-  const body = viewOf(plan, state) === "code" ? codeBody(plan, MAX_TEXT - header.length - status.length) : resultBody(plan, state);
+  const view = viewOf(plan, state);
+  const body = view === "code" ? codeBody(plan, MAX_TEXT - header.length - status.length) : view === "details" ? detailsBody(plan) : resultBody(plan, state);
   const text = [header, ...body, "", status].join("\n").slice(0, MAX_TEXT);
-  const row: APIActionRowComponent<APIButtonComponent> = { type: ComponentType.ActionRow, components: buttons(plan, state) };
+  const rows: APIActionRowComponent<APIButtonComponent>[] = [buttons(plan, state), navButtons(plan, state)]
+    .filter((b) => b.length > 0)
+    .map((components) => ({ type: ComponentType.ActionRow, components }));
   return {
     components: [
       {
         type: ComponentType.Container,
         accent_color: color(plan, state.status),
-        components: [{ type: ComponentType.TextDisplay, content: text }, ...gallery(plan), ...visibilityRows(plan, state), row],
+        components: [{ type: ComponentType.TextDisplay, content: text }, ...gallery(plan), ...visibilityRows(plan, state), ...rows],
       },
     ],
     flags: MessageFlags.IsComponentsV2,
@@ -420,7 +457,7 @@ export function dialogText(rendered: { components: APIMessageTopLevelComponent[]
 export function dialogButtons(rendered: { components: APIMessageTopLevelComponent[] }): string[] {
   const container = rendered.components[0] as { components: Array<{ type: number; components?: Array<{ label?: string }> }> };
   const rows = container.components.filter((c) => c.type === ComponentType.ActionRow);
-  return rows.find((r) => r.components?.some((b) => (b as { type?: number }).type === ComponentType.Button))?.components?.map((b) => b.label ?? "") ?? [];
+  return rows.flatMap((r) => r.components ?? []).filter((b) => (b as { type?: number }).type === ComponentType.Button).map((b) => b.label ?? "");
 }
 
 export function confirmModal(plan: Plan): APIModalInteractionResponseCallbackData {
