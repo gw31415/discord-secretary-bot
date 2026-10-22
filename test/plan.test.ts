@@ -511,3 +511,62 @@ test("a plan made from steps has no code view", async () => {
   assert.equal(summarized.length, 0);
   assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["実行", "修正", "取り消し", "JSONを見る"]);
 });
+
+// --- Plans made by event rules -------------------------------------------------
+
+const RULE = {
+  id: "r1",
+  version: 1,
+  name: "挨拶",
+  eventId: "MESSAGE_CREATE:500:x",
+  allow: [{ op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } }, body: { type: "object", properties: { content: { type: "string", maxLength: 50 } }, additionalProperties: false }, maxStepsPerRun: 1 }],
+};
+
+test("a rule's plan runs without a dialog, as its owner, inside its allow list", async () => {
+  const { planner, store, calls, replies } = setup();
+  const written: string[] = [];
+  planner.deps.onWrite = (_plan, step) => void written.push(step.op);
+  const done = await planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "ようこそ" } }] });
+  assert.equal(done.status, "succeeded");
+  assert.equal(replies.length, 0); // no dialog
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["POST /channels/10/messages"]);
+  assert.match(calls[0]!.options!.reason!, /owner のルール「挨拶」/);
+  const row = store.getPlan(done.plan.id)!;
+  assert.equal(row.plan.actor.via, "rule");
+  assert.equal(row.approvedBy, "1");
+  assert.deepEqual(written, ["POST /channels/{channel}/messages"]);
+});
+
+test("a rule's steps outside its allow list, or past its count, are rejected before anything runs", async () => {
+  const { planner, calls } = setup();
+  const run = (drafts: any[]) => planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts });
+  await assert.rejects(run([{ op: "POST /channels/{channel}/messages", path: { channel: "11" }, body: { content: "x" } }]), (e: unknown) => e instanceof PlanRejected && /範囲外/.test(e.reasons.join()));
+  await assert.rejects(run([{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x".repeat(60) } }]), PlanRejected);
+  await assert.rejects(run([{ op: "DELETE /channels/{channel}", path: { channel: "10" } }]), PlanRejected);
+  await assert.rejects(
+    run([
+      { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "a" } },
+      { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "b" } },
+    ]),
+    (e: unknown) => e instanceof PlanRejected && /1回に1件まで/.test(e.reasons.join()),
+  );
+  // The owner's own permissions still apply.
+  const manage = { ...RULE, allow: [{ op: "PATCH /channels/{channel}" }] };
+  await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "3", rule: manage, drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { topic: "x" } }] }), /依頼者に権限 ManageChannels/);
+  assert.equal(calls.length, 0);
+});
+
+test("a value from an earlier step is checked against the allow list once it is known", async () => {
+  const { planner, calls } = setup();
+  const rule = { ...RULE, allow: [{ op: "POST /guilds/{guild}/channels" }, { op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } } }] };
+  const done = await planner.runForRule({
+    guildId: GUILD, ownerId: "1", rule,
+    drafts: [
+      { op: "POST /guilds/{guild}/channels", body: { name: "new" } },
+      { op: "POST /channels/{channel}/messages", path: { channel: { $ref: "steps.s1.result.id" } }, body: { content: "hi" } },
+    ],
+  });
+  assert.equal(done.status, "failed");
+  assert.match(done.reason!, /範囲外/);
+  assert.deepEqual(calls.map((c) => c.method), ["POST"]); // the message was never sent
+});

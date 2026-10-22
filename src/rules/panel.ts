@@ -1,0 +1,333 @@
+import { ButtonStyle, ComponentType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
+import type {
+  APIButtonComponent,
+  APIComponentInContainer,
+  APIMessageTopLevelComponent,
+  APIModalInteractionResponseCallbackData,
+} from "discord-api-types/v10";
+import type { AuditEntry, PlanRow } from "../db.ts";
+import { RISK_LABEL } from "../plan/types.ts";
+import { allowLines, allowRisk } from "./allow.ts";
+import type { Halt } from "./engine.ts";
+import { TRIGGERS } from "./triggers.ts";
+import type { Rule, RuleRun, RunOutcome } from "./types.ts";
+
+// What /rule shows: the confirmation for a new rule (or a new version), and the
+// management panel. Everything is drawn from the rule definition and the
+// database; the model's own words appear only as the summary, which another
+// model wrote from the code alone. All of it is ephemeral.
+
+export type RuleAction =
+  | "save" | "revise" | "revisetext" | "discard" | "draftcode"
+  | "home" | "open" | "enable" | "disable" | "dry" | "delete" | "delete2" | "code"
+  | "plans" | "audit" | "halt" | "resume";
+
+const ACTIONS = new Set<RuleAction>([
+  "save", "revise", "revisetext", "discard", "draftcode",
+  "home", "open", "enable", "disable", "dry", "delete", "delete2", "code",
+  "plans", "audit", "halt", "resume",
+]);
+
+export function ruleCustomId(action: RuleAction, arg = ""): string {
+  return `rule:${action}:${arg}`;
+}
+
+export function parseRuleCustomId(id: string): { action: RuleAction; arg: string } | null {
+  const m = /^rule:(\w+):([A-Za-z0-9_-]*)$/.exec(id);
+  if (!m || !ACTIONS.has(m[1] as RuleAction)) return null;
+  return { action: m[1] as RuleAction, arg: m[2]! };
+}
+
+const MAX_CODE = 1500;
+const MAX_TOTAL = 3900;
+
+export type Rendered = { flags: number; components: APIMessageTopLevelComponent[] };
+
+function fenced(lang: string, body: string): string {
+  return `\`\`\`${lang}\n${body.replaceAll("```", "`​``")}\n\`\`\``;
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function button(id: string, label: string, style: ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger = ButtonStyle.Secondary, disabled = false): APIButtonComponent {
+  return { type: ComponentType.Button, custom_id: id, label, style, disabled };
+}
+
+function row(buttons: APIButtonComponent[]): APIComponentInContainer {
+  return { type: ComponentType.ActionRow, components: buttons.slice(0, 5) };
+}
+
+function container(texts: string[], rows: APIComponentInContainer[], accent?: number, ephemeral = true): Rendered {
+  let budget = MAX_TOTAL;
+  const parts: APIComponentInContainer[] = [];
+  for (const t of texts) {
+    if (!t || budget <= 50) continue;
+    const content = clip(t, budget);
+    budget -= content.length;
+    parts.push({ type: ComponentType.TextDisplay, content });
+  }
+  return {
+    flags: ephemeral ? MessageFlags.Ephemeral | MessageFlags.IsComponentsV2 : MessageFlags.IsComponentsV2,
+    components: [{ type: ComponentType.Container, ...(accent !== undefined ? { accent_color: accent } : {}), components: [...parts, ...rows] }],
+  };
+}
+
+export function triggerLabel(trigger: Rule["trigger"]): string {
+  const label = TRIGGERS[trigger.event]?.label ?? trigger.event;
+  return `${label}(\`${trigger.event}\`)${trigger.includeBotOrigin ? " ⚠️ Bot自身が起こしたイベントでも動きます" : ""}`;
+}
+
+export interface DryRunView {
+  /** Where the event came from, e.g. "直近のメッセージ". Null when there was none. */
+  source: string | null;
+  outcome: "none" | "steps" | "error" | "no_event";
+  lines: string[];
+  problems: string[];
+  logs: string[];
+}
+
+function dryRunText(dry: DryRunView): string {
+  const head = `**ドライラン**${dry.source ? `(${dry.source}で実行。実際の変更はしていません)` : ""}`;
+  const body: string[] = [];
+  switch (dry.outcome) {
+    case "no_event":
+      body.push("試せるイベントがありませんでした。");
+      break;
+    case "none":
+      body.push("このイベントでは何も変更しません。");
+      break;
+    case "error":
+      body.push("コードがエラーになりました。");
+      break;
+    case "steps":
+      body.push(`次の変更をします(${dry.lines.length}種類):`, ...dry.lines.slice(0, 8));
+      if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
+  }
+  if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
+  if (dry.logs.length > 0) body.push(`-# log: ${clip(dry.logs.slice(0, 5).join(" / "), 300)}`);
+  return [head, ...body].join("\n");
+}
+
+export type DraftStatus = "pending" | "saved" | "discarded" | "replaced" | "expired";
+
+export interface DraftView {
+  draftId: string;
+  ownerId: string;
+  name: string;
+  trigger: Rule["trigger"];
+  allow: Rule["allow"];
+  code: string;
+  summary: string | null;
+  limits: Rule["limits"];
+  dry: DryRunView;
+  /** The rule this draft would replace, with its current version. */
+  replaces?: { name: string; version: number };
+  status: DraftStatus;
+  expiresAt: string;
+  /** Shown under the status, e.g. why saving failed. */
+  note?: string;
+}
+
+function definitionTexts(d: { ownerId: string; trigger: Rule["trigger"]; allow: Rule["allow"]; code: string; summary: string | null; limits: Rule["limits"] }, label: (id: string) => string): string[] {
+  const risk = allowRisk(d.allow);
+  return [
+    `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · 1分に${d.limits.perMinute}回まで · ${d.limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`,
+    `**許す操作**(これ以外の変更は実行されません)\n${allowLines(d.allow, label).join("\n")}`,
+    `**コードの説明**(依頼を見ていない別のAIがコードだけを読んで書いたものです)\n${d.summary ?? "説明を作れませんでした。コードを読んで確かめてください。"}`,
+    fenced("js", d.code.length > MAX_CODE ? `${d.code.slice(0, MAX_CODE)}\n// …(続きは「コードをファイルで」)` : d.code),
+  ];
+}
+
+function draftStatusLine(d: DraftView): string {
+  switch (d.status) {
+    case "pending":
+      return `依頼者が「${d.replaces ? "この内容に変更" : "登録"}」を押すと登録され、以後は人の確認なしにイベントごとに動きます。違うところがあれば「修正」から直せます。期限 <t:${unix(d.expiresAt)}:R>`;
+    case "saved":
+      return `✅ 登録しました。\`/rules\` で止めたり実行履歴を見たりできます。`;
+    case "discarded":
+      return "取り消しました。";
+    case "replaced":
+      return "修正版に置き換えました。";
+    case "expired":
+      return "期限切れになりました。もう一度頼んでください。";
+  }
+}
+
+/** The rule confirmation, posted in the conversation like a plan's dialog. */
+export function draftView(d: DraftView, label: (id: string) => string): Rendered {
+  const title = d.replaces ? `### ルール変更の確認: ${d.replaces.name}(v${d.replaces.version} → v${d.replaces.version + 1})` : `### ルール登録の確認: ${d.name}`;
+  const texts = [title, ...definitionTexts(d, label), dryRunText(d.dry), draftStatusLine(d)];
+  if (d.note) texts.push(`-# ${d.note}`);
+  const risk = allowRisk(d.allow);
+  const buttons: APIButtonComponent[] = [];
+  if (d.status === "pending") {
+    buttons.push(
+      button(ruleCustomId("save", d.draftId), d.replaces ? "この内容に変更" : "登録", risk === "destructive" ? ButtonStyle.Danger : ButtonStyle.Primary),
+      button(ruleCustomId("revise", d.draftId), "修正"),
+      button(ruleCustomId("discard", d.draftId), "取り消し"),
+    );
+  }
+  buttons.push(button(ruleCustomId("draftcode", d.draftId), "コードをファイルで"));
+  const accent = d.status === "saved" ? 0x57f287 : d.status === "pending" ? (risk === "destructive" ? 0xed4245 : 0x5865f2) : 0x80848e;
+  return container(texts, [row(buttons)], accent, false);
+}
+
+const OUTCOME_LABEL: Record<RunOutcome, string> = {
+  no_change: "変更なし",
+  executed: "実行",
+  rejected: "拒否",
+  failed: "失敗",
+  rate_limited: "回数制限",
+};
+
+function unix(iso: string): number {
+  return Math.floor(Date.parse(iso) / 1000);
+}
+
+function ruleStatus(rule: Rule): string {
+  if (rule.enabled) return "🟢 有効";
+  return `⏸️ 停止中${rule.disabledReason ? `(${rule.disabledReason})` : ""}`;
+}
+
+export interface HomeInput {
+  rules: Rule[];
+  userId: string;
+  canSeeAll: boolean;
+  canHalt: boolean;
+  halted: Halt | null;
+  notice?: string;
+  lastRuns: Map<string, RuleRun | undefined>;
+}
+
+export function homeView(input: HomeInput): Rendered {
+  const texts = [
+    `## ルール\n${input.canSeeAll ? "このサーバーのすべてのルールです。" : "あなたのルールです。"}新しいルールや変更は、会話でBotに頼むと作れます(例: 「#自己紹介 に投稿した人に @メンバー を付けるルールを作って」)。この画面はあなたにだけ見えています。`,
+  ];
+  if (input.halted) texts.push(`🛑 **全ルールを停止中**(<@${input.halted.by}> が <t:${unix(input.halted.at)}:f> に停止)`);
+  if (input.rules.length === 0) texts.push("ルールはまだありません。");
+  else {
+    texts.push(
+      input.rules
+        .slice(0, 25)
+        .map((r) => {
+          const last = input.lastRuns.get(r.id);
+          const run = last ? ` · 最後: ${OUTCOME_LABEL[last.outcome]} <t:${unix(last.startedAt)}:R>` : "";
+          const owner = r.ownerId === input.userId ? "" : ` · <@${r.ownerId}>`;
+          return `${ruleStatus(r)} **${r.name}** v${r.version} — ${TRIGGERS[r.trigger.event]?.label ?? r.trigger.event}${owner}${run}`;
+        })
+        .join("\n"),
+    );
+  }
+  if (input.notice) texts.push(`-# ${input.notice}`);
+  const rows: APIComponentInContainer[] = [];
+  if (input.rules.length > 0) {
+    rows.push({
+      type: ComponentType.ActionRow,
+      components: [{
+        type: ComponentType.StringSelect,
+        custom_id: ruleCustomId("open"),
+        placeholder: "ルールを開く",
+        options: input.rules.slice(0, 25).map((r) => ({ label: clip(r.name, 100), value: r.id, description: clip(`${r.enabled ? "有効" : "停止中"} · ${r.trigger.event}`, 100) })),
+      }],
+    });
+  }
+  const buttons = [button(ruleCustomId("plans"), "変更の履歴"), button(ruleCustomId("audit"), "監査ログ")];
+  if (input.canHalt) {
+    buttons.push(input.halted ? button(ruleCustomId("resume"), "全ルールを再開", ButtonStyle.Primary) : button(ruleCustomId("halt"), "全ルールを緊急停止", ButtonStyle.Danger));
+  }
+  rows.push(row(buttons));
+  return container(texts, rows);
+}
+
+export interface DetailInput {
+  rule: Rule;
+  runs: RuleRun[];
+  can: { enable: boolean; disable: boolean; remove: boolean; owner: boolean };
+  dry?: DryRunView;
+  notice?: string;
+  confirmDelete?: boolean;
+}
+
+function runLine(run: RuleRun): string {
+  const error = run.error ? ` — ${clip(run.error.replaceAll("\n", " "), 120)}` : "";
+  const plan = run.planId ? ` 変更 \`${run.planId}\`` : "";
+  return `<t:${unix(run.startedAt)}:R> v${run.ruleVersion} ${OUTCOME_LABEL[run.outcome]}${plan}${error}`;
+}
+
+export function detailView(input: DetailInput, label: (id: string) => string): Rendered {
+  const { rule } = input;
+  const texts = [
+    `### ${rule.name}\n${ruleStatus(rule)} · v${rule.version} · \`${rule.id}\``,
+    ...definitionTexts(rule, label),
+    `**元の依頼**\n${clip(rule.sourcePrompt, 300)}`,
+    `**最近の実行**\n${input.runs.length > 0 ? input.runs.map(runLine).join("\n") : "まだありません"}`,
+  ];
+  if (input.dry) texts.push(dryRunText(input.dry));
+  if (input.can.owner) texts.push(`-# 直すときは、会話でBotに「ルール \`${rule.id}\`(${rule.name})を〜に直して」と頼んでください。確認のあと新しい版になります。`);
+  if (input.confirmDelete) texts.push("⚠️ 本当に削除しますか? 実行履歴と監査ログは残ります。");
+  if (input.notice) texts.push(`-# ${input.notice}`);
+  const buttons: APIButtonComponent[] = [];
+  if (input.confirmDelete) {
+    buttons.push(button(ruleCustomId("delete2", rule.id), "削除する", ButtonStyle.Danger), button(ruleCustomId("open", rule.id), "やめる"));
+    return container(texts, [row(buttons)]);
+  }
+  if (rule.enabled && input.can.disable) buttons.push(button(ruleCustomId("disable", rule.id), "止める", ButtonStyle.Danger));
+  if (!rule.enabled && input.can.enable) buttons.push(button(ruleCustomId("enable", rule.id), "有効にする", ButtonStyle.Primary));
+  if (input.can.owner) buttons.push(button(ruleCustomId("dry", rule.id), "ドライラン"));
+  buttons.push(button(ruleCustomId("code", rule.id), "コードをファイルで"));
+  const second: APIButtonComponent[] = [button(ruleCustomId("home"), "戻る")];
+  if (input.can.remove) second.push(button(ruleCustomId("delete", rule.id), "削除", ButtonStyle.Danger));
+  return container(texts, [row(buttons), row(second)]);
+}
+
+const STATUS_LABEL: Record<PlanRow["status"], string> = {
+  pending_approval: "承認待ち",
+  approved: "承認済み",
+  executing: "実行中",
+  succeeded: "成功",
+  cancelled: "取り消し",
+  aborted: "中止",
+  failed: "失敗",
+};
+
+export function plansView(plans: Array<PlanRow & { updatedAt?: string }>, all: boolean): Rendered {
+  const lines = plans.map(({ plan, status, reason }) => {
+    const who = plan.rule ? `ルール「${plan.rule.name}」` : `<@${plan.actor.userId}>`;
+    const ops = [...new Set(plan.steps.map((s) => s.op))].slice(0, 3).join(", ");
+    return `<t:${unix(plan.createdAt)}:R> \`${plan.id}\` ${STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${ops}${reason ? ` — ${clip(reason.replaceAll("\n", " "), 80)}` : ""}`;
+  });
+  return container(
+    [`### 変更の履歴\n${all ? "このサーバーの最近の変更です。" : "あなたの最近の変更です(ルールによるものを含む)。"}`, lines.join("\n") || "ありません"],
+    [row([button(ruleCustomId("home"), "戻る")])],
+  );
+}
+
+function actorText(entry: AuditEntry): string {
+  const a = entry.actor;
+  if (a.kind === "system") return "Bot";
+  return a.via === "rule" ? `<@${a.userId}> のルール` : `<@${a.userId}>`;
+}
+
+export function auditView(entries: AuditEntry[], all: boolean): Rendered {
+  const lines = entries.map((e) => {
+    const ref = e.planId ? ` 変更 \`${e.planId}\`` : e.ruleId ? ` ルール \`${e.ruleId}\`` : "";
+    return `<t:${unix(e.at)}:R> ${actorText(e)} \`${e.action}\`${ref}`;
+  });
+  return container(
+    [`### 監査ログ\n${all ? "このサーバーの最近の記録です。" : "あなたの操作の記録です。全件を見るには監査ログ表示の権限が必要です。"}`, lines.join("\n") || "ありません"],
+    [row([button(ruleCustomId("home"), "戻る")])],
+  );
+}
+
+export function instructionModal(customId: string, title: string, label: string, placeholder: string): APIModalInteractionResponseCallbackData {
+  return {
+    custom_id: customId,
+    title,
+    components: [{
+      type: ComponentType.ActionRow,
+      components: [{ type: ComponentType.TextInput, custom_id: "instruction", label, style: TextInputStyle.Paragraph, placeholder, required: true, max_length: 1500 }],
+    }],
+  };
+}

@@ -7,6 +7,8 @@ export interface RoleState {
   id: string;
   permissions: bigint;
   position: number;
+  /** For display only. */
+  name?: string;
 }
 
 export interface OverwriteState {
@@ -162,4 +164,20 @@ export function audienceHasGuildPermission(
   if (!bot) return false;
   const people = [bot, speaker, ...viewersOf(guild, currentChannelId, selfId)];
   return people.every((m) => has(basePermissions(guild, m), bits));
+}
+
+/**
+ * Channels a rule may read: the bot and the rule's owner can both read their
+ * history. A rule posts nowhere by itself, so there is no audience to narrow to;
+ * where its writes may go is fixed by the allow list its owner approved.
+ */
+export function readableChannels(guild: GuildState, owner: MemberState, selfId: string): Set<string> {
+  const bot = self(guild, selfId);
+  const result = new Set<string>();
+  if (!bot) return result;
+  for (const channel of guild.channels.values()) {
+    if (channel.type === ChannelType.PrivateThread) continue;
+    if (canReadHistory(guild, bot, channel.id) && canReadHistory(guild, owner, channel.id)) result.add(channel.id);
+  }
+  return result;
 }

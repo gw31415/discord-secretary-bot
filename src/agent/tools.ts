@@ -10,6 +10,10 @@ import { catalogSummary } from "../plan/catalog.ts";
 import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
 import type { Plan, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
+import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
+import { RuleRejected } from "../rules/service.ts";
+import { TRIGGERS, triggerSummary } from "../rules/triggers.ts";
+import type { Rule, RuleDraft } from "../rules/types.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
 // narrows results to what may be shown in the channel the reply goes to.
@@ -63,6 +67,14 @@ export interface ToolOptions {
   fetch?: typeof fetch;
   /** Posts an approval dialog for the steps. Present when writes are allowed. */
   propose?: (drafts: StepDraft[], code?: string) => Promise<Plan>;
+  /** Event rules: proposing one (with a dry run and a confirmation in the channel), and reading the speaker's own. */
+  rules?: RuleTools;
+}
+
+export interface RuleTools {
+  propose: (draft: RuleDraft, replacesRule?: string) => Promise<{ draftId: string; report: string }>;
+  /** The speaker's rules in this server; `shown` is false when its contents may not appear in this channel. */
+  list: () => Array<{ rule: Rule; shown: boolean }>;
 }
 
 export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
@@ -191,7 +203,88 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   const tools = [readMessages, searchMessages, listChannels, findMembers, runCode];
   if (options.images) tools.push(viewImages);
   if (options.propose) tools.push(proposePlan(reader, options.propose));
+  if (options.rules) tools.push(...ruleTools(options.rules));
   return tools;
+}
+
+const AllowSchema = Type.Object({
+  op: Type.String(),
+  path: Type.Optional(Type.Record(Type.String(), Type.Record(Type.String(), Type.Unknown()), { description: "パスパラメータ名 → JSON Schema。例: { channel: { enum: [\"123\"] } }" })),
+  body: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "本文の JSON Schema" })),
+  max_steps_per_run: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+});
+
+function ruleTools(rules: RuleTools): AgentTool<any>[] {
+  const propose = tool({
+    name: "propose_rule",
+    label: "ルールを提案",
+    description: [
+      "イベントルールの案を出します。ルールは、サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。",
+      "案はその場でドライランし、問題があれば理由を返すので直して出し直してください。問題がなければチャンネルに登録の確認を投稿し、依頼者が「登録」を押すと有効になります。",
+      "trigger_event: きっかけ(下の一覧から1つ)。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。",
+      "code: イベントごとに読み取り専用のサンドボックスで動く関数本体。変更がなければ return null か return plan([])、あれば return plan([call(op, { id?, path, body }), ...])。",
+      "  使えるもの: event(発火したイベント), guild, actor, discord.get(route, { query })(同期関数), call, plan, log。実行は1回10秒・discord.get 50回まで。ネットワーク・タイマー・乱数はありません。",
+      "allow: ルールに許す操作。各要素 { op, path?, body?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の JSON Schema です。コードが出したステップはどれか1つに合わないと実行されません。",
+      "  できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。",
+      "sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
+      "replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
+      "きっかけにできるイベント:",
+      triggerSummary(),
+      "操作は propose_plan と同じ一覧から選びます。",
+    ].join("\n"),
+    parameters: Type.Object({
+      name: Type.String({ maxLength: 60, description: "ルールの短い名前" }),
+      trigger_event: Type.String(),
+      include_bot_origin: Type.Optional(Type.Boolean()),
+      allow: Type.Array(AllowSchema, { minItems: 1, maxItems: MAX_ALLOW_ENTRIES }),
+      code: Type.String({ maxLength: 8000 }),
+      sample_event: Type.Optional(Type.Unknown()),
+      replaces_rule: Type.Optional(Type.String()),
+    }),
+    execute: async (_id, params) => {
+      if (!TRIGGERS[params.trigger_event]) throw new Error(`きっかけ ${params.trigger_event} には対応していません`);
+      const draft: RuleDraft = {
+        name: params.name.slice(0, 60),
+        trigger: { event: params.trigger_event, ...(params.include_bot_origin ? { includeBotOrigin: true } : {}) },
+        allow: params.allow.map((a) => ({
+          op: a.op,
+          ...(a.path ? { path: a.path } : {}),
+          ...(a.body ? { body: a.body } : {}),
+          ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
+        })),
+        code: params.code,
+        ...(params.sample_event !== undefined ? { sampleEvent: params.sample_event } : {}),
+      };
+      try {
+        const { draftId, report } = await rules.propose(draft, params.replaces_rule);
+        return text(`登録の確認を投稿しました(ルール案 ${draftId}、ドライラン: ${report})。依頼者が「登録」を押すと有効になります。返答では何をするルールかを一言添えるだけにしてください。`);
+      } catch (e) {
+        if (e instanceof RuleRejected) throw new Error(`このままでは出せません:\n${e.reasons.join("\n")}`);
+        throw e;
+      }
+    },
+  });
+
+  const list = tool({
+    name: "list_rules",
+    label: "ルールを見る",
+    description: "話し手が作ったイベントルールの一覧(ID・名前・状態・きっかけ・許す操作・コード)を返します。ルールを直す依頼のときに使います。",
+    parameters: Type.Object({}),
+    execute: async () => {
+      const items = rules.list();
+      if (items.length === 0) return text("ルールはありません");
+      return text(
+        items
+          .map(({ rule, shown }) =>
+            shown
+              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, code: rule.code })
+              : `${rule.id} ${rule.name}: このチャンネルでは扱えないチャンネルを使うため、内容は表示できません`,
+          )
+          .join("\n"),
+      );
+    },
+  });
+  return [propose, list];
 }
 
 function proposePlan(reader: Reader, propose: (drafts: StepDraft[], code?: string) => Promise<Plan>): AgentTool<any> {

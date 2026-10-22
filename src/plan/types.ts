@@ -12,7 +12,8 @@ export function maxRisk(risks: Risk[]): Risk {
   return risks.reduce<Risk>((a, b) => (RISK_ORDER.indexOf(b) > RISK_ORDER.indexOf(a) ? b : a), "read");
 }
 
-export type Actor = { kind: "user"; userId: string; via: "conversation" | "panel" };
+/** Who a write is for. A rule acts with its owner's permissions, never its own. */
+export type Actor = { kind: "user"; userId: string; via: "conversation" | "panel" | "rule" };
 
 /** A value taken from an earlier step's response, e.g. "steps.s1.result.id". */
 export type Ref = { $ref: string };
@@ -67,9 +68,32 @@ export interface Plan {
   revises?: string;
   /** The code that produced the steps, and an explanation written from the code alone. */
   source?: PlanSource;
+  /** Set when an event rule made the plan; it runs without a dialog, inside `allow`. */
+  rule?: PlanRule;
   hash: string;
   createdAt: string;
   expiresAt: string;
+}
+
+export interface PlanRule {
+  id: string;
+  version: number;
+  name: string;
+  eventId: string;
+  /** What the rule's owner approved; every step must fit one entry, checked again with real values. */
+  allow: AllowEntry[];
+}
+
+/**
+ * One kind of write a rule may make. Path parameters and the body are JSON
+ * Schemas the step's values must satisfy, e.g. { channel: { enum: ["123"] } }.
+ */
+export interface AllowEntry {
+  op: string;
+  path?: Record<string, Record<string, unknown>>;
+  body?: Record<string, unknown>;
+  /** Steps of this kind per run. Absent means up to the plan limit. */
+  maxStepsPerRun?: number;
 }
 
 export interface PlanSource {

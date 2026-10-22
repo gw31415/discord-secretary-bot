@@ -3,7 +3,7 @@ import { ChannelType, PermissionFlagsBits } from "discord-api-types/v10";
 import type { APIChannel, APIMessage, RESTGetAPIGuildMessagesSearchResult } from "discord-api-types/v10";
 import type { GuildCache } from "./cache.ts";
 import { toChannel } from "./cache.ts";
-import { audienceHasGuildPermission, shareableChannels } from "./permissions.ts";
+import { audienceHasGuildPermission, basePermissions, has, readableChannels, shareableChannels } from "./permissions.ts";
 import type { GuildState, MemberState } from "./permissions.ts";
 
 // Every read the agent or sandbox makes goes through here. The bot token can
@@ -16,6 +16,11 @@ export interface ReadScope {
   guildId: string;
   channelId: string;
   speakerId: string;
+  /**
+   * "channel" (default): what everyone who can see the channel may read, for a reply posted there.
+   * "owner": what the speaker alone may read, for a rule that runs with its owner's permissions.
+   */
+  audience?: "channel" | "owner";
 }
 
 export interface ReaderLimits {
@@ -94,7 +99,10 @@ export class Reader {
 
   /** Channels whose contents may appear in this reply. Computed once per reply. */
   shareable(): Set<string> {
-    this.#shareable ??= shareableChannels(this.guild, this.scope.channelId, this.speaker, this.selfId);
+    this.#shareable ??=
+      this.scope.audience === "owner"
+        ? readableChannels(this.guild, this.speaker, this.selfId)
+        : shareableChannels(this.guild, this.scope.channelId, this.speaker, this.selfId);
     return this.#shareable;
   }
 
@@ -133,7 +141,12 @@ export class Reader {
       const m = pattern.exec(path);
       if (!m) continue;
       this.#assertGuild(m[1]!);
-      if (!audienceHasGuildPermission(this.guild, this.scope.channelId, this.speaker, this.selfId, bits)) {
+      if (this.scope.audience === "owner") {
+        const bot = this.guild.members.get(this.selfId);
+        if (!bot || !has(basePermissions(this.guild, this.speaker), bits) || !has(basePermissions(this.guild, bot), bits)) {
+          throw new ReadDenied("必要な権限がないため読めません");
+        }
+      } else if (!audienceHasGuildPermission(this.guild, this.scope.channelId, this.speaker, this.selfId, bits)) {
         throw new ReadDenied("話し手とこのチャンネルを見られる全員が必要な権限を持っていないため読めません");
       }
       return this.rest.get(path as `/${string}`, { query: toSearchParams(query) });

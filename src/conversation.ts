@@ -14,6 +14,8 @@ import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
+import type { ProposeRuleInput, ReviseRuleInput } from "./rules/service.ts";
+import type { Rule } from "./rules/types.ts";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -41,6 +43,11 @@ export interface ConversationDeps {
   judge: (input: { model: JudgeModel; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
   /** Posts an approval dialog for writes. Absent keeps conversations read-only. */
   propose?: (input: ProposeInput) => Promise<Plan>;
+  /** Event rules made in conversation. Absent means the agent cannot propose them. */
+  rules?: {
+    propose: (input: ProposeRuleInput) => Promise<{ draftId: string; report: string }>;
+    list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean }>;
+  };
   /** A conversation woke or was extended. */
   onAwake?: () => void;
   log: (message: string, error?: unknown) => void;
@@ -264,6 +271,34 @@ export class Conversations {
     return this.#enqueue(input.channelId, run);
   }
 
+  /** The rule dialog's 修正 button: the agent proposes again, taking over the same dialog. */
+  reviseRule(input: ReviseRuleInput): Promise<void> {
+    const speaker = input.ownerId;
+    if (!setupStatus(this.deps.store, speaker).complete) {
+      return Promise.reject(new Error("/llm の設定が終わっていないため修正できません"));
+    }
+    const run = async () => {
+      const before = await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES);
+      const context = { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
+      await this.#answer({
+        guildId: input.guildId,
+        channelId: input.channelId,
+        replyToId: input.messageId,
+        speaker,
+        context,
+        target: [
+          `[ルールの修正依頼] (${speaker}): 確認待ちのルール案を次のとおり直して、propose_rule で出し直してください。${input.replacesRule ? `既存のルール ${input.replacesRule} を直す案なので replaces_rule も付けます。` : ""}`,
+          `直してほしいこと: ${input.instruction}`,
+          `今の案: ${JSON.stringify(input.draft)}`,
+        ].join("\n"),
+        images: [],
+        replacesDraft: input.draftId,
+        audit: { channelId: input.channelId, messageId: input.messageId, revisesRuleDraft: input.draftId },
+      });
+    };
+    return this.#enqueue(input.channelId, run);
+  }
+
   #enqueue(channelId: string, task: () => Promise<void>): Promise<void> {
     const next = (this.#queues.get(channelId) ?? Promise.resolve()).then(task);
     const settled = next.catch(() => undefined);
@@ -283,6 +318,8 @@ export class Conversations {
     target: string;
     images: ImageRef[];
     replaces?: string;
+    /** A pending rule draft the agent's next rule proposal takes over. */
+    replacesDraft?: string;
     /** The messages this answer is for, whose edits it should take in. */
     messageIds?: string[];
     audit: Record<string, unknown>;
@@ -340,6 +377,23 @@ export class Conversations {
                 ...(code ? { code } : {}),
                 ...(input.replaces ? { replaces: input.replaces } : {}),
               })
+          : undefined,
+        rules: this.deps.rules
+          ? {
+              propose: (draft, replacesRule) =>
+                this.deps.rules!.propose({
+                  guildId: input.guildId,
+                  channelId,
+                  replyToId: input.replyToId,
+                  ownerId: speaker,
+                  request: input.target,
+                  draft,
+                  reader,
+                  ...(replacesRule ? { replacesRule } : {}),
+                  ...(input.replacesDraft ? { replacesDraft: input.replacesDraft } : {}),
+                }),
+              list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
+            }
           : undefined,
       });
       progress = result.progress;

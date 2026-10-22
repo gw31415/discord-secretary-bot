@@ -6,7 +6,9 @@ import type { QuickJSAsyncContext, QuickJSHandle } from "quickjs-emscripten";
 
 export interface SandboxBindings {
   guildId: string;
-  actor: { kind: "user"; userId: string };
+  actor: { kind: "user"; userId: string; via?: string };
+  /** The event an event rule fired on; null for the agent's code. */
+  event?: unknown;
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -17,6 +19,8 @@ export interface SandboxLimits {
 }
 
 export const AGENT_SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 30_000, memoryBytes: 64 * 1024 * 1024, maxGets: 200 };
+/** A rule runs on every matching event, so it gets less. The wall time includes waiting on discord.get. */
+export const RULE_SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 10_000, memoryBytes: 64 * 1024 * 1024, maxGets: 50 };
 
 const PRELUDE = [
   "function call(op, args) { args = args || {}; return { id: args.id, op: op, path: args.path, query: args.query, body: args.body }; }",
@@ -51,6 +55,7 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
 
     vm.newString(bindings.guildId).consume((h) => vm.setProp(vm.global, "guild", h));
     toHandle(vm, bindings.actor).consume((h) => vm.setProp(vm.global, "actor", h));
+    toHandle(vm, bindings.event ?? null).consume((h) => vm.setProp(vm.global, "event", h));
 
     const discord = vm.newObject();
     vm.newAsyncifiedFunction("get", async (routeHandle, optsHandle) => {

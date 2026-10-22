@@ -13,9 +13,14 @@ import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
 import { Presence } from "./discord/presence.ts";
 import { Reader } from "./discord/reader.ts";
+import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
 import { findChatModel } from "./llm/models.ts";
-import { Planner } from "./plan/service.ts";
+import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
+import { RuleAdmin } from "./rules/admin.ts";
+import { RuleEngine } from "./rules/engine.ts";
+import { RuleService } from "./rules/service.ts";
+import { TRIGGER_INTENTS, TRIGGERS } from "./rules/triggers.ts";
 
 const config = loadConfig();
 const store = new Store(config.dbPath, config.masterKey);
@@ -33,7 +38,8 @@ const gateway = new WebSocketManager({
     GatewayIntentBits.Guilds |
     GatewayIntentBits.GuildMembers |
     GatewayIntentBits.GuildMessages |
-    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.MessageContent |
+    TRIGGER_INTENTS,
   // Asleep until someone talks to it.
   initialPresence: { status: PresenceUpdateStatus.Idle, activities: [], since: null, afk: true },
 });
@@ -73,6 +79,48 @@ const planner = new Planner({
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code });
   },
+  onWrite: (plan, step, response) => engine.noteWrite(plan, step, response),
+});
+
+function makeReader(scope: ReadScope): Reader {
+  const cache = caches.get(scope.guildId);
+  if (!cache) throw new Error(`サーバー ${scope.guildId} の情報をまだ受信していません`);
+  return new Reader(rest, cache, selfId, scope, { maxMessages: MAX_MESSAGES_PER_REPLY });
+}
+
+async function sendDm(userId: string, content: string): Promise<void> {
+  const dm = await client.api.users.createDM(userId);
+  await client.api.channels.createMessage(dm.id, { content, allowed_mentions: { parse: [] } });
+}
+
+const engine = new RuleEngine({
+  store,
+  caches,
+  planner,
+  selfId: () => selfId,
+  now: () => Date.now(),
+  makeReader,
+  notifyOwner: sendDm,
+  log,
+});
+const admin = new RuleAdmin({ store, caches, selfId: () => selfId, now: () => Date.now() });
+const rules = new RuleService({
+  api: client.api,
+  store,
+  caches,
+  admin,
+  engine,
+  selfId: () => selfId,
+  now: () => Date.now(),
+  log,
+  summarize: async (code, ownerId, trigger) => {
+    const ref = store.getSettings(ownerId).response;
+    const model = ref && findChatModel(ref.provider, ref.model);
+    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
+    if (!model || !apiKey) return null;
+    return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
+  },
+  revise: (input) => conversations.reviseRule(input),
 });
 
 const conversations = new Conversations({
@@ -90,19 +138,16 @@ const conversations = new Conversations({
       allowed_mentions: { parse: [], replied_user: false },
     });
   },
-  sendDm: async (userId, content) => {
-    const dm = await client.api.users.createDM(userId);
-    await client.api.channels.createMessage(dm.id, { content, allowed_mentions: { parse: [] } });
-  },
+  sendDm,
   typing: (channelId) => client.api.channels.showTyping(channelId),
-  makeReader: (scope) => {
-    const cache = caches.get(scope.guildId);
-    if (!cache) throw new Error(`サーバー ${scope.guildId} の情報をまだ受信していません`);
-    return new Reader(rest, cache, selfId, scope, { maxMessages: MAX_MESSAGES_PER_REPLY });
-  },
+  makeReader: (scope) => makeReader(scope),
   respond,
   judge: judgeAddressed,
   propose: (input) => planner.propose(input),
+  rules: {
+    propose: (input) => rules.propose(input),
+    list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
+  },
   onAwake: () => presence.refresh(),
   log,
 });
@@ -167,7 +212,24 @@ client.on(GatewayDispatchEvents.GuildMemberAdd, ({ data }) => {
   if (data.user) caches.get(data.guild_id)?.upsertMember({ ...data, user: data.user });
 });
 client.on(GatewayDispatchEvents.GuildMemberUpdate, ({ data }) => caches.get(data.guild_id)?.upsertMember(data));
-client.on(GatewayDispatchEvents.GuildMemberRemove, ({ data }) => caches.get(data.guild_id)?.deleteMember(data.user.id));
+client.on(GatewayDispatchEvents.GuildMemberRemove, ({ data }) => {
+  caches.get(data.guild_id)?.deleteMember(data.user.id);
+  engine.ownerLeft(data.guild_id, data.user.id);
+});
+
+// Rules see each event after the cache has taken it in (listeners run in the order added).
+for (const event of Object.keys(TRIGGERS)) {
+  client.on(event as GatewayDispatchEvents.MessageCreate, ({ data }) => {
+    const payload = data as unknown as Record<string, unknown>;
+    const guildId = (payload.guild_id as string | undefined) ?? undefined;
+    if (!served(guildId)) return;
+    try {
+      engine.dispatch(event, guildId, payload);
+    } catch (e) {
+      log(`ルールの振り分けに失敗 (${event})`, e);
+    }
+  });
+}
 
 client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
   const cache = caches.get(data.guild_id);
@@ -186,6 +248,8 @@ client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
   if (!caches.get(data.guild_id)) return;
   try {
     if (await planner.handleInteraction(data)) return;
+    if (await rules.handleCommand(data)) return;
+    if (await rules.handleInteraction(data)) return;
     await handleInteraction(api, store, data);
   } catch (e) {
     log("インタラクションの処理に失敗", e);
@@ -199,12 +263,16 @@ function guildOf(channel: object): string | undefined {
 const sweeper = setInterval(() => {
   conversations.sweep();
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
+  rules.sweep().catch((e) => log("ルール案の期限処理に失敗", e));
+  engine.sweep();
+  store.deleteRuleRunsBefore(new Date(Date.now() - SNAPSHOT_RETENTION_MS));
 }, 60_000);
 
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
   presence.stop();
+  await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);
   await gateway.destroy();
   store.close();
   process.exit(0);

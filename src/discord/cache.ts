@@ -13,7 +13,7 @@ import type { ChannelState, GuildState, MemberState, OverwriteState, RoleState }
 // for one server can reach a conversation in another.
 
 export function toRole(role: APIRole): RoleState {
-  return { id: role.id, permissions: BigInt(role.permissions), position: role.position };
+  return { id: role.id, permissions: BigInt(role.permissions), position: role.position, name: role.name };
 }
 
 function toOverwrite(o: APIOverwrite): OverwriteState {

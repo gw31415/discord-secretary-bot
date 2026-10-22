@@ -14,7 +14,8 @@ import type { Body } from "./catalog.ts";
 import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
 import { isRef } from "./types.ts";
-import type { Plan, Precondition, Step, StepDraft } from "./types.ts";
+import type { Plan, PlanRule, PlanStatus, Precondition, Step, StepDraft } from "./types.ts";
+import { allowProblems } from "../rules/allow.ts";
 import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
@@ -36,6 +37,15 @@ export interface PlannerDeps {
   revise?: (input: ReviseInput) => Promise<void>;
   /** Explains plan code from the code alone, paid for by the actor. */
   summarize?: (code: string, actorId: string) => Promise<string | null>;
+  /** A step went through; event rules use this to tell the bot's own changes from others'. */
+  onWrite?: (plan: Plan, step: Step, response: unknown) => void;
+}
+
+export interface RuleRunInput {
+  guildId: string;
+  ownerId: string;
+  rule: PlanRule;
+  drafts: StepDraft[];
 }
 
 export interface ReviseInput {
@@ -82,8 +92,8 @@ export function fingerprint(resource: Resource, fields: string[]): string {
 }
 
 export function planHash(plan: Omit<Plan, "hash">): string {
-  const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, createdAt, expiresAt } = plan;
-  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, createdAt, expiresAt }));
+  const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, createdAt, expiresAt } = plan;
+  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, createdAt, expiresAt }));
 }
 
 /** Fields shown as "before" in the preview, on top of the ones the step depends on. */
@@ -209,6 +219,44 @@ export class Planner {
       this.deps.store.setPlanMessage(plan.id, input.channelId, message.id);
       return plan;
     }
+  }
+
+  /**
+   * A rule's plan: no dialog, since the owner approved the rule. Every step
+   * must fit the rule's allow list and the owner's (and the bot's) current
+   * permissions; then it runs through the same executor as any other plan.
+   */
+  async runForRule(input: RuleRunInput): Promise<{ plan: Plan; status: PlanStatus; reason: string | null }> {
+    const cache = this.deps.caches.get(input.guildId);
+    if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
+    const guild = cache.guild;
+    const id = randomBytes(6).toString("hex");
+    const steps = normalizeSteps(input.drafts, input.guildId, id);
+    const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
+    const problems = [...allowProblems(steps, input.rule.allow), ...steps.flatMap((s) => permissionProblems(s, ctx))];
+    if (problems.length > 0) throw new PlanRejected(problems);
+
+    const preconditions = await this.#preconditions(input.guildId, steps);
+    const labels = await this.#labels(input.guildId, guild, [], input.ownerId);
+    const createdAt = new Date(this.deps.now()).toISOString();
+    const draft: Omit<Plan, "hash"> = {
+      id,
+      guildId: input.guildId,
+      actor: { kind: "user", userId: input.ownerId, via: "rule" },
+      preconditions,
+      steps,
+      labels,
+      risk: planRisk(steps),
+      rule: input.rule,
+      createdAt,
+      expiresAt: createdAt,
+    };
+    const plan: Plan = { ...draft, hash: planHash(draft) };
+    this.deps.store.insertPlan(plan, "approved");
+    this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op), event: input.rule.eventId }, plan.id, input.rule.id);
+    await this.execute(plan.id);
+    const row = this.deps.store.getPlan(plan.id)!;
+    return { plan, status: row.status, reason: row.reason };
   }
 
   async #summarize(code: string, actorId: string): Promise<string | null> {
@@ -531,7 +579,9 @@ export class Planner {
       const dm = await api.users.createDM(String(step.pathParams.user));
       return api.channels.createMessage(dm.id, { content: String(body?.content), allowed_mentions: { parse: [] } });
     }
-    const reason = `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
+    const reason = plan.rule
+      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更 ${plan.id})`
+      : `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
     const { method, path } = routeOf(step.op, step.pathParams);
     let payload: unknown = body;
     if (spec.op === "POST /channels/{channel}/messages") {
@@ -579,7 +629,11 @@ export class Planner {
           const resolved: Step = { ...step, pathParams: resolveRefs(step.pathParams, results), ...(step.body !== undefined ? { body: resolveRefs(step.body, results) } : {}) };
           const spec = specOf(resolved);
           await this.#addChannel(state, resolved);
-          const stepProblems = permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() });
+          const stepProblems = [
+            ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
+            // Values from earlier steps are known now, so a rule's allow list is checked on them too.
+            ...(plan.rule ? allowProblems([resolved], plan.rule.allow) : []),
+          ];
           if (stepProblems.length > 0) throw new Error(stepProblems.join(" / "));
           if (spec.target) {
             const key = spec.target(resolved.pathParams, plan.guildId);
@@ -595,6 +649,7 @@ export class Planner {
           const resultId = (response as { id?: string } | undefined)?.id ?? null;
           store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
           results.set(step.id, response ?? null);
+          this.deps.onWrite?.(plan, resolved, response);
           // Progress on long plans, without editing the dialog on every step.
           if (plan.steps.length > 1 && this.deps.now() - lastRefresh >= PROGRESS_INTERVAL_MS) {
             lastRefresh = this.deps.now();
