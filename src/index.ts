@@ -3,11 +3,12 @@ import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { PresenceUpdateStatus } from "discord-api-types/v10";
 import { judgeAddressed } from "./agent/judge.ts";
+import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
 import { loadConfig } from "./config.ts";
 import { Conversations, MAX_MESSAGES_PER_REPLY } from "./conversation.ts";
-import type { GuildMessage } from "./conversation.ts";
+import type { GuildMessage, ReactionAdd } from "./conversation.ts";
 import { Store } from "./db.ts";
 import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
@@ -150,6 +151,12 @@ const conversations = new Conversations({
   makeReader: (scope) => makeReader(scope),
   respond,
   judge: judgeAddressed,
+  // The bot's own way of answering, like a reply post: not a change to the server, so no plan.
+  react: async (channelId, messageId, emoji) => {
+    await client.api.channels.addMessageReaction(channelId, messageId, emoji);
+  },
+  chooseReaction,
+  fetchMessage: (channelId, messageId) => client.api.channels.getMessage(channelId, messageId),
   propose: (input) => planner.propose(input),
   rules: {
     list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
@@ -193,6 +200,12 @@ client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
   } catch (e) {
     log(`${data.name}: メンバー一覧の取得に失敗`, e);
   }
+  // After the members, so the owners' permissions are known.
+  try {
+    engine.dispatch("BOT_READY", data.id, { guild_id: data.id });
+  } catch (e) {
+    log(`${data.name}: BOT_READY のルールの振り分けに失敗`, e);
+  }
 });
 
 client.on(GatewayDispatchEvents.GuildDelete, ({ data }) => {
@@ -235,10 +248,11 @@ client.on(GatewayDispatchEvents.VoiceStateUpdate, ({ data }) => {
 });
 
 // Rules see each event after the cache has taken it in (listeners run in the order added).
-for (const event of Object.keys(TRIGGERS)) {
+for (const [event, spec] of Object.entries(TRIGGERS)) {
+  if (spec.synthetic) continue;
   client.on(event as GatewayDispatchEvents.MessageCreate, ({ data }) => {
     const payload = data as unknown as Record<string, unknown>;
-    const guildId = (payload.guild_id as string | undefined) ?? undefined;
+    const guildId = spec.guildId ? spec.guildId(payload) : ((payload.guild_id as string | undefined) ?? undefined);
     if (!served(guildId)) return;
     try {
       engine.dispatch(event, guildId, payload);
@@ -254,6 +268,11 @@ client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
   // The message carries the author's current roles; keep the cache fresh with them.
   if (data.member && !data.author.bot) cache.upsertMember({ roles: data.member.roles, user: data.author });
   void conversations.handle(data as GuildMessage);
+});
+
+client.on(GatewayDispatchEvents.MessageReactionAdd, ({ data }) => {
+  if (!served(data.guild_id) || !caches.get(data.guild_id)?.guild) return;
+  void conversations.reacted(data as ReactionAdd);
 });
 
 client.on(GatewayDispatchEvents.MessageUpdate, ({ data }) => {
@@ -277,6 +296,20 @@ function guildOf(channel: object): string | undefined {
   return "guild_id" in channel ? (channel.guild_id as string | undefined) : undefined;
 }
 
+// SCHEDULE rules: checked at the start of every minute.
+let scheduler: ReturnType<typeof setTimeout> | undefined;
+function scheduleTick(): void {
+  scheduler = setTimeout(() => {
+    try {
+      engine.tick(caches.ids());
+    } catch (e) {
+      log("時刻のルールの振り分けに失敗", e);
+    }
+    scheduleTick();
+  }, 60_000 - (Date.now() % 60_000) + 50);
+}
+scheduleTick();
+
 const sweeper = setInterval(() => {
   conversations.sweep();
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
@@ -287,6 +320,7 @@ const sweeper = setInterval(() => {
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
+  clearTimeout(scheduler);
   presence.stop();
   await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);
   await gateway.destroy();

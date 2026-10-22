@@ -1,4 +1,6 @@
 import { GatewayIntentBits } from "discord-api-types/v10";
+import { DEFAULT_TIMEZONE, scheduleProblems } from "./schedule.ts";
+import type { RuleTrigger } from "./types.ts";
 
 // Gateway events a rule can fire on. Each entry says where the event happened
 // (so a rule only sees events in channels its owner can view), who caused it
@@ -9,7 +11,12 @@ type Data = Record<string, any>;
 
 export interface TriggerSpec {
   label: string;
+  /** 0 for the bot's own events (SCHEDULE, BOT_READY), which come from no Gateway event. */
   intent: number;
+  /** Made by the bot rather than received from the Gateway. */
+  synthetic?: boolean;
+  /** The server the event is in. Absent means `guild_id`. */
+  guildId?: (d: Data) => string | undefined;
   /** The main fields of `event`, for the model writing the rule. */
   payload: string;
   /** The channel the event happened in; the owner must be able to view it. */
@@ -47,6 +54,7 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     payload: `${MESSAGE}, edited_timestamp`,
     channel: (d) => d.channel_id,
     actorId: (d) => d.author?.id,
+    resources: (d) => [`message:${d.channel_id}/${d.id}`],
   },
   MESSAGE_DELETE: {
     label: "メッセージが削除されたとき",
@@ -68,6 +76,8 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     payload: "user_id, channel_id, message_id, guild_id, emoji { id, name }",
     channel: (d) => d.channel_id,
     actorId: (d) => d.user_id,
+    // The bot taking someone else's reaction off: user_id is theirs, not the bot's.
+    outcomes: (d) => [reactionKey(d.channel_id as string, d.message_id as string, emojiKey(d.emoji), d.user_id as string)],
   },
   GUILD_MEMBER_ADD: {
     label: "メンバーが参加したとき",
@@ -148,6 +158,24 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     payload: "guild_id, role_id",
     resources: (d) => [`role:${d.role_id}`],
   },
+  GUILD_UPDATE: {
+    label: "サーバーの設定が変わったとき",
+    intent: GatewayIntentBits.Guilds,
+    payload: "id(サーバーID), name, icon, owner_id, system_channel_id, rules_channel_id, afk_channel_id(変更前の値は含まれません)",
+    guildId: (d) => d.id,
+  },
+  SCHEDULE: {
+    label: "決まった時刻になったとき",
+    intent: 0,
+    synthetic: true,
+    payload: "guild_id, scheduled_at(発火した分のISO時刻), schedule(cron), timezone。きっかけの schedule(cron: 分 時 日 月 曜日)と timezone(既定 Asia/Tokyo)で時刻を決めます",
+  },
+  BOT_READY: {
+    label: "Botが起動・再接続してサーバーの情報を受け取ったとき",
+    intent: 0,
+    synthetic: true,
+    payload: "guild_id。止まっていた間の変化をまとめて反映するのに使います",
+  },
   VOICE_STATE_UPDATE: {
     label: "ボイスチャンネルに入った・出た・移ったとき",
     intent: GatewayIntentBits.GuildVoiceStates,
@@ -165,6 +193,17 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
 /** The bot moved (or disconnected, with null) a member in voice. */
 export function voiceMoveKey(userId: string, channelId: string | null): string {
   return `voice:${userId}/${channelId ?? "none"}`;
+}
+
+/** The bot took `userId`'s reaction off a message. */
+export function reactionKey(channelId: string, messageId: string, emoji: string, userId: string): string {
+  return `reaction:${channelId}/${messageId}/${emoji}/${userId}`;
+}
+
+/** An emoji as the reaction routes name it: the character, or name:id for a custom one. */
+export function emojiKey(emoji: { id?: string | null; name?: string | null } | undefined): string {
+  if (!emoji) return "";
+  return emoji.id ? `${emoji.name ?? ""}:${emoji.id}` : (emoji.name ?? "");
 }
 
 /** The bot server-muted or deafened a member, which leaves them where they are. */
@@ -192,6 +231,36 @@ export function triggerEvents(trigger: { event: string; events?: string[] }): st
 }
 
 export const MAX_TRIGGER_EVENTS = 5;
+export const MAX_DEBOUNCE_SECONDS = 300;
+/** Events a debounced run keeps; the oldest are dropped. */
+export const MAX_BATCH = 50;
+
+/** Shape problems of a trigger. Every message starts with きっかけ. */
+export function triggerProblems(trigger: RuleTrigger): string[] {
+  const problems: string[] = [];
+  const events = triggerEvents(trigger);
+  for (const event of events) if (!isTrigger(event)) problems.push(`きっかけ ${event} には対応していません`);
+  if (events.length > MAX_TRIGGER_EVENTS) problems.push(`きっかけは${MAX_TRIGGER_EVENTS}種類までです`);
+  if (events.includes("SCHEDULE")) problems.push(...scheduleProblems(trigger.schedule, trigger.timezone));
+  else if (trigger.schedule !== undefined || trigger.timezone !== undefined) problems.push("きっかけの schedule は SCHEDULE と一緒に使います");
+  const debounce = trigger.debounceSeconds;
+  if (debounce !== undefined && !(Number.isInteger(debounce) && debounce >= 1 && debounce <= MAX_DEBOUNCE_SECONDS)) {
+    problems.push(`きっかけの debounce_seconds は1〜${MAX_DEBOUNCE_SECONDS}の整数にしてください`);
+  }
+  const origin = trigger.includeBotOrigin;
+  if (origin !== undefined && typeof origin !== "boolean" && origin !== "other_rules") problems.push("きっかけの include_bot_origin は true・false・\"other_rules\" のどれかです");
+  return problems;
+}
+
+/** The payload of a synthetic event, for a run or a dry run. Null for Gateway events. */
+export function syntheticEvent(event: string, guildId: string, trigger: RuleTrigger, now: number): Record<string, unknown> | null {
+  if (event === "SCHEDULE") {
+    const minute = Math.floor(now / 60_000) * 60_000;
+    return { guild_id: guildId, scheduled_at: new Date(minute).toISOString(), schedule: trigger.schedule ?? null, timezone: trigger.timezone ?? DEFAULT_TIMEZONE };
+  }
+  if (event === "BOT_READY") return { guild_id: guildId };
+  return null;
+}
 
 /** One line per trigger for the model's instructions. */
 export function triggerSummary(): string {

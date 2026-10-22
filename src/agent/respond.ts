@@ -1,5 +1,6 @@
 import { Agent } from "@earendil-works/pi-agent-core";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import { Type } from "typebox";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { Reader } from "../discord/reader.ts";
 import { lightestThinking, llm } from "../llm/models.ts";
@@ -8,6 +9,7 @@ import type { ImageRef } from "./images.ts";
 import { readTools } from "./tools.ts";
 import type { Propose, RuleTools } from "./tools.ts";
 import type { Coder } from "./coder.ts";
+import { isReactionEmoji } from "./react.ts";
 import type { ImageBox, ImageTools } from "./attachments.ts";
 import { retryFailedCall } from "./retry.ts";
 import { ANTHROPIC_WEB_TOOLS, webTools } from "./web.ts";
@@ -40,6 +42,8 @@ export interface RespondInput {
   onProgress?: (text: string) => Promise<void>;
   /** Carries the speaker's follow-ups and edits into the running agent. */
   inbox?: Inbox;
+  /** Puts a reaction on the message being answered. Absent means the agent cannot react. */
+  react?: (emoji: string) => Promise<void>;
   /** Where image tools put images for the reply or a proposed post. */
   attachments?: ImageBox;
   /** Tools that make or fetch images into `attachments`. */
@@ -55,6 +59,8 @@ export interface RespondResult {
   toolCalls: string[];
   /** Tools that failed, with the reason the model was given. */
   toolErrors?: { tool: string; error: string }[];
+  /** Reactions put on the message being answered. */
+  reactions?: string[];
   /** Model calls that failed for a passing reason and were made again. */
   retries?: number;
 }
@@ -103,6 +109,7 @@ export class Inbox {
 }
 
 const MAX_TURNS = 12;
+const MAX_REACTIONS = 3;
 /** Progress posts per answer; past this the agent works quietly. */
 const MAX_PROGRESS = 6;
 /** A line with only this splits the reply into separate Discord posts. */
@@ -133,7 +140,11 @@ const WEB = [
   "- サーバーの中の情報(メッセージ・メンバー・設定など)を検索語やURLに入れて外へ送らないでください。",
 ];
 
-function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web: boolean, rules: boolean, attaches = false): string {
+const REACT = [
+  "- 返事は文章の代わりにリアクションだけでも構いません。あいさつ・お礼・相づち・了解・OKやNGの返事など、ひとことで足りるときは react で絵文字を付け、最後の返答は空にします。文章で答えるときに react を添えても構いません。",
+];
+
+function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web: boolean, rules: boolean, react: boolean, attaches = false): string {
   return [
     `あなたはDiscordサーバーの管理者Bot「${botName}」です。メンバーの質問に、サーバーの情報を調べて答えます。${writes ? "頼まれれば、承認を経てサーバーの設定を変えることもできます。" : ""}`,
     "",
@@ -150,6 +161,7 @@ function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web
     "- 調べものや一覧を頼まれたときだけ、必要な分だけ長く書いて構いません(Markdown可)。",
     `- 人が連投するように、返答を複数の投稿に分けても構いません。分けるところに ${MESSAGE_BREAK} だけの行を入れます。分けるのは話題や区切りが変わるときだけにしてください。`,
     "- 話し手と同じ言語で答えます。",
+    ...(react ? REACT : []),
     ...(attaches ? ["- グラフ・表・図など、見せたほうが伝わるものは run_code で画像に描けます。用意した画像は返答に添付されます。propose_plan の投稿に付けるときは、その画像のIDを body の files に入れます。画像を付けたら、本文で同じものを繰り返さないでください。"] : []),
     "- ツールを使うときは、使う前に何をするかを一言(「〜を調べます」など1文)書いてください。その文は途中経過としてすぐ投稿されます。最後の返答で同じことを繰り返さないでください。",
     "- 作業中に届いた [追いコメント] や [編集] は、話し手が依頼を足したり直したりしたものです。次の手順から反映し、依頼と関係なければ無視します。",
@@ -224,19 +236,40 @@ function lastAssistantText(messages: AgentMessage[]): string {
   return "";
 }
 
+function reactTool(react: (emoji: string) => Promise<void>, reactions: string[]): AgentTool<any> {
+  const parameters = Type.Object({ emoji: Type.String({ description: "Unicodeの絵文字1つ。例: 👍 ✅ ❌ 🙏 😂 🎉" }) });
+  const definition: AgentTool<typeof parameters> = {
+    name: "react",
+    label: "リアクション",
+    description: "返答する発言にリアクションを付けます。文章で返す代わりにも、添えるのにも使えます。",
+    parameters,
+    execute: async (_id, params) => {
+      if (!isReactionEmoji(params.emoji)) throw new Error("Unicodeの絵文字を1つだけ指定してください");
+      if (reactions.length >= MAX_REACTIONS) throw new Error(`リアクションは1回の返答で${MAX_REACTIONS}個までです`);
+      if (reactions.includes(params.emoji)) return { content: [{ type: "text", text: "もう付けています" }], details: {} };
+      await react(params.emoji);
+      reactions.push(params.emoji);
+      return { content: [{ type: "text", text: `${params.emoji} を付けました` }], details: {} };
+    },
+  };
+  return definition;
+}
+
 export async function respond(input: RespondInput): Promise<RespondResult> {
   const { model, apiKey } = input;
+  const reactions: string[] = [];
   // Claude's server tools only exist on Anthropic's API.
   const web = input.web?.kind === "anthropic" && model.provider !== "anthropic" ? null : input.web;
   const seesImages = model.input.includes("image");
   const imageTools = input.attachments && input.imageTools ? input.imageTools(input.attachments, seesImages) : [];
   const agent = new Agent({
     initialState: {
-      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.attachments),
+      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.react, !!input.attachments),
       model,
       tools: [
         ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder, ...(input.attachments ? { attachments: input.attachments } : {}) }),
         ...(web ? webTools(web, input.fetch) : []),
+        ...(input.react ? [reactTool(input.react, reactions)] : []),
         ...imageTools,
       ],
       thinkingLevel: lightestThinking(model) ?? "off",
@@ -307,7 +340,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   }
   const extra = retries > 0 ? { retries } : {};
   if (!text && turns >= MAX_TURNS) {
-    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors, ...extra };
+    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors, reactions, ...extra };
   }
-  return { text, progress, turns, toolCalls, toolErrors, ...extra };
+  return { text, progress, turns, toolCalls, toolErrors, reactions, ...extra };
 }

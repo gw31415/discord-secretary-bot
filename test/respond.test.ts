@@ -241,6 +241,16 @@ test("the coding agent tries code, looks at rule runs, fixes a failed submission
   }
 });
 
+test("a reaction model's choice falls back to the safe side", async () => {
+  const { parseChoice, isReactionEmoji } = await import("../src/agent/react.ts");
+  assert.deepEqual(parseChoice('{"action":"react","emoji":"👍"}', "message"), { action: "react", emoji: "👍" });
+  assert.deepEqual(parseChoice('{"action":"react","emoji":"ok"}', "message"), { action: "reply" });
+  assert.deepEqual(parseChoice("わからない", "message"), { action: "reply" });
+  assert.deepEqual(parseChoice('{"action":"reply"}', "reaction"), { action: "reply" });
+  assert.deepEqual(parseChoice("わからない", "reaction"), { action: "none" });
+  assert.ok(isReactionEmoji("❤️") && isReactionEmoji("👍🏽") && !isReactionEmoji("name:123") && !isReactionEmoji("a"));
+});
+
 test("image tools plug into the agent and put their images in the reply's box", async () => {
   const faux = fauxProvider();
   llm.setProvider(faux.provider);

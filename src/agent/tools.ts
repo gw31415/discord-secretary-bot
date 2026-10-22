@@ -17,7 +17,8 @@ import type { Plan, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
 import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
-import { MAX_TRIGGER_EVENTS, triggerSummary } from "../rules/triggers.ts";
+import { MAX_BATCH, MAX_DEBOUNCE_SECONDS, MAX_TRIGGER_EVENTS, triggerSummary } from "../rules/triggers.ts";
+import { MAX_LIMITS, MAX_STATE_JSON } from "../rules/types.ts";
 import type { Rule, RuleProposal, RuleRun } from "../rules/types.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
@@ -41,7 +42,7 @@ function componentText(components: unknown[] | undefined): string[] {
   return out;
 }
 
-export function formatMessage(m: Omit<APIMessage, "reactions">): string {
+export function formatMessage(m: Omit<APIMessage, "reactions"> & Partial<Pick<APIMessage, "reactions">>): string {
   const name = m.author.global_name ?? m.author.username;
   const parts = [`[${m.id}] ${m.timestamp.slice(0, 16).replace("T", " ")} ${name}(${m.author.id})${m.author.bot ? "[bot]" : ""}`];
   if (m.message_reference?.message_id) parts.push(`返信先:${m.message_reference.message_id}`);
@@ -51,6 +52,10 @@ export function formatMessage(m: Omit<APIMessage, "reactions">): string {
     line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : ""}`).join(", ")}]`;
   }
   if (m.embeds.length > 0) line += ` [埋め込み${m.embeds.length}件${m.embeds.some((e) => e.image || e.thumbnail) ? "・画像あり" : ""}]`;
+  if (m.reactions?.length) {
+    const shown = m.reactions.map((r) => `${r.emoji.id ? `:${r.emoji.name}:` : r.emoji.name}${r.count}${r.me ? "(Botも)" : ""}`);
+    line += ` [リアクション: ${shown.join(" ")}]`;
+  }
   return line;
 }
 
@@ -93,7 +98,7 @@ export type Propose = (drafts: StepDraft[], code?: string, rules?: RuleProposal[
 
 export interface RuleTools {
   /** The speaker's rules in this server; `shown` is false when its contents may not appear in this channel. */
-  list: () => Array<{ rule: Rule; shown: boolean }>;
+  list: () => Array<{ rule: Rule; shown: boolean; state?: unknown }>;
   /** Recent runs of one of the speaker's rules; null when it is not theirs or not shown here. */
   runs: (ruleId: string, limit: number) => RuleRun[] | null;
 }
@@ -279,6 +284,7 @@ const AllowSchema = Type.Object({
   path: Type.Optional(Type.Record(Type.String(), Type.Record(Type.String(), Type.Unknown()), { description: "パスパラメータ名 → JSON Schema。例: { channel: { enum: [\"123\"] } }" })),
   body: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "本文の JSON Schema" })),
   target: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "対象(チャンネル・ロール・メンバーなど)の実行直前の状態が満たすべき JSON Schema" })),
+  channel: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "ステップが働くチャンネル(投稿先など)の実行直前の状態が満たすべき JSON Schema" })),
   max_steps_per_run: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
 });
 
@@ -286,7 +292,16 @@ const RULE_FIELDS = {
   name: Type.String({ minLength: 1, maxLength: 60, description: "ルールの短い名前" }),
   trigger_event: Type.String(),
   more_trigger_events: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_TRIGGER_EVENTS - 1, description: "同じルールを動かすほかのきっかけ" })),
-  include_bot_origin: Type.Optional(Type.Boolean()),
+  include_bot_origin: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("other_rules")])),
+  schedule: Type.Optional(Type.String({ maxLength: 100, description: "SCHEDULE の cron(分 時 日 月 曜日)" })),
+  timezone: Type.Optional(Type.String({ maxLength: 64 })),
+  debounce_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_DEBOUNCE_SECONDS })),
+  limits: Type.Optional(
+    Type.Object({
+      per_minute: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.perMinute })),
+      max_consecutive_failures: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.maxConsecutiveFailures })),
+    }),
+  ),
   allow: Type.Array(AllowSchema, { minItems: 1, maxItems: MAX_ALLOW_ENTRIES }),
   params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   sample_event: Type.Optional(Type.Unknown()),
@@ -321,6 +336,8 @@ function ruleTask(r: CodedRuleInput): string {
     r.code_task,
     "",
     `きっかけ: ${[r.trigger_event, ...(r.more_trigger_events ?? [])].join("、")}${r.more_trigger_events?.length ? "(どれで動いたかは eventName で分かります)" : ""}`,
+    ...(r.schedule ? [`時刻: cron ${r.schedule}(${r.timezone ?? "Asia/Tokyo"})`] : []),
+    ...(r.debounce_seconds ? [`まとめて実行: 最後のイベントから${r.debounce_seconds}秒待って1回だけ動きます。その間のイベントは batch(古い順の [{ eventName, event }])で全部読め、event は最後のものです`] : []),
     `params: ${JSON.stringify(r.params ?? null)}`,
     `許す操作: ${JSON.stringify(r.allow)}`,
     ...(r.replaces_rule ? [`直すルール: ${r.replaces_rule}(list_rules・rule_runs で今のコードと実行履歴を見られます)`] : []),
@@ -337,7 +354,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask(r), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runSandboxed(code, { ...bindings, event: event ?? null, params: r.params ?? null }, RULE_SANDBOX_LIMITS),
+          run: (code, event) => runSandboxed(code, { ...bindings, event: event ?? null, params: r.params ?? null, state: null }, RULE_SANDBOX_LIMITS),
           tools,
         });
         return { ...rest, code };
@@ -354,13 +371,20 @@ function toProposal(r: RuleInput): RuleProposal {
     trigger: {
       event: r.trigger_event,
       ...(r.more_trigger_events?.length ? { events: r.more_trigger_events.filter((e) => e !== r.trigger_event) } : {}),
-      ...(r.include_bot_origin ? { includeBotOrigin: true } : {}),
+      ...(r.include_bot_origin ? { includeBotOrigin: r.include_bot_origin } : {}),
+      ...(r.schedule !== undefined ? { schedule: r.schedule } : {}),
+      ...(r.timezone !== undefined ? { timezone: r.timezone } : {}),
+      ...(r.debounce_seconds ? { debounceSeconds: r.debounce_seconds } : {}),
     },
+    ...(r.limits
+      ? { limits: { ...(r.limits.per_minute ? { perMinute: r.limits.per_minute } : {}), ...(r.limits.max_consecutive_failures ? { maxConsecutiveFailures: r.limits.max_consecutive_failures } : {}) } }
+      : {}),
     allow: r.allow.map((a) => ({
       op: a.op,
       ...(a.path ? { path: a.path } : {}),
       ...(a.body ? { body: a.body } : {}),
       ...(a.target ? { target: a.target } : {}),
+      ...(a.channel ? { channel: a.channel } : {}),
       ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
     })),
     code: r.code,
@@ -385,16 +409,21 @@ function rulesFromCode(value: unknown): RuleProposal[] {
 
 const RULES_DESCRIPTION = [
   "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
-  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
-  "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。",
+  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
+  "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。true はBotの変更すべてで動き、\"other_rules\" はほかのルールや会話からの変更では動くがこのルール自身の変更では動きません(Botの投稿・リアクションでは動きません)。ほかのルールの結果に合わせて直すルール(例: 並べ替えのあとに一覧を作り直す)は \"other_rules\" にします。",
+  "  時刻で動かすときは trigger_event(または more_trigger_events)に SCHEDULE を入れ、schedule に cron(分 時 日 月 曜日。例: 毎朝4時は \"0 4 * * *\"、10分おきは \"*/10 * * * *\")を、必要なら timezone(既定 Asia/Tokyo)を書きます。イベントのきっかけと一緒に使えます(例: チャンネルの作成・変更と毎日4時の作り直し)。BOT_READY はBotの起動・再接続のたびに動くので、止まっていた間の変化を取り込めます。",
+  "  debounce_seconds: 短い間にイベントがまとめて来るとき(並べ替えでチャンネルの変更が何件も届くなど)に付けると、最後のイベントからその秒数待って1回だけ動きます。コードはその間のイベントを batch(古い順の [{ eventName, event }]。最大" + MAX_BATCH + "件)で読めます。batch はいつもあり、まとめないときは1件です。",
+  "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
+  "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
   "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log。実行は1回10秒・discord.get 50回まで。ネットワーク・タイマー・乱数はありません。",
   "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
-  "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の JSON Schema です。コードが出したステップはどれか1つに合わないと実行されません。",
+  "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, channel?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の、channel はステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の実行直前の状態の JSON Schema です。決まったカテゴリの中のチャンネルにだけ投稿させるなら channel: { properties: { parent_id: { const: \"<カテゴリID>\" } }, required: [\"parent_id\"] } のようにします。コードが出したステップはどれか1つに合わないと実行されません。",
   "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
   "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
   "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
   "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
+  "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
   "  ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
   "  きっかけにできるイベント:",
   triggerSummary(),
@@ -441,16 +470,16 @@ function listRules(rules: RuleTools): AgentTool<any> {
   return tool({
     name: "list_rules",
     label: "ルールを見る",
-    description: "話し手が作ったイベントルールの一覧(ID・名前・状態・きっかけ・許す操作・コード)を返します。ルールを直す依頼のときに使います。",
+    description: "話し手が作ったイベントルールの一覧(ID・名前・有効か・きっかけ・許す操作・コード・持ち越している state)を返します。ルールを直す依頼のときに使います。",
     parameters: Type.Object({}),
     execute: async () => {
       const items = rules.list();
       if (items.length === 0) return text("ルールはありません");
       return text(
         items
-          .map(({ rule, shown }) =>
+          .map(({ rule, shown, state }) =>
             shown
-              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, code: rule.code })
+              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, code: rule.code, state: state ?? null })
               : `${rule.id} ${rule.name}: このチャンネルでは扱えないチャンネルを使うため、内容は表示できません`,
           )
           .join("\n"),

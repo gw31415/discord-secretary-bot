@@ -8,7 +8,7 @@ import type {
 } from "discord-api-types/v10";
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
-import { paramsText, triggerLabel } from "../rules/panel.ts";
+import { limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
 import type { Body } from "./catalog.ts";
 import { dialogFileName } from "./files.ts";
 import { RISK_LABEL } from "./types.ts";
@@ -332,6 +332,7 @@ function ruleTexts(plan: Plan): string[] {
       [
         `**${r.name}**${r.replaces ? `(「${r.replaces.name}」v${r.replaces.version} を置き換え)` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
         `きっかけ: ${triggerLabel(r.trigger)}`,
+        ...(r.limits ? [limitsLabel(r.limits)] : []),
         ...beforeAfter(r),
         `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n")}`,
         ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),

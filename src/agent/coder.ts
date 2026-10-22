@@ -76,6 +76,8 @@ const PLAN = [
 const RULE = [
   "- このコードはイベントルールで、決まったイベントが起きるたびに動きます。event は発火したイベントのペイロード、eventName はどのきっかけで動いたか(\"CHANNEL_CREATE\" など)、params はルールと一緒に登録された値です。",
   "- 変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...]) を返します。前のステップの結果は { $ref: \"steps.<id>.result.id\" } で参照できます。",
+  "- batch はその回のイベント全部(古い順の [{ eventName, event }])で、まとめて実行するルールでは複数件、それ以外は1件です。SCHEDULE(時刻)のときの event は { guild_id, scheduled_at, schedule, timezone }、BOT_READY(起動時)のときは { guild_id } です。",
+  "- state は前回の実行で setState(値) した値(最初は null)です。次の実行に持ち越したい値があれば setState で保存します(JSON にできる値。保存されるのは実行が通ったときだけ)。",
   "- 実行は1回10秒・discord.get 50回までです。",
   "- 返すステップは依頼にある「許す操作」に合うものだけにします。合わないステップは実行されません。許す操作で { madeInRun: true } のフィールドには、同じ回の前のステップを指す { $ref: \"steps.<id>.result.id\" } を入れます。",
   "",

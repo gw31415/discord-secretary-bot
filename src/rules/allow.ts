@@ -53,6 +53,11 @@ export function allowShapeProblems(allow: AllowEntry[]): string[] {
       const p = schemaProblem(entry.target, `${where}.target`);
       if (p) problems.push(p);
     }
+    if (entry.channel !== undefined) {
+      if (!spec.channel) problems.push(`${where}: この操作にはチャンネルの条件を付けられません`);
+      const p = schemaProblem(entry.channel, `${where}.channel`);
+      if (p) problems.push(p);
+    }
     if (entry.maxStepsPerRun !== undefined && !(Number.isInteger(entry.maxStepsPerRun) && entry.maxStepsPerRun >= 1 && entry.maxStepsPerRun <= MAX_STEPS)) {
       problems.push(`${where}: maxStepsPerRun は1〜${MAX_STEPS}の整数にしてください`);
     }
@@ -90,7 +95,7 @@ function withoutMadeInRun(schema: Record<string, unknown>, fields: string[]): Re
  * Whether a step fits an entry. Values still waiting on an earlier step pass until they are known.
  * `original` is the step before its refs were filled in, for madeInRun fields.
  */
-export function fits(step: Step, entry: AllowEntry, targets?: Targets, original: Step = step): boolean {
+export function fits(step: Step, entry: AllowEntry, targets?: Targets, original: Step = step, channels?: Targets): boolean {
   if (step.op !== entry.op) return false;
   for (const [name, schema] of Object.entries(entry.path ?? {})) {
     if (isMadeInRun(schema)) {
@@ -118,7 +123,16 @@ export function fits(step: Step, entry: AllowEntry, targets?: Targets, original:
     const target = targets.get(step.id);
     if (!target || !Value.Check(entry.target as never, target)) return false;
   }
+  if (entry.channel !== undefined && channels?.has(step.id)) {
+    const channel = channels.get(step.id);
+    if (!channel || !Value.Check(entry.channel as never, channel)) return false;
+  }
   return true;
+}
+
+/** Whether any entry for this step's operation has conditions on the channel it acts in. */
+export function needsChannel(step: Step, allow: AllowEntry[]): boolean {
+  return allow.some((entry) => entry.op === step.op && entry.channel !== undefined);
 }
 
 /** Whether any entry for this step's operation has conditions on its target. */
@@ -140,11 +154,11 @@ function withoutRefs(body: unknown): unknown {
 }
 
 /** Steps outside the allow list, and entries used more often than they permit. */
-export function allowProblems(steps: Step[], allow: AllowEntry[], targets?: Targets, originals?: Step[]): string[] {
+export function allowProblems(steps: Step[], allow: AllowEntry[], targets?: Targets, originals?: Step[], channels?: Targets): string[] {
   const problems: string[] = [];
   const used = new Map<number, number>();
   for (const [i, step] of steps.entries()) {
-    const index = allow.findIndex((entry) => fits(step, entry, targets, originals?.[i]));
+    const index = allow.findIndex((entry) => fits(step, entry, targets, originals?.[i], channels));
     const label = CATALOG.get(step.op)?.label ?? step.op;
     if (index < 0) {
       problems.push(`${step.id}(${label}): 許可された操作の範囲外です`);
@@ -242,6 +256,7 @@ export function allowLines(allow: AllowEntry[], label: (id: string) => string = 
     if (spec?.channel && !entry.path?.[spec.channel]) parts.push(`${spec.channel}: どこでも`);
     if (entry.body !== undefined) parts.push(`本文: ${compact(entry.body)}`);
     if (entry.target !== undefined) parts.push(`対象の条件: ${compact(entry.target)}`);
+    if (entry.channel !== undefined) parts.push(`チャンネルの条件: ${compact(entry.channel)}`);
     parts.push(entry.maxStepsPerRun !== undefined ? `1回に${entry.maxStepsPerRun}件まで` : `1回に${MAX_STEPS}件まで`);
     return `- ${parts.join(" / ")}`;
   });

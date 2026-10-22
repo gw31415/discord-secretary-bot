@@ -11,7 +11,9 @@ import type { Plan, Step, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { SandboxResult } from "../sandbox.ts";
-import { createdKindOf, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
+import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
+import { createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
+import { MAX_STATE_JSON } from "./types.ts";
 import type { Rule, RunOutcome } from "./types.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
@@ -20,10 +22,14 @@ import type { Rule, RunOutcome } from "./types.ts";
 // runs them without a dialog. Safety: the bot's own changes are ignored unless
 // the rule opts in, each rule is rate limited, repeated failures switch it off,
 // and anyone with Manage Server can stop every rule in the server at once.
+// SCHEDULE rules fire from tick() once a minute; rules with a debounce wait for
+// a quiet moment and run once on the batch of events.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
 const MAX_ERROR = 500;
+/** A debounced rule runs at the latest this many debounce periods after the first event. */
+const MAX_WAIT_PERIODS = 5;
 
 export interface RuleEngineDeps {
   store: Store;
@@ -36,6 +42,23 @@ export interface RuleEngineDeps {
   notifyOwner?: (userId: string, content: string) => Promise<void>;
   log: (message: string, error?: unknown) => void;
   run?: typeof runSandboxed;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}
+
+/** One event of a run, as the code reads it in `batch`. */
+export interface BatchItem {
+  eventName: string;
+  event: Data;
+}
+
+/**
+ * Who made a bot-made event: the rule whose write it was, null for a write
+ * from a conversation, undefined when it cannot be told (the bot's own posts
+ * and reactions).
+ */
+export interface Origin {
+  rule: string | null | undefined;
 }
 
 export function haltKey(guildId: string): string {
@@ -51,8 +74,10 @@ type Data = Record<string, any>;
 
 export class RuleEngine {
   readonly deps: RuleEngineDeps;
-  /** `${guildId}\u0000${resource}` -> when the bot last wrote it. */
-  readonly #recent = new Map<string, number>();
+  /** `${guildId}\u0000${resource}` -> when the bot last wrote it, and for which rule. */
+  readonly #recent = new Map<string, { at: number; rule: string | null }>();
+  /** Debounced rules waiting for a quiet moment. */
+  readonly #pending = new Map<string, { version: number; first: number; timer: unknown; batch: BatchItem[] }>();
   /** Start times of recent runs per rule, for the per-minute limit. */
   readonly #runs = new Map<string, number[]>();
   /** Rules whose rate-limit skip was already recorded this minute, so a flood leaves one row. */
@@ -71,7 +96,7 @@ export class RuleEngine {
 
   /** The Planner reports each write, so events it causes are recognised. */
   noteWrite(plan: Plan, step: Step, response: unknown): void {
-    const now = this.deps.now();
+    const now = { at: this.deps.now(), rule: plan.rule?.id ?? null };
     const spec = CATALOG.get(step.op);
     const target = spec?.target?.(step.pathParams, plan.guildId);
     if (target) this.#recent.set(`${plan.guildId}\u0000${target}`, now);
@@ -91,24 +116,49 @@ export class RuleEngine {
       const id = (response as { id?: string } | null)?.id;
       if (id) this.#recent.set(`${plan.guildId}\u0000message:${step.pathParams.channel}/${id}`, now);
     }
+    if (step.op === "DELETE /channels/{channel}/messages/{message}/reactions/{emoji}/{user}") {
+      const p = step.pathParams as Record<string, string>;
+      this.#recent.set(`${plan.guildId}\u0000${reactionKey(p.channel!, p.message!, p.emoji!, p.user!)}`, now);
+    }
   }
 
-  #recentlyWritten(guildId: string, key: string): boolean {
-    const at = this.#recent.get(`${guildId}\u0000${key}`);
-    return at !== undefined && this.deps.now() - at < RECENT_WRITE_MS;
+  #recentWrite(guildId: string, key: string): { at: number; rule: string | null } | undefined {
+    const write = this.#recent.get(`${guildId}\u0000${key}`);
+    return write && this.deps.now() - write.at < RECENT_WRITE_MS ? write : undefined;
   }
 
   /** Whether the bot caused the event, as far as the payload and its own recent writes tell. */
   byBot(event: string, guildId: string, data: Data): boolean {
+    return this.origin(event, guildId, data) !== null;
+  }
+
+  /** Who among the bot's writers caused the event, or null when the bot did not. */
+  origin(event: string, guildId: string, data: Data): Origin | null {
     const spec = TRIGGERS[event]!;
-    if (spec.actorId?.(data) === this.deps.selfId()) return true;
-    if (spec.resources?.(data).some((key) => this.#recentlyWritten(guildId, key))) return true;
-    if (spec.createdKind && this.#recentlyWritten(guildId, `create:${spec.createdKind}`)) return true;
-    for (const key of spec.outcomes?.(data) ?? []) {
-      if (!this.#recentlyWritten(guildId, key)) continue;
-      this.#recent.delete(`${guildId}\u0000${key}`);
-      return true;
+    for (const key of spec.resources?.(data) ?? []) {
+      const write = this.#recentWrite(guildId, key);
+      if (write) return { rule: write.rule };
     }
+    if (spec.createdKind) {
+      const write = this.#recentWrite(guildId, `create:${spec.createdKind}`);
+      if (write) return { rule: write.rule };
+    }
+    for (const key of spec.outcomes?.(data) ?? []) {
+      const write = this.#recentWrite(guildId, key);
+      if (!write) continue;
+      this.#recent.delete(`${guildId}\u0000${key}`);
+      return { rule: write.rule };
+    }
+    if (spec.actorId?.(data) === this.deps.selfId()) return { rule: undefined };
+    return null;
+  }
+
+  /** Whether a rule fires on an event the bot made, by its include_bot_origin setting. */
+  #firesOnBot(rule: Rule, origin: Origin): boolean {
+    const setting = rule.trigger.includeBotOrigin;
+    if (setting === true) return true;
+    // Its own writes, and writes nobody can tell apart from them, would loop.
+    if (setting === "other_rules") return origin.rule !== undefined && origin.rule !== rule.id;
     return false;
   }
 
@@ -137,13 +187,82 @@ export class RuleEngine {
     const rules = this.deps.store.enabledRules(guildId, event);
     if (rules.length === 0 || this.halted(guildId)) return;
     const guild = cache.guild;
-    const bot = this.byBot(event, guildId, data);
-    const eventId = eventIdOf(event, data);
+    const origin = TRIGGERS[event]!.synthetic ? null : this.origin(event, guildId, data);
     for (const rule of rules) {
-      if (bot && !rule.trigger.includeBotOrigin) continue;
+      if (origin && !this.#firesOnBot(rule, origin)) continue;
       if (!this.#visible(rule, guild, event, data)) continue;
-      if (!this.#allowRun(rule)) continue;
-      this.#enqueue(guildId, () => this.#run(rule.id, rule.version, eventId, data, event));
+      this.#fire(rule, event, data);
+    }
+  }
+
+  /**
+   * Fires SCHEDULE rules whose cron matches the minute of `now`, in the given
+   * servers. Called once a minute; a minute is never fired twice.
+   */
+  tick(guildIds: Iterable<string>, now = this.deps.now()): void {
+    const minute = Math.floor(now / 60_000) * 60_000;
+    if (minute <= this.#lastTick) return;
+    this.#lastTick = minute;
+    for (const guildId of guildIds) {
+      if (this.halted(guildId) || !this.deps.caches.get(guildId)?.guild) continue;
+      for (const rule of this.deps.store.enabledRules(guildId, "SCHEDULE")) {
+        try {
+          if (!cronMatches(parseCron(rule.trigger.schedule ?? ""), minute, rule.trigger.timezone ?? DEFAULT_TIMEZONE)) continue;
+        } catch {
+          continue; // Checked at approval; a schedule that no longer parses just never fires.
+        }
+        this.#fire(rule, "SCHEDULE", syntheticEvent("SCHEDULE", guildId, rule.trigger, minute)!);
+      }
+    }
+  }
+
+  #lastTick = 0;
+
+  /** Runs now, or after the rule's debounce. */
+  #fire(rule: Rule, event: string, data: Data): void {
+    if (rule.trigger.debounceSeconds) {
+      this.#debounce(rule, { eventName: event, event: data });
+      return;
+    }
+    if (!this.#allowRun(rule)) return;
+    this.#enqueue(rule.guildId, () => this.#run(rule.id, rule.version, eventIdOf(event, data), [{ eventName: event, event: data }]));
+  }
+
+  #debounce(rule: Rule, item: BatchItem): void {
+    const { setTimer = defaultSetTimer, clearTimer = defaultClearTimer } = this.deps;
+    const now = this.deps.now();
+    let pending = this.#pending.get(rule.id);
+    if (pending && pending.version !== rule.version) {
+      clearTimer(pending.timer);
+      pending = undefined;
+    }
+    pending ??= { version: rule.version, first: now, timer: null, batch: [] };
+    pending.batch.push(item);
+    if (pending.batch.length > MAX_BATCH) pending.batch.shift();
+    clearTimer(pending.timer);
+    const period = rule.trigger.debounceSeconds! * 1000;
+    const wait = Math.max(0, Math.min(period, pending.first + period * MAX_WAIT_PERIODS - now));
+    pending.timer = setTimer(() => this.#flush(rule.id), wait);
+    this.#pending.set(rule.id, pending);
+  }
+
+  /** A debounced rule's quiet moment came: one run on its batch, the latest event as `event`. */
+  #flush(ruleId: string): void {
+    const pending = this.#pending.get(ruleId);
+    if (!pending) return;
+    this.#pending.delete(ruleId);
+    const rule = this.deps.store.getRule(ruleId);
+    const last = pending.batch.at(-1);
+    if (!rule?.enabled || rule.version !== pending.version || !last) return;
+    if (!this.#allowRun(rule)) return;
+    this.#enqueue(rule.guildId, () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), pending.batch));
+  }
+
+  /** Runs every debounced rule now instead of after its wait (tests and shutdown). */
+  flushDebounced(): void {
+    for (const [id, pending] of this.#pending) {
+      (this.deps.clearTimer ?? defaultClearTimer)(pending.timer);
+      this.#flush(id);
     }
   }
 
@@ -177,14 +296,20 @@ export class RuleEngine {
     while (this.#queues.size > 0) await Promise.all(this.#queues.values());
   }
 
-  async #run(ruleId: string, version: number, eventId: string, data: Data, eventName: string): Promise<void> {
+  async #run(ruleId: string, version: number, eventId: string, batch: BatchItem[]): Promise<void> {
     const { store } = this.deps;
     // The rule may have been switched off, changed or stopped while queued.
     const rule = store.getRule(ruleId);
     if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId)) return;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
-    const result = await this.evaluate(rule, data, undefined, eventName);
+    const last = batch.at(-1)!;
+    const result = await this.evaluate(rule, last.event, undefined, last.eventName, batch, store.getRuleState(rule.id));
+    // Kept only when the run went through, so a failed run is retried from the same state.
+    const keepState = () => {
+      if (result.state) store.setRuleState(rule.id, result.state.value);
+    };
     if (result.kind !== "steps") {
+      if (result.kind === "none") keepState();
       store.finishRuleRun(runId, { outcome: result.kind === "none" ? "no_change" : "failed", error: result.kind === "error" ? result.error : null, logs: result.logs });
       this.#settle(rule, result.kind === "error", result.kind === "error" ? result.error : null);
       return;
@@ -206,6 +331,7 @@ export class RuleEngine {
       outcome = e instanceof PlanRejected ? "rejected" : "failed";
       error = e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e);
     }
+    if (outcome === "executed") keepState();
     store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
     store.audit({ kind: "user", userId: rule.ownerId, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     this.#settle(rule, outcome === "failed" || outcome === "rejected", error);
@@ -229,7 +355,14 @@ export class RuleEngine {
    * Runs the rule's code on one event and returns the steps it asks for.
    * Used for real runs and for dry runs, which stop here.
    */
-  async evaluate(rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params">, event: unknown, reader?: Pick<Reader, "get">, eventName: string | null = null): Promise<Evaluation> {
+  async evaluate(
+    rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params">,
+    event: unknown,
+    reader?: Pick<Reader, "get">,
+    eventName: string | null = null,
+    batch: BatchItem[] = eventName ? [{ eventName, event: event as Data }] : [],
+    state: unknown = null,
+  ): Promise<Evaluation> {
     let result: SandboxResult;
     try {
       const source = reader ?? this.ownerReader(rule.guildId, rule.ownerId);
@@ -240,6 +373,8 @@ export class RuleEngine {
           actor: { kind: "user", userId: rule.ownerId, via: "rule" },
           event,
           eventName,
+          batch,
+          state,
           params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
         },
@@ -249,12 +384,16 @@ export class RuleEngine {
       return { kind: "error", error: (e instanceof Error ? e.message : String(e)).slice(0, MAX_ERROR), logs: [] };
     }
     if (!result.ok) return { kind: "error", error: (result.error ?? "不明なエラー").slice(0, MAX_ERROR), logs: result.logs };
+    if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {
+      return { kind: "error", error: `setState の値はJSONで${MAX_STATE_JSON}文字までです`, logs: result.logs };
+    }
+    const saved = result.state ? { state: result.state } : {};
     const value = result.value as { steps?: unknown; rules?: unknown[] } | null | undefined;
-    if (value === undefined || value === null) return { kind: "none", logs: result.logs };
+    if (value === undefined || value === null) return { kind: "none", logs: result.logs, ...saved };
     if (Array.isArray(value.rules) && value.rules.length > 0) return { kind: "error", error: "ルールの中からルールは作れません", logs: result.logs };
     if (!Array.isArray(value.steps)) return { kind: "error", error: "コードは plan([...]) を return してください", logs: result.logs };
-    if (value.steps.length === 0) return { kind: "none", logs: result.logs };
-    return { kind: "steps", drafts: value.steps as StepDraft[], logs: result.logs };
+    if (value.steps.length === 0) return { kind: "none", logs: result.logs, ...saved };
+    return { kind: "steps", drafts: value.steps as StepDraft[], logs: result.logs, ...saved };
   }
 
   /** What a rule reads with: everything its owner and the bot can both read. */
@@ -275,7 +414,7 @@ export class RuleEngine {
   /** Forgets old bookkeeping. Called every minute. */
   sweep(): void {
     const now = this.deps.now();
-    for (const [key, at] of this.#recent) if (now - at >= RECENT_WRITE_MS) this.#recent.delete(key);
+    for (const [key, write] of this.#recent) if (now - write.at >= RECENT_WRITE_MS) this.#recent.delete(key);
     for (const [key, until] of this.#limitedNoted) if (until <= now) this.#limitedNoted.delete(key);
     for (const [key, times] of this.#runs) {
       const recent = times.filter((t) => now - t < 60_000);
@@ -285,10 +424,21 @@ export class RuleEngine {
   }
 }
 
+function defaultSetTimer(fn: () => void, ms: number): unknown {
+  const timer = setTimeout(fn, ms);
+  timer.unref?.();
+  return timer;
+}
+
+function defaultClearTimer(handle: unknown): void {
+  if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
+}
+
+/** `state` is set when the code called setState: what to keep if the run goes through. */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[] }
-  | { kind: "none"; logs: string[] }
-  | { kind: "error"; error: string; logs: string[] };
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown } }
+  | { kind: "none"; logs: string[]; state?: { value: unknown } }
+  | { kind: "error"; error: string; logs: string[]; state?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {

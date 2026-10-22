@@ -53,6 +53,8 @@ export interface OpSpec {
   grants?: (body: Body) => bigint;
   /** Absent means the operation takes no body. */
   body?: TSchema;
+  /** Path params that are not ids, with the format each must have. */
+  pathFormats?: Record<string, { pattern: RegExp; hint: string }>;
   /** The resource the step acts on; its state is a precondition and is snapshotted before execution. */
   target?: (p: Params, guildId: string) => string;
   /** Fields of the target the step depends on (besides existence). */
@@ -135,6 +137,11 @@ const ROLE_FIELDS = {
 
 const MEMBER_FIELDS = ["nick", "communication_disabled_until", "mute", "deaf"];
 
+/** A Unicode emoji, or name:id for a server's custom one, as the reaction routes take it. */
+export const EMOJI_FORMAT = { pattern: /^(?!\.+$)(?:[^\s:/?#%]{1,32}|[A-Za-z0-9_]{2,32}:\d{1,20})$/u, hint: "絵文字そのもの(例: 👍)か、カスタム絵文字の 名前:ID" };
+
+const REACTION_PATH = "/channels/{channel}/messages/{message}/reactions/{emoji}";
+
 const ops: OpSpec[] = [
   {
     op: "POST /channels/{channel}/messages",
@@ -169,6 +176,57 @@ const ops: OpSpec[] = [
     body: Type.Object({ messages: Type.Array(Id, { minItems: 2, maxItems: 100, uniqueItems: true }) }, { additionalProperties: false }),
     channels: (p) => [p.channel],
     describe: (p, b, _before, l) => ({ target: l(p.channel), change: `${(b?.messages as unknown[]).length}件を削除(2週間より古いものは消せません)` }),
+  },
+  {
+    // Only the bot's own messages can have their text changed.
+    op: "PATCH /channels/{channel}/messages/{message}",
+    label: "Botの投稿を編集",
+    risk: "write",
+    channel: "channel",
+    always: P.ViewChannel | P.ReadMessageHistory | P.ManageMessages,
+    body: Type.Object({ content: Content }, { additionalProperties: false }),
+    target: (p) => `message:${p.channel}/${p.message}`,
+    targetFields: () => ["content"],
+    channels: (p) => [p.channel],
+    describe: (p, b, before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}`, change: `${before ? `「${short(before.content, 40)}」→ ` : ""}「${short(b?.content, 60)}」` }),
+    inverse: (p, _b, snapshot) => (typeof snapshot?.content === "string" && snapshot.content ? { op: "PATCH /channels/{channel}/messages/{message}", path: { channel: p.channel, message: p.message }, body: { content: snapshot.content } } : null),
+  },
+  {
+    op: `PUT ${REACTION_PATH}/@me`,
+    label: "リアクションを付ける",
+    risk: "write",
+    channel: "channel",
+    always: P.ViewChannel | P.ReadMessageHistory | P.AddReactions,
+    pathFormats: { emoji: EMOJI_FORMAT },
+    target: (p) => `message:${p.channel}/${p.message}`,
+    channels: (p) => [p.channel],
+    describe: (p, _b, before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}${before ? `「${short(before.content, 40)}」` : ""}`, change: `${p.emoji} を付ける` }),
+    inverse: (p) => ({ op: `DELETE ${REACTION_PATH}/@me`, path: { channel: p.channel, message: p.message, emoji: p.emoji } }),
+  },
+  {
+    op: `DELETE ${REACTION_PATH}/@me`,
+    label: "Botのリアクションを外す",
+    risk: "write",
+    channel: "channel",
+    always: P.ViewChannel | P.ReadMessageHistory,
+    pathFormats: { emoji: EMOJI_FORMAT },
+    target: (p) => `message:${p.channel}/${p.message}`,
+    channels: (p) => [p.channel],
+    describe: (p, _b, before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}${before ? `「${short(before.content, 40)}」` : ""}`, change: `Botの ${p.emoji} を外す` }),
+    inverse: (p) => ({ op: `PUT ${REACTION_PATH}/@me`, path: { channel: p.channel, message: p.message, emoji: p.emoji } }),
+  },
+  {
+    // Someone else's reaction cannot be put back by the bot, so this has no inverse.
+    op: `DELETE ${REACTION_PATH}/{user}`,
+    label: "リアクションを外す",
+    risk: "write",
+    channel: "channel",
+    always: P.ViewChannel | P.ReadMessageHistory | P.ManageMessages,
+    pathFormats: { emoji: EMOJI_FORMAT },
+    target: (p) => `message:${p.channel}/${p.message}`,
+    channels: (p) => [p.channel],
+    mentions: (p) => [{ id: p.user, kind: "user" }],
+    describe: (p, _b, _before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}`, change: `${l(p.user)} の ${p.emoji} を外す` }),
   },
   {
     op: "PUT /channels/{channel}/messages/pins/{message}",

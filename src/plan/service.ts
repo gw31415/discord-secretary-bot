@@ -17,7 +17,7 @@ import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts
 import { isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
 import type { Reader } from "../discord/reader.ts";
-import { allowProblems, allowRisk, needsTarget } from "../rules/allow.ts";
+import { allowProblems, allowRisk, needsChannel, needsTarget } from "../rules/allow.ts";
 import type { Targets } from "../rules/allow.ts";
 import type { RuleProposal } from "../rules/types.ts";
 import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
@@ -163,6 +163,7 @@ function ruleInputOf(r: PlanRuleDraft): RuleInput {
     ...(r.params ? { params: r.params } : {}),
     ...(r.replaces ? { replaces: r.replaces.id } : {}),
     ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),
+    ...(r.limits ? { limits: r.limits } : {}),
   };
 }
 
@@ -325,8 +326,9 @@ export class Planner {
     const steps = normalizeSteps(input.drafts, input.guildId, id);
     const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
     const targets = await this.#targets(input.guildId, steps, input.rule.allow);
+    const channels = await this.#channelStates(steps, input.rule.allow);
     const problems = [
-      ...allowProblems(steps, input.rule.allow, targets),
+      ...allowProblems(steps, input.rule.allow, targets, undefined, channels),
       ...steps.flatMap((s) => permissionProblems(s, ctx)),
       ...steps.filter((s) => stepFiles(s).length > 0).map((s) => `ステップ ${s.id}: ルールの投稿には画像を付けられません`),
     ];
@@ -364,6 +366,18 @@ export class Planner {
       targets.set(step.id, await this.resource(guildId, spec.target(step.pathParams, guildId)));
     }
     return targets;
+  }
+
+  /** Current state of the channel each step acts in, where an allow list puts conditions on it. */
+  async #channelStates(steps: Step[], allow: AllowEntry[]): Promise<Targets> {
+    const channels: Targets = new Map();
+    for (const step of steps) {
+      const param = specOf(step).channel;
+      const id = param ? step.pathParams[param] : undefined;
+      if (typeof id !== "string" || !needsChannel(step, allow)) continue;
+      channels.set(step.id, await this.#get(`/channels/${id}`));
+    }
+    return channels;
   }
 
   async #summarize(code: string, actorId: string): Promise<string | null> {
@@ -767,7 +781,9 @@ export class Planner {
           const stepProblems = [
             ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
             // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
-            ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step]) : []),
+            ...(plan.rule
+              ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], await this.#channelStates([resolved], plan.rule.allow))
+              : []),
           ];
           if (stepProblems.length > 0) throw new Error(stepProblems.join(" / "));
           if (key) store.saveSnapshot(plan.id, step.id, key, before);
