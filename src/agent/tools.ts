@@ -41,7 +41,7 @@ function componentText(components: unknown[] | undefined): string[] {
   return out;
 }
 
-export function formatMessage(m: Omit<APIMessage, "reactions">): string {
+export function formatMessage(m: Omit<APIMessage, "reactions"> & Partial<Pick<APIMessage, "reactions">>): string {
   const name = m.author.global_name ?? m.author.username;
   const parts = [`[${m.id}] ${m.timestamp.slice(0, 16).replace("T", " ")} ${name}(${m.author.id})${m.author.bot ? "[bot]" : ""}`];
   if (m.message_reference?.message_id) parts.push(`返信先:${m.message_reference.message_id}`);
@@ -51,6 +51,10 @@ export function formatMessage(m: Omit<APIMessage, "reactions">): string {
     line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : ""}`).join(", ")}]`;
   }
   if (m.embeds.length > 0) line += ` [埋め込み${m.embeds.length}件${m.embeds.some((e) => e.image || e.thumbnail) ? "・画像あり" : ""}]`;
+  if (m.reactions?.length) {
+    const shown = m.reactions.map((r) => `${r.emoji.id ? `:${r.emoji.name}:` : r.emoji.name}${r.count}${r.me ? "(Botも)" : ""}`);
+    line += ` [リアクション: ${shown.join(" ")}]`;
+  }
   return line;
 }
 

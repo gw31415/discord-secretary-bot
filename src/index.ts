@@ -3,11 +3,12 @@ import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { PresenceUpdateStatus } from "discord-api-types/v10";
 import { judgeAddressed } from "./agent/judge.ts";
+import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
 import { loadConfig } from "./config.ts";
 import { Conversations, MAX_MESSAGES_PER_REPLY } from "./conversation.ts";
-import type { GuildMessage } from "./conversation.ts";
+import type { GuildMessage, ReactionAdd } from "./conversation.ts";
 import { Store } from "./db.ts";
 import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
@@ -149,6 +150,12 @@ const conversations = new Conversations({
   makeReader: (scope) => makeReader(scope),
   respond,
   judge: judgeAddressed,
+  // The bot's own way of answering, like a reply post: not a change to the server, so no plan.
+  react: async (channelId, messageId, emoji) => {
+    await client.api.channels.addMessageReaction(channelId, messageId, emoji);
+  },
+  chooseReaction,
+  fetchMessage: (channelId, messageId) => client.api.channels.getMessage(channelId, messageId),
   propose: (input) => planner.propose(input),
   rules: {
     list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
@@ -260,6 +267,11 @@ client.on(GatewayDispatchEvents.MessageCreate, ({ data }) => {
   // The message carries the author's current roles; keep the cache fresh with them.
   if (data.member && !data.author.bot) cache.upsertMember({ roles: data.member.roles, user: data.author });
   void conversations.handle(data as GuildMessage);
+});
+
+client.on(GatewayDispatchEvents.MessageReactionAdd, ({ data }) => {
+  if (!served(data.guild_id) || !caches.get(data.guild_id)?.guild) return;
+  void conversations.reacted(data as ReactionAdd);
 });
 
 client.on(GatewayDispatchEvents.MessageUpdate, ({ data }) => {
