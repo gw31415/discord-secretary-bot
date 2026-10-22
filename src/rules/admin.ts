@@ -28,6 +28,8 @@ export interface AdminDeps {
   caches: Pick<GuildCaches, "get">;
   selfId: () => string;
   now: () => number;
+  /** A rule was added, changed, switched or removed; slash commands may need registering again. */
+  onChange?: (guildId: string) => void;
 }
 
 interface Viewer {
@@ -95,7 +97,7 @@ export class RuleAdmin {
   /** Problems with owning a rule like this: its shape and the permissions its allow list needs. */
   ownershipProblems(guildId: string, ownerId: string, definition: RuleDefinition): string[] {
     const viewer = this.#viewer(guildId, ownerId);
-    const problems = [...allowShapeProblems(definition.allow)];
+    const problems = [...allowShapeProblems(definition.allow, definition.trigger.event === "COMMAND")];
     problems.push(...triggerProblems(definition.trigger));
     const missing = missingPermissions(viewer.guild, viewer.member, definition.allow);
     if (missing.length > 0) problems.push(`許す操作に必要な権限をあなたが持っていません: ${missing.join(", ")}`);
@@ -105,9 +107,23 @@ export class RuleAdmin {
     return problems;
   }
 
+  /** Another enabled rule of the server already using this rule's command name. */
+  #commandClash(guildId: string, trigger: RuleDefinition["trigger"], self?: string): string[] {
+    const name = trigger.command?.name;
+    if (!name) return [];
+    const other = this.deps.store.enabledRules(guildId, "COMMAND").find((r) => r.id !== self && r.trigger.command?.name === name);
+    return other ? [`コマンド名 /${name} はルール「${other.name}」が使っています`] : [];
+  }
+
   /** Registers an approved rule, or a new version of one the owner already has. */
   save(guildId: string, ownerId: string, definition: RuleDefinition, replaces?: string): Rule {
-    const problems = this.ownershipProblems(guildId, ownerId, definition);
+    const rule = this.#save(guildId, ownerId, definition, replaces);
+    this.deps.onChange?.(guildId);
+    return rule;
+  }
+
+  #save(guildId: string, ownerId: string, definition: RuleDefinition, replaces?: string): Rule {
+    const problems = [...this.ownershipProblems(guildId, ownerId, definition), ...this.#commandClash(guildId, definition.trigger, replaces)];
     if (problems.length > 0) throw new AdminDenied(problems.join("\n"));
     const { store } = this.deps;
     const actor = { kind: "user" as const, userId: ownerId, via: "panel" as const };
@@ -143,6 +159,8 @@ export class RuleAdmin {
       if (rule.ownerId !== userId) throw new AdminDenied("ルールを有効にできるのは作成者だけです");
       const missing = missingPermissions(this.#viewer(guildId, userId).guild, this.#viewer(guildId, userId).member, rule.allow);
       if (missing.length > 0) throw new AdminDenied(`許す操作に必要な権限をあなたが持っていません: ${missing.join(", ")}`);
+      const clash = this.#commandClash(guildId, rule.trigger, rule.id);
+      if (clash.length > 0) throw new AdminDenied(`${clash[0]}。そちらを止めるか、コマンド名を変えてください`);
       this.deps.store.setRuleEnabled(rule.id, true, null);
       this.deps.store.audit(actor, "rule.enable", { guildId }, undefined, rule.id);
     } else {
@@ -153,6 +171,7 @@ export class RuleAdmin {
       this.deps.store.setRuleEnabled(rule.id, false, reason);
       this.deps.store.audit(actor, "rule.disable", { guildId, owner: rule.ownerId }, undefined, rule.id);
     }
+    this.deps.onChange?.(guildId);
     return this.deps.store.getRule(rule.id)!;
   }
 
@@ -161,6 +180,7 @@ export class RuleAdmin {
     if (rule.ownerId !== userId) throw new AdminDenied("ルールを削除できるのは作成者だけです");
     this.deps.store.deleteRule(rule.id);
     this.deps.store.audit({ kind: "user", userId, via: "panel" }, "rule.delete", { guildId, name: rule.name, version: rule.version }, undefined, rule.id);
+    this.deps.onChange?.(guildId);
   }
 
   halted(guildId: string): Halt | null {

@@ -285,13 +285,17 @@ function codeBody(plan: Plan, room: number): string[] {
   });
 }
 
+function replyLine(r: PlanRuleDraft): string {
+  return r.dry.reply ? `\n　返事: ${r.dry.reply.slice(0, 200)}` : "";
+}
+
 function dryLine(r: PlanRuleDraft): string {
   const where = r.dry.source ? `${r.dry.source}で` : "";
   switch (r.dry.outcome) {
     case "steps":
-      return `ドライラン(${where}試行): ${r.dry.lines.length}種類の変更をします\n${r.dry.lines.slice(0, 3).map((l) => `　${l}`).join("\n")}`;
+      return `ドライラン(${where}試行): ${r.dry.lines.length}種類の変更をします\n${r.dry.lines.slice(0, 3).map((l) => `　${l}`).join("\n")}${replyLine(r)}`;
     case "none":
-      return `ドライラン(${where}試行): 何も変更しません`;
+      return `ドライラン(${where}試行): 何も変更しません${replyLine(r)}`;
     case "pending":
       return "ドライラン: この変更で作るものを使うため、登録後に動きます(コードがエラーにならないことは確かめました)";
     case "no_event":

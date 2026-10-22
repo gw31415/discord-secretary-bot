@@ -24,6 +24,8 @@ export interface SandboxBindings {
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
   /** Enables createCanvas()/attachImage(); takes the drawn PNG and returns the image's id. */
   attach?: (png: Buffer, name: string) => string;
+  /** Enables reply(text) for a command's run: the words go back to whoever ran the command. */
+  reply?: (text: string) => void;
   /** Enables renderMath()/convertImage(); each returns the new image's id. Options arrive unchecked. */
   media?: {
     math: (tex: string, options: unknown, name: string) => Promise<string>;
@@ -123,6 +125,13 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
         count("convertImage");
         return vm.newString(await media.convert(JSON.parse(vm.getString(source)), JSON.parse(vm.getString(options)), vm.getString(name)));
       }).consume((fn) => vm.setProp(vm.global, "__convert", fn));
+    }
+
+    if (bindings.reply) {
+      const reply = bindings.reply;
+      vm.newFunction("reply", (text) => {
+        reply(String(vm.dump(text)));
+      }).consume((fn) => vm.setProp(vm.global, "reply", fn));
     }
 
     vm.newFunction("log", (...args) => {

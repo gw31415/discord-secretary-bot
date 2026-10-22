@@ -1,5 +1,6 @@
 import { GatewayIntentBits } from "discord-api-types/v10";
 import { DEFAULT_TIMEZONE, scheduleProblems } from "./schedule.ts";
+import { commandProblems } from "./command.ts";
 import type { RuleTrigger } from "./types.ts";
 
 // Gateway events a rule can fire on. Each entry says where the event happened
@@ -176,6 +177,14 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     synthetic: true,
     payload: "guild_id。止まっていた間の変化をまとめて反映するのに使います",
   },
+  COMMAND: {
+    label: "スラッシュコマンドが実行されたとき",
+    intent: 0,
+    synthetic: true,
+    payload: "guild_id, channel_id, command(コマンド名), user { id, username, global_name }(実行した人), member { roles, nick }, options { オプション名: 値 }(user・channel・role はID、省略されたオプションは入りません)。きっかけの command(name・description・options)でコマンドを決めます。reply(\"文\") で実行した人に返事を出せます",
+    channel: (d) => d.channel_id,
+    actorId: (d) => d.user?.id,
+  },
   VOICE_STATE_UPDATE: {
     label: "ボイスチャンネルに入った・出た・移ったとき",
     intent: GatewayIntentBits.GuildVoiceStates,
@@ -247,6 +256,11 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
   if (debounce !== undefined && !(Number.isInteger(debounce) && debounce >= 1 && debounce <= MAX_DEBOUNCE_SECONDS)) {
     problems.push(`きっかけの debounce_seconds は1〜${MAX_DEBOUNCE_SECONDS}の整数にしてください`);
   }
+  if (events.includes("COMMAND")) {
+    if (events.length > 1) problems.push("きっかけ COMMAND はほかのきっかけと一緒にできません");
+    if (debounce !== undefined) problems.push("きっかけ COMMAND には debounce_seconds を付けられません");
+    problems.push(...commandProblems(trigger.command).map((p) => `きっかけ: ${p}`));
+  } else if (trigger.command !== undefined) problems.push("きっかけの command は COMMAND と一緒に使います");
   const origin = trigger.includeBotOrigin;
   if (origin !== undefined && typeof origin !== "boolean" && origin !== "other_rules") problems.push("きっかけの include_bot_origin は true・false・\"other_rules\" のどれかです");
   return problems;

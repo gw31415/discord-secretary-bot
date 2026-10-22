@@ -1,5 +1,7 @@
 import type { API } from "@discordjs/core";
 import { InteractionType, MessageFlags } from "discord-api-types/v10";
+import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
+import type { CommandReport } from "./engine.ts";
 import type { APIInteraction, APIMessage } from "discord-api-types/v10";
 import type { Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
@@ -18,6 +20,7 @@ import type { RuleEngine } from "./engine.ts";
 import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
+import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
 import type { Rule, RuleDefinition, RuleProposal, RuleRun } from "./types.ts";
 
@@ -35,7 +38,7 @@ export interface RuleServiceDeps {
   store: Store;
   caches: Pick<GuildCaches, "get">;
   admin: RuleAdmin;
-  engine: Pick<RuleEngine, "evaluate" | "ownerReader">;
+  engine: Pick<RuleEngine, "evaluate" | "ownerReader" | "runCommand">;
   selfId: () => string;
   now: () => number;
   log: (message: string, error?: unknown) => void;
@@ -94,6 +97,10 @@ export class RuleService {
   /** A real event to try the rule on, read with `reader`; otherwise the agent's sample. */
   async sample(guildId: string, ownerId: string, channelId: string, draft: Pick<RuleProposal, "trigger" | "sampleEvent">, reader: Pick<Reader, "get">): Promise<{ event: unknown; source: string | null }> {
     const event = draft.trigger.event;
+    if (event === "COMMAND" && draft.trigger.command) {
+      const owner = this.deps.caches.get(guildId)?.guild?.members.get(ownerId);
+      return { event: sampleCommandEvent(draft.trigger.command, guildId, channelId, owner, draft.sampleEvent), source: draft.sampleEvent !== undefined ? "AIが用意したオプションであなたが実行したとき" : "あなたがここで実行したとき" };
+    }
     // Events the bot makes itself need no sample: the dry run makes one like the real thing.
     const synthetic = syntheticEvent(event, guildId, draft.trigger, this.deps.now());
     if (synthetic) return { event: synthetic, source: "いま発火したとしたときのイベント" };
@@ -126,7 +133,7 @@ export class RuleService {
     const state = saved && this.deps.store.getRule(saved)?.ownerId === ownerId ? this.deps.store.getRuleState(saved) : null;
     const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
-    const kept = result.state ? { state: JSON.stringify(result.state.value) } : {};
+    const kept = { ...(result.state ? { state: JSON.stringify(result.state.value) } : {}), ...(result.reply !== undefined ? { reply: result.reply } : {}) };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs, ...kept };
     const guild = this.#guild(guildId);
     let steps;
@@ -171,6 +178,9 @@ export class RuleService {
       for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
       const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, summary: null, limits: ruleLimits(r.limits) };
       if (triggerIssues.length === 0) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
+      if (r.trigger.command && triggerIssues.length === 0) {
+        own.push(...this.commandNameProblems(input.guildId, r.trigger.command.name, r.replaces, input.rules.slice(0, i).map((o) => o.trigger.command?.name)));
+      }
       for (const id of pinnedIds(r)) {
         if (!input.shareable.has(id)) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
       }
@@ -231,6 +241,15 @@ export class RuleService {
     return drafts;
   }
 
+  /** A command name must be free in the server, counting this plan's earlier rules; `replaces` may keep its own. */
+  commandNameProblems(guildId: string, name: string, replaces: string | undefined, earlier: Array<string | undefined> = []): string[] {
+    const others = this.deps.store.enabledRules(guildId, "COMMAND").filter((rule) => rule.id !== replaces);
+    const taken = new Set([...others.map((rule) => rule.trigger.command?.name ?? ""), ...earlier.filter((n): n is string => !!n)]);
+    const problems = commandProblems({ name, description: "-" }, taken).filter((p) => p.includes("使っています"));
+    if (!taken.has(name) && others.length >= MAX_CUSTOM_COMMANDS) problems.push(`コマンドは1つのサーバーに${MAX_CUSTOM_COMMANDS}個までです`);
+    return problems;
+  }
+
   /** Registers a plan's rule once its steps have run. Ownership is checked again on the filled-in values. */
   register(guildId: string, ownerId: string, draft: PlanRuleDraft): string {
     const definition: RuleDefinition = {
@@ -282,6 +301,38 @@ export class RuleService {
     const userId = interaction.member?.user.id;
     if (!userId || !interaction.guild_id) return true;
     await this.deps.api.interactions.reply(interaction.id, interaction.token, this.#home(interaction.guild_id, userId));
+    return true;
+  }
+
+  /** A custom slash command: runs its rule and tells whoever ran it how it went. */
+  async handleCustomCommand(interaction: APIInteraction): Promise<boolean> {
+    const name = commandName(interaction);
+    if (!name || RESERVED_COMMANDS.has(name)) return false;
+    const { api, store } = this.deps;
+    const guildId = interaction.guild_id;
+    const member = interaction.member;
+    if (!guildId || !member) return true;
+    const rule = store.enabledRules(guildId, "COMMAND").find((r) => r.trigger.command?.name === name);
+    const ephemeral = (content: string) => api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+    if (!rule?.trigger.command) {
+      await ephemeral("このコマンドは今は使えません(ルールが止まっているか、削除されました)");
+      return true;
+    }
+    const needed = permissionBits(rule.trigger.command.permissions);
+    // Discord sends the member's permissions in this channel with the interaction.
+    if (needed && (BigInt(member.permissions) & needed) !== needed) {
+      await ephemeral(`このコマンドを使うには ${rule.trigger.command.permissions!.join(", ")} の権限が必要です`);
+      return true;
+    }
+    await api.interactions.defer(interaction.id, interaction.token, rule.trigger.command.public ? {} : { flags: MessageFlags.Ephemeral });
+    let report: CommandReport;
+    try {
+      report = await this.deps.engine.runCommand(rule, commandEvent(interaction));
+    } catch (e) {
+      this.deps.log(`コマンド /${name} の実行に失敗`, e);
+      report = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, steps: 0 };
+    }
+    await api.interactions.editReply(interaction.application_id, interaction.token, { content: commandReplyText(rule.name, report), allowed_mentions: { parse: [] } });
     return true;
   }
 
@@ -410,4 +461,17 @@ export class RuleService {
       allowed_mentions: { parse: [] },
     });
   }
+}
+
+/** What whoever ran a command sees: the code's reply, or how the run went. */
+export function commandReplyText(ruleName: string, report: CommandReport): string {
+  const failed = report.outcome === "failed" || report.outcome === "rejected" || report.outcome === "skipped" || report.outcome === "rate_limited";
+  const status = failed
+    ? `⚠️ 実行できませんでした: ${(report.error ?? "不明なエラー").slice(0, 500)}`
+    : report.reply
+      ? null
+      : report.outcome === "executed"
+        ? `「${ruleName}」を実行しました(${report.steps}件の変更)`
+        : "変更することはありませんでした";
+  return [report.reply, status].filter((t): t is string => !!t).join("\n").slice(0, 2000);
 }

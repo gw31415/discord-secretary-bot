@@ -72,6 +72,7 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 export function triggerLabel(trigger: Rule["trigger"]): string {
   const label = triggerEvents(trigger)
     .map((e) => {
+      if (e === "COMMAND" && trigger.command) return `\`/${trigger.command.name}\` が実行されたとき${trigger.command.public ? "(返事は全員に見えます)" : ""}`;
       const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
       return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
     })
@@ -111,6 +112,7 @@ export function dryRunText(dry: RuleDryRun): string {
       if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
   }
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
+  if (dry.reply !== undefined) body.push(`返事: ${clip(dry.reply, 300)}`);
   if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${clip(dry.state, 300)}\``);
   if (dry.logs.length > 0) body.push(`-# log: ${clip(dry.logs.slice(0, 5).join(" / "), 300)}`);
   return [head, ...body].join("\n");

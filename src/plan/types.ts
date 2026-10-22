@@ -167,6 +167,8 @@ export interface RuleDryRun {
   logs: string[];
   /** What setState would keep, as JSON; absent when the code did not call it. */
   state?: string;
+  /** What a command's code would say back with reply(). */
+  reply?: string;
 }
 
 export interface PlanSource {
