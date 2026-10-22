@@ -56,3 +56,15 @@ test("a rule's code reads which trigger fired as eventName", async () => {
   assert.equal((await runSandboxed("return eventName", { ...bindings, eventName: "CHANNEL_CREATE" }, RULE_SANDBOX_LIMITS)).value, "CHANNEL_CREATE");
   assert.equal((await runSandboxed("return eventName", bindings, RULE_SANDBOX_LIMITS)).value, null);
 });
+
+test("rule code reads its state and sets the next one; other code has neither", async () => {
+  const { runSandboxed, RULE_SANDBOX_LIMITS, AGENT_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const bindings = { guildId: "100", actor: { kind: "user" as const, userId: "1" }, get: async () => null };
+  const r = await runSandboxed("const s = state || { n: 0 }; s.n++; setState(s); s.n = 99; return null", { ...bindings, state: { n: 1 } }, RULE_SANDBOX_LIMITS);
+  assert.deepEqual(r.state, { value: { n: 2 } });
+  assert.equal(r.value, null);
+  const untouched = await runSandboxed("return plan([])", { ...bindings, state: null }, RULE_SANDBOX_LIMITS);
+  assert.equal(untouched.state, undefined);
+  const agent = await runSandboxed("return [typeof state, typeof setState]", bindings, AGENT_SANDBOX_LIMITS);
+  assert.deepEqual(agent.value, ["undefined", "undefined"]);
+});

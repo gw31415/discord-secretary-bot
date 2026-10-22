@@ -154,6 +154,8 @@ export interface RuleDryRun {
   lines: string[];
   problems: string[];
   logs: string[];
+  /** What setState would keep, as JSON; absent when the code did not call it. */
+  state?: string;
 }
 
 export interface PlanSource {

@@ -17,7 +17,7 @@ import { PlanRejected } from "../plan/validate.ts";
 import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
 import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
 import { MAX_BATCH, MAX_DEBOUNCE_SECONDS, MAX_TRIGGER_EVENTS, triggerSummary } from "../rules/triggers.ts";
-import { MAX_LIMITS } from "../rules/types.ts";
+import { MAX_LIMITS, MAX_STATE_JSON } from "../rules/types.ts";
 import type { Rule, RuleProposal, RuleRun } from "../rules/types.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
@@ -95,7 +95,7 @@ export type Propose = (drafts: StepDraft[], code?: string, rules?: RuleProposal[
 
 export interface RuleTools {
   /** The speaker's rules in this server; `shown` is false when its contents may not appear in this channel. */
-  list: () => Array<{ rule: Rule; shown: boolean }>;
+  list: () => Array<{ rule: Rule; shown: boolean; state?: unknown }>;
   /** Recent runs of one of the speaker's rules; null when it is not theirs or not shown here. */
   runs: (ruleId: string, limit: number) => RuleRun[] | null;
 }
@@ -326,7 +326,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask(r), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runSandboxed(code, { ...bindings, event: event ?? null, params: r.params ?? null }, RULE_SANDBOX_LIMITS),
+          run: (code, event) => runSandboxed(code, { ...bindings, event: event ?? null, params: r.params ?? null, state: null }, RULE_SANDBOX_LIMITS),
           tools,
         });
         return { ...rest, code };
@@ -385,6 +385,7 @@ const RULES_DESCRIPTION = [
   "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。true はBotの変更すべてで動き、\"other_rules\" はほかのルールや会話からの変更では動くがこのルール自身の変更では動きません(Botの投稿・リアクションでは動きません)。ほかのルールの結果に合わせて直すルール(例: 並べ替えのあとに一覧を作り直す)は \"other_rules\" にします。",
   "  時刻で動かすときは trigger_event(または more_trigger_events)に SCHEDULE を入れ、schedule に cron(分 時 日 月 曜日。例: 毎朝4時は \"0 4 * * *\"、10分おきは \"*/10 * * * *\")を、必要なら timezone(既定 Asia/Tokyo)を書きます。イベントのきっかけと一緒に使えます(例: チャンネルの作成・変更と毎日4時の作り直し)。BOT_READY はBotの起動・再接続のたびに動くので、止まっていた間の変化を取り込めます。",
   "  debounce_seconds: 短い間にイベントがまとめて来るとき(並べ替えでチャンネルの変更が何件も届くなど)に付けると、最後のイベントからその秒数待って1回だけ動きます。コードはその間のイベントを batch(古い順の [{ eventName, event }]。最大" + MAX_BATCH + "件)で読めます。batch はいつもあり、まとめないときは1件です。",
+  "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
   "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
   "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log。実行は1回10秒・discord.get 50回まで。ネットワーク・タイマー・乱数はありません。",
@@ -441,16 +442,16 @@ function listRules(rules: RuleTools): AgentTool<any> {
   return tool({
     name: "list_rules",
     label: "ルールを見る",
-    description: "話し手が作ったイベントルールの一覧(ID・名前・状態・きっかけ・許す操作・コード)を返します。ルールを直す依頼のときに使います。",
+    description: "話し手が作ったイベントルールの一覧(ID・名前・有効か・きっかけ・許す操作・コード・持ち越している state)を返します。ルールを直す依頼のときに使います。",
     parameters: Type.Object({}),
     execute: async () => {
       const items = rules.list();
       if (items.length === 0) return text("ルールはありません");
       return text(
         items
-          .map(({ rule, shown }) =>
+          .map(({ rule, shown, state }) =>
             shown
-              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, code: rule.code })
+              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, code: rule.code, state: state ?? null })
               : `${rule.id} ${rule.name}: このチャンネルでは扱えないチャンネルを使うため、内容は表示できません`,
           )
           .join("\n"),

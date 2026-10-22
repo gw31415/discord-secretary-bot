@@ -13,6 +13,7 @@ import { RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { SandboxResult } from "../sandbox.ts";
 import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
 import { createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
+import { MAX_STATE_JSON } from "./types.ts";
 import type { Rule, RunOutcome } from "./types.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
@@ -302,8 +303,13 @@ export class RuleEngine {
     if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId)) return;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
     const last = batch.at(-1)!;
-    const result = await this.evaluate(rule, last.event, undefined, last.eventName, batch);
+    const result = await this.evaluate(rule, last.event, undefined, last.eventName, batch, store.getRuleState(rule.id));
+    // Kept only when the run went through, so a failed run is retried from the same state.
+    const keepState = () => {
+      if (result.state) store.setRuleState(rule.id, result.state.value);
+    };
     if (result.kind !== "steps") {
+      if (result.kind === "none") keepState();
       store.finishRuleRun(runId, { outcome: result.kind === "none" ? "no_change" : "failed", error: result.kind === "error" ? result.error : null, logs: result.logs });
       this.#settle(rule, result.kind === "error", result.kind === "error" ? result.error : null);
       return;
@@ -325,6 +331,7 @@ export class RuleEngine {
       outcome = e instanceof PlanRejected ? "rejected" : "failed";
       error = e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e);
     }
+    if (outcome === "executed") keepState();
     store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
     store.audit({ kind: "user", userId: rule.ownerId, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     this.#settle(rule, outcome === "failed" || outcome === "rejected", error);
@@ -354,6 +361,7 @@ export class RuleEngine {
     reader?: Pick<Reader, "get">,
     eventName: string | null = null,
     batch: BatchItem[] = eventName ? [{ eventName, event: event as Data }] : [],
+    state: unknown = null,
   ): Promise<Evaluation> {
     let result: SandboxResult;
     try {
@@ -366,6 +374,7 @@ export class RuleEngine {
           event,
           eventName,
           batch,
+          state,
           params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
         },
@@ -375,12 +384,16 @@ export class RuleEngine {
       return { kind: "error", error: (e instanceof Error ? e.message : String(e)).slice(0, MAX_ERROR), logs: [] };
     }
     if (!result.ok) return { kind: "error", error: (result.error ?? "不明なエラー").slice(0, MAX_ERROR), logs: result.logs };
+    if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {
+      return { kind: "error", error: `setState の値はJSONで${MAX_STATE_JSON}文字までです`, logs: result.logs };
+    }
+    const saved = result.state ? { state: result.state } : {};
     const value = result.value as { steps?: unknown; rules?: unknown[] } | null | undefined;
-    if (value === undefined || value === null) return { kind: "none", logs: result.logs };
+    if (value === undefined || value === null) return { kind: "none", logs: result.logs, ...saved };
     if (Array.isArray(value.rules) && value.rules.length > 0) return { kind: "error", error: "ルールの中からルールは作れません", logs: result.logs };
     if (!Array.isArray(value.steps)) return { kind: "error", error: "コードは plan([...]) を return してください", logs: result.logs };
-    if (value.steps.length === 0) return { kind: "none", logs: result.logs };
-    return { kind: "steps", drafts: value.steps as StepDraft[], logs: result.logs };
+    if (value.steps.length === 0) return { kind: "none", logs: result.logs, ...saved };
+    return { kind: "steps", drafts: value.steps as StepDraft[], logs: result.logs, ...saved };
   }
 
   /** What a rule reads with: everything its owner and the bot can both read. */
@@ -421,10 +434,11 @@ function defaultClearTimer(handle: unknown): void {
   if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
+/** `state` is set when the code called setState: what to keep if the run goes through. */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[] }
-  | { kind: "none"; logs: string[] }
-  | { kind: "error"; error: string; logs: string[] };
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown } }
+  | { kind: "none"; logs: string[]; state?: { value: unknown } }
+  | { kind: "error"; error: string; logs: string[]; state?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {

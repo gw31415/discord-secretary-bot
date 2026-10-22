@@ -12,6 +12,9 @@ export interface RuleLimits {
 }
 
 export const DEFAULT_LIMITS: RuleLimits = { perMinute: 10, maxConsecutiveFailures: 3 };
+/** The most a rule may keep between runs (setState), as JSON. */
+export const MAX_STATE_JSON = 16_000;
+
 export const MAX_LIMITS: RuleLimits = { perMinute: 60, maxConsecutiveFailures: 20 };
 
 /** The limits a rule asked for, inside what is allowed. */

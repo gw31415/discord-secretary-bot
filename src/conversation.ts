@@ -53,7 +53,7 @@ export interface ConversationDeps {
   propose?: (input: ProposeInput) => Promise<Plan>;
   /** Event rules, proposed inside plans. Absent means the agent cannot propose them. */
   rules?: {
-    list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean }>;
+    list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean; state?: unknown }>;
     runs: (guildId: string, ownerId: string, ruleId: string, shareable: Set<string>, limit: number) => RuleRun[] | null;
   };
   /** A conversation woke or was extended. */

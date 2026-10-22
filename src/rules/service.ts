@@ -43,7 +43,7 @@ export interface RuleServiceDeps {
   summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
 }
 
-type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent">;
+type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
 
 /** Display names from the cache: channels and roles; anything else stays an id. */
 export function cacheLabel(guild: GuildState | null | undefined): (id: string) => string {
@@ -121,9 +121,13 @@ export class RuleService {
   async dryRun(guildId: string, ownerId: string, channelId: string, rule: DryRunInput, reader: Pick<Reader, "get">, shareable?: Set<string>): Promise<RuleDryRun> {
     const { event, source } = await this.sample(guildId, ownerId, channelId, rule, reader);
     if (event === null) return { source: null, outcome: "no_event", lines: [], problems: [], logs: [] };
-    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event);
+    // A saved rule (or a new version of one) is tried on its current state; nothing a dry run sets is kept.
+    const saved = rule.id ?? rule.replaces;
+    const state = saved && this.deps.store.getRule(saved)?.ownerId === ownerId ? this.deps.store.getRuleState(saved) : null;
+    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
-    if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs };
+    const kept = result.state ? { state: JSON.stringify(result.state.value) } : {};
+    if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs, ...kept };
     const guild = this.#guild(guildId);
     let steps;
     try {
@@ -143,7 +147,7 @@ export class RuleService {
     const now = new Date(this.deps.now()).toISOString();
     const pseudo: Plan = { id: "dryrun", guildId, actor: { kind: "user", userId: ownerId, via: "rule" }, preconditions: [], steps, labels, risk: planRisk(steps), hash: "", createdAt: now, expiresAt: now };
     // Names would come from what the code read; nothing outside this channel's reach is shown.
-    return { source, outcome: "steps", lines: problems.some((p) => p.includes("この場所では扱えません")) ? [] : stepLines(pseudo), problems, logs: result.logs };
+    return { source, outcome: "steps", lines: problems.some((p) => p.includes("この場所では扱えません")) ? [] : stepLines(pseudo), problems, logs: result.logs, ...kept };
   }
 
   // --- Rules inside a plan -------------------------------------------------
@@ -263,8 +267,12 @@ export class RuleService {
     return this.deps.store.recentRuleRuns(ruleId, limit);
   }
 
-  rulesFor(guildId: string, ownerId: string, shareable: Set<string>): Array<{ rule: Rule; shown: boolean }> {
-    return this.deps.store.listRules(guildId, ownerId).map((rule) => ({ rule, shown: pinnedIds(rule).every((id) => shareable.has(id)) }));
+  /** The state, like the runs, can carry event data, so it comes only with a rule that may be shown here. */
+  rulesFor(guildId: string, ownerId: string, shareable: Set<string>): Array<{ rule: Rule; shown: boolean; state?: unknown }> {
+    return this.deps.store.listRules(guildId, ownerId).map((rule) => {
+      const shown = pinnedIds(rule).every((id) => shareable.has(id));
+      return { rule, shown, ...(shown ? { state: this.deps.store.getRuleState(rule.id) } : {}) };
+    });
   }
 
   // --- Interactions -------------------------------------------------------
@@ -294,7 +302,10 @@ export class RuleService {
   #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean } = {}): Rendered {
     const { admin } = this.deps;
     const rule = admin.get(guildId, userId, ruleId);
-    return detailView({ rule, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), ...extra }, cacheLabel(this.deps.caches.get(guildId)?.guild));
+    return detailView(
+      { rule, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), ...extra },
+      cacheLabel(this.deps.caches.get(guildId)?.guild),
+    );
   }
 
   async handleInteraction(interaction: APIInteraction): Promise<boolean> {
@@ -341,6 +352,17 @@ export class RuleService {
         case "delete":
           await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
           return true;
+        case "clearstate": {
+          const rule = this.deps.admin.get(guildId, userId, parsed.arg);
+          if (rule.ownerId !== userId) {
+            await ephemeral("状態を消せるのは作成者だけです");
+            return true;
+          }
+          this.deps.store.setRuleState(rule.id, null);
+          this.deps.store.audit({ kind: "user", userId, via: "panel" }, "rule.clear_state", {}, undefined, rule.id);
+          await update(this.#detail(guildId, userId, rule.id, { notice: "状態を消しました。次の実行は state が null で始まります" }));
+          return true;
+        }
         case "delete2": {
           const rule = this.deps.admin.get(guildId, userId, parsed.arg);
           this.deps.admin.remove(guildId, userId, rule.id);

@@ -15,6 +15,11 @@ export interface SandboxBindings {
   eventName?: string | null;
   /** Every event of the run, oldest first: one, or many for a debounced rule. */
   batch?: unknown[];
+  /**
+   * A rule's saved state, read as `state`; setState(value) replaces it for the
+   * next run. Undefined (the agent's code) leaves both out.
+   */
+  state?: unknown;
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -37,6 +42,8 @@ const PRELUDE = [
 export interface SandboxResult {
   ok: boolean;
   value?: unknown;
+  /** Set when the code called setState: the value to keep for the next run. */
+  state?: { value: unknown };
   error?: string;
   logs: string[];
 }
@@ -66,6 +73,8 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     toHandle(vm, bindings.params ?? null).consume((h) => vm.setProp(vm.global, "params", h));
     toHandle(vm, bindings.eventName ?? null).consume((h) => vm.setProp(vm.global, "eventName", h));
     toHandle(vm, bindings.batch ?? null).consume((h) => vm.setProp(vm.global, "batch", h));
+    const stateful = bindings.state !== undefined;
+    if (stateful) toHandle(vm, bindings.state).consume((h) => vm.setProp(vm.global, "state", h));
 
     const discord = vm.newObject();
     vm.newAsyncifiedFunction("get", async (routeHandle, optsHandle) => {
@@ -83,7 +92,10 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
 
     // Wrapped so the code can `return` its answer; JSON keeps host and guest values apart.
     // call()/rule()/plan() only build plain objects: a returned plan is a proposal, not a write.
-    const wrapped = `${PRELUDE}\nJSON.stringify((function () {\n${code}\n})())`;
+    // setState keeps a JSON copy, so later changes to the object do not leak into what is saved.
+    const wrapped = stateful
+      ? `${PRELUDE}\nvar __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`
+      : `${PRELUDE}\nJSON.stringify((function () {\n${code}\n})())`;
     const result = await vm.evalCodeAsync(wrapped, "agent.js");
     if (result.error) {
       const err = vm.dump(result.error) as { name?: string; message?: string } | string;
@@ -92,7 +104,10 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     }
     const json = vm.getString(result.value);
     result.value.dispose();
-    return { ok: true, value: json === undefined || json === "undefined" ? undefined : JSON.parse(json), logs };
+    const parsed = json === undefined || json === "undefined" ? undefined : JSON.parse(json);
+    if (!stateful) return { ok: true, value: parsed, logs };
+    const out = parsed as { value?: unknown; state?: { value: unknown } };
+    return { ok: true, value: out.value, ...(out.state ? { state: out.state } : {}), logs };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
   } finally {

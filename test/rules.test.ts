@@ -386,3 +386,32 @@ test("reaction operations take an emoji, not an id, in their path", () => {
   assert.equal(normalizeSteps([{ op, path: { channel: "10", message: "1", emoji: "ok_hand:123" } }], GUILD, "p").length, 1);
   for (const emoji of ["..", "a/b", "", "%F0"]) assert.throws(() => normalizeSteps([{ op, path: { channel: "10", message: "1", emoji } }], GUILD, "p"), /emoji/);
 });
+
+test("a rule carries its state to the next run, but only from runs that went through", async () => {
+  const w = world();
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  let next: any = { ok: true, value: null, state: { value: { count: 1 } }, logs: [] };
+  w.setCode(() => next);
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "710"));
+  await w.engine.idle();
+  assert.equal(w.seen[0].state, null);
+  assert.deepEqual(w.store.getRuleState(rule.id), { count: 1 });
+  // A rejected run keeps the state it started from.
+  next = { ok: true, value: { steps: [{ op: "DELETE /channels/{channel}", path: { channel: "10" } }] }, state: { value: { count: 2 } }, logs: [] };
+  w.setResult(async () => {
+    const { PlanRejected } = await import("../src/plan/validate.ts");
+    throw new PlanRejected(["範囲外"]);
+  });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "711"));
+  await w.engine.idle();
+  assert.deepEqual(w.seen[1].state, { count: 1 });
+  assert.deepEqual(w.store.getRuleState(rule.id), { count: 1 });
+  // Too large is an error, and nothing is kept.
+  next = { ok: true, value: null, state: { value: "x".repeat(20_000) }, logs: [] };
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "712"));
+  await w.engine.idle();
+  assert.match(w.store.recentRuleRuns(rule.id, 1)[0]!.error ?? "", /setState/);
+  assert.deepEqual(w.store.getRuleState(rule.id), { count: 1 });
+  w.store.setRuleState(rule.id, null);
+  assert.equal(w.store.getRuleState(rule.id), null);
+});

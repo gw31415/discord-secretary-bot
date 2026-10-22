@@ -138,6 +138,9 @@ const MIGRATIONS: string[] = [
   ALTER TABLE user_settings ADD COLUMN reaction_provider TEXT;
   ALTER TABLE user_settings ADD COLUMN reaction_model TEXT;
   `,
+  `
+  ALTER TABLE rules ADD COLUMN state_json TEXT;
+  `,
 ];
 
 export interface ModelRef {
@@ -564,6 +567,17 @@ export class Store {
       .prepare("UPDATE rules SET consecutive_failures = CASE WHEN ? THEN consecutive_failures + 1 ELSE 0 END WHERE id = ?")
       .run(failed ? 1 : 0, id);
     return (this.db.prepare("SELECT consecutive_failures AS n FROM rules WHERE id = ?").get(id) as { n: number } | undefined)?.n ?? 0;
+  }
+
+  /** What the rule's code saved with setState on its last successful run; null when none. */
+  getRuleState(id: string): unknown {
+    const row = this.db.prepare("SELECT state_json FROM rules WHERE id = ?").get(id) as { state_json: string | null } | undefined;
+    return row?.state_json ? JSON.parse(row.state_json) : null;
+  }
+
+  /** Null clears it. */
+  setRuleState(id: string, state: unknown): void {
+    this.db.prepare("UPDATE rules SET state_json = ? WHERE id = ?").run(state === null || state === undefined ? null : JSON.stringify(state), id);
   }
 
   deleteRule(id: string): void {
