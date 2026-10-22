@@ -11,7 +11,7 @@ import type { Plan, Step, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { SandboxResult } from "../sandbox.ts";
-import { createdKindOf, TRIGGERS } from "./triggers.ts";
+import { createdKindOf, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import type { Rule, RunOutcome } from "./types.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
@@ -81,6 +81,12 @@ export class RuleEngine {
       const id = (response as { id?: string } | null)?.id;
       if (id) this.#recent.set(`${plan.guildId}\u0000${created}:${id}`, now);
     }
+    if (step.op === "PATCH /guilds/{guild}/members/{user}") {
+      const body = (step.body ?? {}) as Record<string, unknown>;
+      const user = String(step.pathParams.user);
+      if (Object.hasOwn(body, "channel_id")) this.#recent.set(`${plan.guildId}\u0000${voiceMoveKey(user, (body.channel_id as string | null) ?? null)}`, now);
+      if (Object.hasOwn(body, "mute") || Object.hasOwn(body, "deaf")) this.#recent.set(`${plan.guildId}\u0000${voiceMuteKey(user)}`, now);
+    }
     if (step.op === "POST /channels/{channel}/messages") {
       const id = (response as { id?: string } | null)?.id;
       if (id) this.#recent.set(`${plan.guildId}\u0000message:${step.pathParams.channel}/${id}`, now);
@@ -98,6 +104,11 @@ export class RuleEngine {
     if (spec.actorId?.(data) === this.deps.selfId()) return true;
     if (spec.resources?.(data).some((key) => this.#recentlyWritten(guildId, key))) return true;
     if (spec.createdKind && this.#recentlyWritten(guildId, `create:${spec.createdKind}`)) return true;
+    for (const key of spec.outcomes?.(data) ?? []) {
+      if (!this.#recentlyWritten(guildId, key)) continue;
+      this.#recent.delete(`${guildId}\u0000${key}`);
+      return true;
+    }
     return false;
   }
 

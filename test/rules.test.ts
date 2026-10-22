@@ -132,6 +132,29 @@ test("a change the bot just made does not set off rules unless they opt in", asy
   assert.equal(w.runs.length, 1);
 });
 
+test("only the voice move the bot made is skipped; the member's own moves right after still fire", async () => {
+  const w = world();
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "VOICE_STATE_UPDATE" }, allow: [{ op: "PATCH /guilds/{guild}/members/{user}" }] });
+  const plan = { guildId: GUILD } as any;
+  const voice = (channel: string | null, before: string | null) => ({ guild_id: GUILD, user_id: "3", channel_id: channel, before_channel_id: before });
+  w.engine.noteWrite(plan, { id: "s1", kind: "call", op: "PATCH /guilds/{guild}/members/{user}", pathParams: { guild: GUILD, user: "3" }, body: { channel_id: "10" }, idempotencyKey: "x" }, undefined);
+  // The move the bot made.
+  w.engine.dispatch("VOICE_STATE_UPDATE", GUILD, voice("10", "11"));
+  await w.engine.idle();
+  assert.equal(w.runs.length, 0);
+  // Leaving a few seconds later is the member's own doing.
+  w.now.t += 3_000;
+  w.engine.dispatch("VOICE_STATE_UPDATE", GUILD, voice(null, "10"));
+  await w.engine.idle();
+  assert.equal(w.runs.length, 1);
+  // A server mute by the bot keeps them in place and is skipped; muting themselves is not.
+  w.engine.noteWrite(plan, { id: "s2", kind: "call", op: "PATCH /guilds/{guild}/members/{user}", pathParams: { guild: GUILD, user: "3" }, body: { mute: true }, idempotencyKey: "y" }, undefined);
+  w.engine.dispatch("VOICE_STATE_UPDATE", GUILD, voice("10", "10"));
+  w.engine.dispatch("VOICE_STATE_UPDATE", GUILD, voice("10", "10"));
+  await w.engine.idle();
+  assert.equal(w.runs.length, 2);
+});
+
 test("runs are rate limited, and failures in a row switch the rule off and tell its owner", async () => {
   const w = world();
   const rule = w.admin.save(GUILD, "1", { ...w.definition, limits: { perMinute: 2, maxConsecutiveFailures: 3 } });

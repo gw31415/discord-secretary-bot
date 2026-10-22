@@ -22,6 +22,12 @@ export interface TriggerSpec {
   resources?: (d: Data) => string[];
   /** Created resources have no id before the write returns, so any recent create of this kind counts. */
   createdKind?: string;
+  /**
+   * Exact outcomes of the bot's writes, each matching one event: a recent write that
+   * produced this key makes the event bot-made, and the key is used up. Unlike
+   * `resources`, later events about the same thing still fire.
+   */
+  outcomes?: (d: Data) => string[];
 }
 
 const MESSAGE = "id, channel_id, guild_id, content, author { id, username, global_name, bot }, member { roles, nick }, mentions[], mention_roles[], attachments[], message_reference, timestamp";
@@ -148,9 +154,23 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     payload: "guild_id, user_id, channel_id(抜けたときは null), before_channel_id(直前にいたチャンネル。いなかったときは null), member { roles, user }, self_mute, self_deaf",
     channel: (d) => d.channel_id ?? d.before_channel_id,
     actorId: (d) => d.user_id,
-    resources: (d) => [`member:${d.user_id}`],
+    // Not `member:<user>`: after the bot moves someone, their own leaving moments later must still fire.
+    outcomes: (d) => [
+      voiceMoveKey(d.user_id as string, (d.channel_id as string | null) ?? null),
+      ...(d.channel_id && d.channel_id === d.before_channel_id ? [voiceMuteKey(d.user_id as string)] : []),
+    ],
   },
 };
+
+/** The bot moved (or disconnected, with null) a member in voice. */
+export function voiceMoveKey(userId: string, channelId: string | null): string {
+  return `voice:${userId}/${channelId ?? "none"}`;
+}
+
+/** The bot server-muted or deafened a member, which leaves them where they are. */
+export function voiceMuteKey(userId: string): string {
+  return `voicemute:${userId}`;
+}
 
 export function isTrigger(name: string): boolean {
   return Object.hasOwn(TRIGGERS, name);
