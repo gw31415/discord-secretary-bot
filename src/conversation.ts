@@ -6,8 +6,12 @@ import type { ImageRef } from "./agent/images.ts";
 import { resolveWebAccess } from "./agent/web.ts";
 import { Inbox, ReplyFailed } from "./agent/respond.ts";
 import { isTransient } from "./agent/retry.ts";
+import { ImageBox } from "./agent/attachments.ts";
+import type { ImageTools } from "./agent/attachments.ts";
+import type { Attachment } from "./plan/types.ts";
 import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
+import type { ChooseInput, ReactionChoice } from "./agent/react.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
 import { findChatModel, findJudgeModel } from "./llm/models.ts";
 import { llmCoder } from "./agent/coder.ts";
@@ -26,6 +30,8 @@ import type { Rule, RuleRun } from "./rules/types.ts";
 export const SESSION_MS = 5 * 60_000;
 export const CONTEXT_MESSAGES = 30;
 export const MAX_MESSAGES_PER_REPLY = 500;
+/** Reactions on bot messages older than this are not taken as answers. */
+export const REACTION_REPLY_WINDOW_MS = 24 * 60 * 60_000;
 const DISCORD_LIMIT = 2000;
 
 export interface ConversationDeps {
@@ -37,17 +43,25 @@ export interface ConversationDeps {
   webSearch: boolean;
   fetchBefore: (channelId: string, beforeId: string, limit: number) => Promise<APIMessage[]>;
   /** replyToId is null for follow-up posts, which read as a natural series. */
-  sendReply: (channelId: string, replyToId: string | null, content: string) => Promise<void>;
+  /** Posts one message; `files` are PNGs uploaded with it. */
+  sendReply: (channelId: string, replyToId: string | null, content: string, files?: Array<{ name: string; data: Buffer }>) => Promise<void>;
+  /** Tools that make or fetch images for the reply; none are wired yet. */
+  imageTools?: ImageTools;
   sendDm: (userId: string, content: string) => Promise<void>;
   typing: (channelId: string) => Promise<void>;
   makeReader: (scope: ReadScope) => Reader;
   respond: (input: RespondInput) => Promise<RespondResult>;
   judge: (input: { model: JudgeModel; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
+  /** Puts the bot's reaction on a message. Absent means the bot answers in words only. */
+  react?: (channelId: string, messageId: string, emoji: string) => Promise<void>;
+  /** The reaction model's choice: words, a reaction, or (for a reaction) nothing. */
+  chooseReaction?: (input: ChooseInput) => Promise<ReactionChoice>;
+  fetchMessage?: (channelId: string, messageId: string) => Promise<APIMessage>;
   /** Posts an approval dialog for writes. Absent keeps conversations read-only. */
   propose?: (input: ProposeInput) => Promise<Plan>;
   /** Event rules, proposed inside plans. Absent means the agent cannot propose them. */
   rules?: {
-    list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean }>;
+    list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean; state?: unknown }>;
     runs: (guildId: string, ownerId: string, ruleId: string, shareable: Set<string>, limit: number) => RuleRun[] | null;
   };
   /** Asks the speaker, with buttons, to let one reply read up to their own permissions. Absent keeps reads to the channel's audience. */
@@ -59,6 +73,22 @@ export interface ConversationDeps {
 
 /** A message from a server channel; the Gateway adds the guild it came from. */
 export type GuildMessage = APIMessage & { guild_id: string };
+
+/** MESSAGE_REACTION_ADD, as far as conversations read it. */
+export interface ReactionAdd {
+  user_id: string;
+  channel_id: string;
+  message_id: string;
+  guild_id?: string;
+  message_author_id?: string;
+  emoji: { id?: string | null; name?: string | null };
+  member?: { nick?: string | null; user?: { username?: string; global_name?: string | null; bot?: boolean } };
+}
+
+/** When a message was sent, from its snowflake id. */
+function sentAt(id: string): number {
+  return Number(BigInt(id) >> 22n) + 1_420_070_400_000;
+}
 
 export type Decision =
   | { kind: "ignore" }
@@ -222,6 +252,12 @@ export class Conversations {
       awakeUntil: this.deps.now() + SESSION_MS,
     });
     this.deps.onAwake?.();
+    if (await this.#reactInstead(message, context)) {
+      const latest = store.getConversation(message.channel_id);
+      if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
+      this.deps.onAwake?.();
+      return;
+    }
     await this.#answer({
       guildId: message.guild_id,
       channelId: message.channel_id,
@@ -239,6 +275,92 @@ export class Conversations {
     const latest = store.getConversation(message.channel_id);
     if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
     this.deps.onAwake?.();
+  }
+
+  /** The speaker's reaction model, or for a reaction without one, their judge model. */
+  #reactionModel(userId: string, kind: ChooseInput["kind"]): { model: JudgeModel; apiKey: string; label: string } | null {
+    const { store } = this.deps;
+    const settings = store.getSettings(userId);
+    const ref = settings.reaction ?? (kind === "reaction" ? settings.judge : null);
+    const model = ref && findJudgeModel(ref.provider, ref.model);
+    const apiKey = ref && store.getApiKey(userId, ref.provider);
+    return model && apiKey ? { model, apiKey, label: `${ref.provider}/${ref.model}` } : null;
+  }
+
+  /** With a reaction model, a message that only needs a reaction gets one instead of words. */
+  async #reactInstead(message: GuildMessage, context: ChannelContext): Promise<boolean> {
+    const { deps } = this;
+    if (!deps.react || !deps.chooseReaction) return false;
+    const chooser = this.#reactionModel(message.author.id, "message");
+    if (!chooser) return false;
+    const choice = await deps.chooseReaction({ model: chooser.model, apiKey: chooser.apiKey, botName: deps.botName(), transcript: context.transcript, message: formatMessage(message), kind: "message" });
+    if (choice.action !== "react" || !choice.emoji) return false;
+    try {
+      await deps.react(message.channel_id, message.id, choice.emoji);
+    } catch (e) {
+      deps.log(`リアクションに失敗したので文章で返します (${message.id})`, e);
+      return false;
+    }
+    deps.store.audit({ kind: "user", userId: message.author.id, via: "conversation" }, "conversation.react", {
+      channelId: message.channel_id,
+      messageId: message.id,
+      emoji: choice.emoji,
+      model: chooser.label,
+    });
+    return true;
+  }
+
+  /**
+   * Someone reacted to one of the bot's messages. A reaction can be an answer
+   * (an OK to the bot's question), so the reaction model (or the judge model)
+   * decides whether the bot goes on; most reactions need nothing.
+   */
+  reacted(data: ReactionAdd): Promise<void> {
+    const self = this.deps.selfId();
+    if (data.message_author_id !== self || data.user_id === self || data.member?.user?.bot) return Promise.resolve();
+    if (this.deps.now() - sentAt(data.message_id) > REACTION_REPLY_WINDOW_MS) return Promise.resolve();
+    const emoji = data.emoji.id ? `:${data.emoji.name}:` : (data.emoji.name ?? "?");
+    const name = data.member?.nick ?? data.member?.user?.global_name ?? data.member?.user?.username ?? data.user_id;
+    const line = `[リアクション] ${name}(${data.user_id}) がBotの発言 [${data.message_id}] に ${emoji} を付けました`;
+    const working = this.#working.get(data.channel_id);
+    if (working && working.speaker === data.user_id && working.inbox.deliver(line)) return Promise.resolve();
+    return this.#enqueue(data.channel_id, () => this.#processReaction(data, line)).catch((e) =>
+      this.deps.log(`リアクション ${data.message_id} の処理に失敗`, e),
+    );
+  }
+
+  async #processReaction(data: ReactionAdd, line: string): Promise<void> {
+    const { deps } = this;
+    const { store } = deps;
+    const guildId = data.guild_id;
+    if (!guildId || !deps.chooseReaction || !deps.fetchMessage) return;
+    // Unregistered people get no DM for a reaction; only a mention invites them.
+    if (!setupStatus(store, data.user_id).complete) return;
+    const chooser = this.#reactionModel(data.user_id, "reaction");
+    if (!chooser) return;
+    const reacted = await deps.fetchMessage(data.channel_id, data.message_id);
+    const before = await deps.fetchBefore(data.channel_id, data.message_id, CONTEXT_MESSAGES);
+    const transcript = [...before.map(formatMessage).reverse(), formatMessage(reacted)];
+    const choice = await deps.chooseReaction({ model: chooser.model, apiKey: chooser.apiKey, botName: deps.botName(), transcript, message: line, kind: "reaction" });
+    if (choice.action !== "reply") return;
+
+    const conv = store.getConversation(data.channel_id);
+    const awake = conv !== undefined && conv.awakeUntil > deps.now();
+    store.saveConversation({ channelId: data.channel_id, startedBy: awake ? conv!.startedBy : data.user_id, awakeUntil: deps.now() + SESSION_MS });
+    deps.onAwake?.();
+    await this.#answer({
+      guildId,
+      channelId: data.channel_id,
+      replyToId: data.message_id,
+      speaker: data.user_id,
+      context: { transcript, styleSamples: styleSamples([...before].reverse()) },
+      target: `${line}。これはその発言への返事(OK・NG・選択など)です。リアクションの意味を発言の内容から読み取り、続きをしてください。`,
+      images: [],
+      audit: { channelId: data.channel_id, messageId: data.message_id, reaction: line },
+    });
+    const latest = store.getConversation(data.channel_id);
+    if (latest) store.saveConversation({ ...latest, awakeUntil: deps.now() + SESSION_MS });
+    deps.onAwake?.();
   }
 
   /**
@@ -333,9 +455,14 @@ export class Conversations {
     this.#working.set(channelId, { speaker, messageIds: new Set(input.messageIds ?? []), inbox });
     // The first post answers the message; the rest follow it as a series.
     let replyTo: string | null = input.replyToId;
-    const post = async (content: string) => {
-      for (const part of splitForDiscord(content)) {
-        await this.deps.sendReply(channelId, replyTo, part);
+    const images = new ImageBox();
+    // Images go with the last part; a reply that is only images still gets posted.
+    const post = async (content: string, files: Attachment[] = []) => {
+      const parts = splitForDiscord(content);
+      if (parts.length === 0 && files.length > 0) parts.push("");
+      for (const [i, part] of parts.entries()) {
+        const uploads = i === parts.length - 1 ? files.map((f) => ({ name: f.name, data: Buffer.from(f.data, "base64") })) : [];
+        await this.deps.sendReply(channelId, replyTo, part, uploads.length > 0 ? uploads : undefined);
         replyTo = null;
       }
     };
@@ -355,14 +482,15 @@ export class Conversations {
         web,
         inbox,
         coder,
+        ...(this.deps.react ? { react: (emoji: string) => this.deps.react!(channelId, input.replyToId, emoji) } : {}),
         widen,
         onProgress: async (content) => {
           await post(content);
           await this.deps.typing(channelId).catch(() => undefined);
         },
         propose: this.deps.propose
-          ? (drafts, code, rules) =>
-              this.deps.propose!({
+          ? async (drafts, code, rules) => {
+              const plan = await this.deps.propose!({
                 guildId: input.guildId,
                 channelId,
                 replyToId: input.replyToId,
@@ -372,8 +500,14 @@ export class Conversations {
                 ...(code ? { code } : {}),
                 ...(input.replaces ? { replaces: input.replaces } : {}),
                 ...(rules ? { rules, reader, request: input.target } : {}),
-              })
+                images: images.all(),
+              });
+              images.take(Object.keys(plan.attachments ?? {}));
+              return plan;
+            }
           : undefined,
+        attachments: images,
+        ...(this.deps.imageTools ? { imageTools: this.deps.imageTools } : {}),
         rules: this.deps.rules
           ? {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
@@ -382,8 +516,9 @@ export class Conversations {
           : undefined,
       });
       progress = result.progress;
-      text = result.text || (progress > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
-      detail = { ...detail, progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), ...(result.retries ? { retries: result.retries } : {}), messagesRead: reader.messagesRead };
+      // A reaction alone is an answer.
+      text = result.text || (progress > 0 || result.reactions?.length || images.forReply().length > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
+      detail = { ...detail, ...(result.reactions?.length ? { reactions: result.reactions } : {}), progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), ...(result.retries ? { retries: result.retries } : {}), messagesRead: reader.messagesRead };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       this.deps.log(`応答の生成に失敗 (${input.replyToId})`, e);
@@ -401,7 +536,9 @@ export class Conversations {
     }
 
     if (widened) detail = { ...detail, widened };
-    await post(text);
+    const attached = images.forReply();
+    if (attached.length > 0) detail = { ...detail, images: attached.map((a) => a.name) };
+    await post(text, attached);
     store.audit({ kind: "user", userId: speaker, via: "conversation" }, "conversation.reply", detail);
   }
 

@@ -25,6 +25,8 @@ export interface CodeEnv {
   run: (code: string, event?: unknown) => Promise<{ ok: boolean; value?: unknown; error?: string; logs: string[] }>;
   /** More read-only tools, such as the speaker's rules and their run history. */
   tools?: AgentTool<any>[];
+  /** The code may draw images with createCanvas() and attachImage(). */
+  canvas?: boolean;
 }
 
 export interface CodeResult {
@@ -74,11 +76,15 @@ const PLAN = [
 const RULE = [
   "- このコードはイベントルールで、決まったイベントが起きるたびに動きます。event は発火したイベントのペイロード、eventName はどのきっかけで動いたか(\"CHANNEL_CREATE\" など)、params はルールと一緒に登録された値です。",
   "- 変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...]) を返します。前のステップの結果は { $ref: \"steps.<id>.result.id\" } で参照できます。",
+  "- batch はその回のイベント全部(古い順の [{ eventName, event }])で、まとめて実行するルールでは複数件、それ以外は1件です。SCHEDULE(時刻)のときの event は { guild_id, scheduled_at, schedule, timezone }、BOT_READY(起動時)のときは { guild_id } です。",
+  "- state は前回の実行で setState(値) した値(最初は null)です。次の実行に持ち越したい値があれば setState で保存します(JSON にできる値。保存されるのは実行が通ったときだけ)。",
   "- 実行は1回10秒・discord.get 50回までです。",
   "- 返すステップは依頼にある「許す操作」に合うものだけにします。合わないステップは実行されません。許す操作で { madeInRun: true } のフィールドには、同じ回の前のステップを指す { $ref: \"steps.<id>.result.id\" } を入れます。",
   "",
   "使える操作:",
 ];
+
+const CANVAS = "\n\n画像を頼まれたら、const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します。attachImage は画像のIDを返すので、結果に含めて返します。1回4枚、縦横2048pxまでです。背景は透明なので、必要なら最初に塗ります。";
 
 const RULE_DEBUG = "\n\n既存のルールを直すときや、ルールが動かない理由を調べるときは、list_rules で今のコードを、rule_runs で実行履歴(結果・エラー・log)を確かめてから書きます。";
 
@@ -159,7 +165,7 @@ export function llmCoder(model: Model<Api>, apiKey: string): Coder {
 
       const agent = new Agent({
         initialState: {
-          systemPrompt: systemPrompt(kind) + (env.tools?.some((t) => t.name === "rule_runs") ? RULE_DEBUG : ""),
+          systemPrompt: systemPrompt(kind) + (env.tools?.some((t) => t.name === "rule_runs") ? RULE_DEBUG : "") + (env.canvas ? CANVAS : ""),
           model,
           tools: [tryCode, submitCode, ...(env.tools ?? [])], thinkingLevel: lightestThinking(model) ?? "off" },
         getApiKey: () => apiKey,

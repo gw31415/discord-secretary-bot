@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import type { Static } from "typebox";
-import type { RuleTrigger } from "../rules/types.ts";
+import type { RuleLimits, RuleTrigger } from "../rules/types.ts";
 
 // Core Plan types. TypeBox gives both the TypeScript type and the JSON Schema
 // that validates what the agent proposes.
@@ -23,6 +23,15 @@ export const REF_PATTERN = /^steps\.([A-Za-z0-9_-]{1,32})\.result((?:\.[A-Za-z0-
 export function isRef(value: unknown): value is Ref {
   return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 1 && typeof (value as Ref).$ref === "string";
 }
+
+/** An image fetched with attach_image, ready to upload; `data` is base64 so it can live inside a plan. */
+export interface Attachment {
+  name: string;
+  data: string;
+}
+
+export const MAX_IMAGES_PER_REPLY = 4;
+export const FILE_ID_PATTERN = "^img[0-9]{1,2}$";
 
 /** What the agent (or sandboxed code) proposes; ids are filled in when missing. */
 export const StepDraftSchema = Type.Object(
@@ -75,6 +84,8 @@ export interface Plan {
   rules?: PlanRuleDraft[];
   /** Channels the plan deletes that have never had a message, so nothing is lost for good. */
   emptyChannels?: string[];
+  /** Images the plan's posts carry, by the id their steps name in `files`. */
+  attachments?: Record<string, Attachment>;
   hash: string;
   createdAt: string;
   expiresAt: string;
@@ -102,6 +113,12 @@ export interface AllowEntry {
    * before the step runs, e.g. { properties: { name: { pattern: "^📞" } } }.
    */
   target?: Record<string, unknown>;
+  /**
+   * JSON Schema the channel the step acts in must satisfy, read right before
+   * the step runs, e.g. { properties: { parent_id: { const: "123" } } } for
+   * posting only inside one category.
+   */
+  channel?: Record<string, unknown>;
   /** Steps of this kind per run. Absent means up to the plan limit. */
   maxStepsPerRun?: number;
 }
@@ -122,6 +139,8 @@ export interface PlanRuleDraft {
   params?: Record<string, unknown>;
   /** Written from the code alone by a model that did not see the request. */
   summary: string | null;
+  /** Absent means DEFAULT_LIMITS. */
+  limits?: RuleLimits;
   /** An existing rule of the owner's this is a new version of. */
   replaces?: {
     id: string;
@@ -146,6 +165,8 @@ export interface RuleDryRun {
   lines: string[];
   problems: string[];
   logs: string[];
+  /** What setState would keep, as JSON; absent when the code did not call it. */
+  state?: string;
 }
 
 export interface PlanSource {

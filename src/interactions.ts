@@ -51,17 +51,18 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         if (hasKey) {
           store.setModel(userId, action.role, { provider: action.provider, model: action.model });
           store.audit(actor, "llm.model.set", { role: action.role, provider: action.provider, model: action.model });
-          notice = `${{ response: "応答に使う", judge: "宛先判定に使う", code: "コードを書く" }[action.role]}モデルを ${action.model} にしました`;
+          notice = `${{ response: "応答に使う", judge: "宛先判定に使う", code: "コードを書く", reaction: "リアクションを選ぶ" }[action.role]}モデルを ${action.model} にしました`;
         } else {
           notice = `${PROVIDERS[action.provider].label}のキーが登録されていません`;
         }
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
         return;
       }
-      case "clearCodeModel": {
-        store.setModel(userId, "code", null);
-        store.audit(actor, "llm.model.set", { role: "code", provider: null, model: null });
-        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, "コードは応答に使うモデルが書くようにしました"));
+      case "clearModel": {
+        store.setModel(userId, action.role, null);
+        store.audit(actor, "llm.model.set", { role: action.role, provider: null, model: null });
+        const notice = action.role === "code" ? "コードは応答に使うモデルが書くようにしました" : "リアクションは応答に使うモデルが選ぶようにしました";
+        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
         return;
       }
       case "selectWeb": {

@@ -16,11 +16,12 @@ import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 export type { ModelRole };
 
 // The /llm panel: an ephemeral Components V2 message for one user's keys and models.
-// Both models are required and never chosen automatically.
+// The response and judge models are required and never chosen automatically;
+// the code and reaction models are optional.
 
 
-/** The code model's option for leaving code to the response model. */
-const CODE_UNSET = "none";
+/** An optional role's option for leaving it to the response model. */
+const MODEL_UNSET = "none";
 
 export const CUSTOM_ID = {
   keyButton: (p: KeyProviderId) => `llm:key:${p}`,
@@ -53,33 +54,35 @@ export function setupStatus(store: Store, userId: string): SetupStatus {
 
 const SELECT_LIMIT = 25;
 
-// One select per provider, split into more selects when a provider lists more
-// models than Discord's 25-option limit, so no model is dropped.
-function modelSelects(store: Store, userId: string, role: ModelRole, placeholder: string): APIActionRowComponent<APIStringSelectComponent>[] {
+// One select per role across every provider with a key, split into more
+// selects past Discord's 25-option limit so no model is dropped. Optional roles
+// lead with the option that leaves the role unset. The panel is near Discord's
+// 40-component limit, so providers share a select.
+function roleSelects(store: Store, userId: string, role: ModelRole, placeholder: string, unset?: { label: string; description: string }): APIActionRowComponent<APIStringSelectComponent>[] {
   const providers = store.listKeys(userId).map((k) => k.provider).filter(isProviderId);
   const current = store.getSettings(userId)[role];
-  return providers.flatMap((provider) => {
-    const models = selectableModels(provider, role);
-    const pages = Math.ceil(models.length / SELECT_LIMIT);
-    return Array.from({ length: pages }, (_, page) => {
-      const options = models.slice(page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT).map((model) => ({
+  const options = [
+    ...(unset ? [{ label: unset.label, value: MODEL_UNSET, description: unset.description, default: !current }] : []),
+    ...providers.flatMap((provider) =>
+      selectableModels(provider, role).map((model) => ({
         label: model.name.slice(0, 100),
         value: `${provider}/${model.id}`,
-        description: model.id.slice(0, 100),
+        description: `${PROVIDERS[provider].label} · ${model.id}`.slice(0, 100),
         default: current?.provider === provider && current.model === model.id,
-      }));
-      const suffix = pages > 1 ? ` (${page + 1}/${pages})` : "";
-      return {
-        type: ComponentType.ActionRow,
-        components: [{
-          type: ComponentType.StringSelect,
-          custom_id: CUSTOM_ID.modelSelect(role, provider, page),
-          placeholder: `${placeholder}: ${PROVIDERS[provider].label}${suffix}`.slice(0, 150),
-          options,
-        }],
-      } satisfies APIActionRowComponent<APIStringSelectComponent>;
-    });
-  });
+      })),
+    ),
+  ];
+  if (options.length === (unset ? 1 : 0)) return [];
+  const pages = Math.ceil(options.length / SELECT_LIMIT);
+  return Array.from({ length: pages }, (_, page) => ({
+    type: ComponentType.ActionRow,
+    components: [{
+      type: ComponentType.StringSelect,
+      custom_id: CUSTOM_ID.modelSelect(role, "all", page),
+      placeholder: `${placeholder}${pages > 1 ? ` (${page + 1}/${pages})` : ""}`.slice(0, 150),
+      options: options.slice(page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT),
+    }],
+  }) satisfies APIActionRowComponent<APIStringSelectComponent>);
 }
 
 export function renderPanel(store: Store, userId: string, notice?: string): { flags: number; components: APIMessageTopLevelComponent[] } {
@@ -109,8 +112,8 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     { type: ComponentType.Separator },
   ];
 
-  const response = modelSelects(store, userId, "response", "応答に使うモデル");
-  const judge = modelSelects(store, userId, "judge", "宛先判定に使うモデル");
+  const response = roleSelects(store, userId, "response", "応答に使うモデル");
+  const judge = roleSelects(store, userId, "judge", "宛先判定に使うモデル");
   if (judge.length > 0) {
     body.push(
       { type: ComponentType.TextDisplay, content: "**応答に使うモデル**(必須)\nBotがあなたに返事をするときに使います。" },
@@ -120,6 +123,7 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
       { type: ComponentType.TextDisplay, content: "**宛先判定に使うモデル**(必須)\nあなたが起こした会話で、発言がBot宛てかを判定するときに使います。軽いモデルか、判定専用のJev(TypeSafe)がおすすめです。" },
       ...judge,
       ...codeSection(store, userId),
+      ...reactionSection(store, userId),
     );
   } else {
     body.push({ type: ComponentType.TextDisplay, content: "**モデル**\n先にAPIキーを登録すると、モデルを選べるようになります。" });
@@ -150,32 +154,21 @@ function codeSection(store: Store, userId: string): APIComponentInContainer[] {
   const text = current
     ? `**コードを書くモデル**(任意)\n調べもの・変更案・ルールのコードを ${current.model} が書きます。`
     : "**コードを書くモデル**(任意)\n未設定なので、応答に使うモデルがコードも書きます。選ぶと、調べもの・変更案・ルールのコードをそのモデルが書きます。";
-  // Optional, so every provider shares one select (the panel is near Discord's 40-component limit),
-  // led by the option that leaves code to the response model.
-  const providers = store.listKeys(userId).map((k) => k.provider).filter(isProviderId);
-  const options = [
-    { label: "応答に使うモデルに任せる", value: CODE_UNSET, description: "コード用のモデルを使いません", default: !current },
-    ...providers.flatMap((provider) =>
-      selectableModels(provider, "code").map((model) => ({
-        label: model.name.slice(0, 100),
-        value: `${provider}/${model.id}`,
-        description: `${PROVIDERS[provider].label} · ${model.id}`.slice(0, 100),
-        default: current?.provider === provider && current.model === model.id,
-      })),
-    ),
-  ];
-  const pages = Math.ceil(options.length / SELECT_LIMIT);
   return [
     { type: ComponentType.TextDisplay, content: text },
-    ...Array.from({ length: pages }, (_, page) => ({
-      type: ComponentType.ActionRow,
-      components: [{
-        type: ComponentType.StringSelect,
-        custom_id: CUSTOM_ID.modelSelect("code", "all", page),
-        placeholder: `コードを書くモデル${pages > 1 ? ` (${page + 1}/${pages})` : ""}`,
-        options: options.slice(page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT),
-      }],
-    }) satisfies APIActionRowComponent<APIStringSelectComponent>),
+    ...roleSelects(store, userId, "code", "コードを書くモデル", { label: "応答に使うモデルに任せる", description: "コード用のモデルを使いません" }),
+  ];
+}
+
+// Optional: without it the response model reacts when it sees fit.
+function reactionSection(store: Store, userId: string): APIComponentInContainer[] {
+  const current = store.getSettings(userId).reaction;
+  const text = current
+    ? `**リアクションを選ぶモデル**(任意)\nBotがあなたに答える前に ${current.model} が、文章で返すかリアクションだけで返すかと、どの絵文字にするかを選びます。Botの発言にあなたが付けたリアクションへの応じ方も選びます。`
+    : "**リアクションを選ぶモデル**(任意)\n未設定なので、応答に使うモデルが必要に応じてリアクションで返します。選ぶと、文章かリアクションかをそのモデルが先に決めます。Jev(TypeSafe)のような判定専用のモデルが向いています。";
+  return [
+    { type: ComponentType.TextDisplay, content: text },
+    ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", { label: "応答に使うモデルに任せる", description: "リアクション用のモデルを使いません" }),
   ];
 }
 
@@ -272,7 +265,7 @@ export type PanelAction =
   | { kind: "deleteKey"; provider: KeyProviderId }
   | { kind: "submitKey"; provider: KeyProviderId }
   | { kind: "selectModel"; role: ModelRole; provider: ProviderId; model: string }
-  | { kind: "clearCodeModel" }
+  | { kind: "clearModel"; role: "code" | "reaction" }
   | { kind: "selectWeb"; tool: WebTool }
   | { kind: "selectReadScope"; scope: ReadScopeSetting };
 
@@ -291,9 +284,9 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
     const tool = values[0] ?? "";
     return isWebTool(tool) ? { kind: "selectWeb", tool } : null;
   }
-  if (kind === "model" && (arg === "response" || arg === "judge" || arg === "code")) {
+  if (kind === "model" && (arg === "response" || arg === "judge" || arg === "code" || arg === "reaction")) {
     const value = values[0] ?? "";
-    if (arg === "code" && value === CODE_UNSET) return { kind: "clearCodeModel" };
+    if ((arg === "code" || arg === "reaction") && value === MODEL_UNSET) return { kind: "clearModel", role: arg };
     const slash = value.indexOf("/");
     const provider = value.slice(0, slash);
     const model = value.slice(slash + 1);

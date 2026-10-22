@@ -784,3 +784,64 @@ test("with a coding model, the agent describes code and the coder writes and fix
   assert.equal(await syntaxError("return event.x"), null);
   assert.match((await syntaxError("return ("))!, /SyntaxError/);
 });
+
+const PNG = { name: "formula.png", data: Buffer.from("png-bytes").toString("base64") };
+
+test("a post can carry images drawn in the reply; the dialog shows them and the post uploads them", async () => {
+  const { planner, store, calls, replies } = setup();
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "今日の式", files: ["img1"] } }],
+    images: { img1: PNG, img2: { name: "unused.png", data: "eA==" } },
+  });
+  // Only the images the posts name go into the plan.
+  assert.deepEqual(Object.keys(plan.attachments ?? {}), ["img1"]);
+  const dialog = replies.find((r) => r.kind === "createMessage")!.body;
+  assert.deepEqual(dialog.files.map((f: { name: string }) => f.name), ["img1.png"]);
+  const gallery = dialog.components[0].components.find((c: { type: number }) => c.type === ComponentType.MediaGallery);
+  assert.equal(gallery.items[0].media.url, "attachment://img1.png");
+  assert.match(dialogText(dialog), /「今日の式」\(画像1枚\)/);
+
+  await planner.handleInteraction(click(plan, "run", "1"));
+  await settle(() => store.getPlan(plan.id)!.status === "succeeded");
+  const options = calls[0]!.options as { body: Record<string, unknown>; files: Array<{ name: string; data: Buffer }> };
+  assert.equal(options.body.files, undefined);
+  assert.deepEqual(options.body.attachments, [{ id: 0, filename: "formula.png" }]);
+  assert.equal(options.files[0]!.name, "formula.png");
+  assert.equal(options.files[0]!.data.toString(), "png-bytes");
+});
+
+test("a post needs text or an image that exists; a DM can carry an image too", async () => {
+  const { planner, replies } = setup();
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]) };
+  await assert.rejects(
+    planner.propose({ ...base, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { files: ["img3"] } }], images: { img1: PNG } }),
+    (e: unknown) => e instanceof PlanRejected && /画像 img3 がありません/.test(e.message),
+  );
+  await assert.rejects(
+    planner.propose({ ...base, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: {} }] }),
+    (e: unknown) => e instanceof PlanRejected && /本文\(content\)か画像\(files\)/.test(e.message),
+  );
+  const dm = await planner.propose({ ...base, drafts: [{ op: "POST /users/{user}/dm", path: { user: "3" }, body: { files: ["img1"] } }], images: { img1: PNG } });
+  assert.match(dialogText(replies.find((r) => r.kind === "createMessage")!.body), /DM\(画像のみ\)\(画像1枚\)/);
+  assert.ok(dm.attachments?.img1);
+});
+
+test("a revised plan may keep the images of the plan it replaces, and the dialog swaps them", async () => {
+  const { planner, replies } = setup();
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]) };
+  const first = await planner.propose({ ...base, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { files: ["img1"] } }], images: { img1: PNG } });
+  const second = await planner.propose({ ...base, replaces: first.id, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "直しました", files: ["img1"] } }] });
+  assert.deepEqual(second.attachments, first.attachments);
+  const edit = replies.find((r) => r.kind === "editMessage")!.body;
+  assert.deepEqual(edit.attachments, [{ id: 0, filename: "img1.png" }]);
+  assert.equal(edit.files.length, 1);
+});
+
+test("a rule's post cannot carry images", async () => {
+  const { planner } = setup();
+  await assert.rejects(
+    planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x", files: ["img1"] } }] }),
+    /ルールの投稿には画像を付けられません/,
+  );
+});

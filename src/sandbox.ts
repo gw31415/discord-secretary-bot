@@ -1,5 +1,6 @@
 import { newAsyncContext, shouldInterruptAfterDeadline } from "quickjs-emscripten";
 import type { QuickJSAsyncContext, QuickJSHandle } from "quickjs-emscripten";
+import { CANVAS_PRELUDE, MAX_IMAGES_PER_RUN, measureText, renderCanvas } from "./canvas.ts";
 
 // Read-only code execution. The code runs in QuickJS inside WebAssembly and can
 // only reach the bindings passed in here: no network, files, timers or host objects.
@@ -13,7 +14,16 @@ export interface SandboxBindings {
   params?: unknown;
   /** Which of the rule's triggers fired, e.g. "CHANNEL_CREATE"; null for the agent's code. */
   eventName?: string | null;
+  /** Every event of the run, oldest first: one, or many for a debounced rule. */
+  batch?: unknown[];
+  /**
+   * A rule's saved state, read as `state`; setState(value) replaces it for the
+   * next run. Undefined (the agent's code) leaves both out.
+   */
+  state?: unknown;
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
+  /** Enables createCanvas()/attachImage(); takes the drawn PNG and returns the image's id. */
+  attach?: (png: Buffer, name: string) => string;
 }
 
 export interface SandboxLimits {
@@ -35,6 +45,8 @@ const PRELUDE = [
 export interface SandboxResult {
   ok: boolean;
   value?: unknown;
+  /** Set when the code called setState: the value to keep for the next run. */
+  state?: { value: unknown };
   error?: string;
   logs: string[];
 }
@@ -63,6 +75,9 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     toHandle(vm, bindings.event ?? null).consume((h) => vm.setProp(vm.global, "event", h));
     toHandle(vm, bindings.params ?? null).consume((h) => vm.setProp(vm.global, "params", h));
     toHandle(vm, bindings.eventName ?? null).consume((h) => vm.setProp(vm.global, "eventName", h));
+    toHandle(vm, bindings.batch ?? null).consume((h) => vm.setProp(vm.global, "batch", h));
+    const stateful = bindings.state !== undefined;
+    if (stateful) toHandle(vm, bindings.state).consume((h) => vm.setProp(vm.global, "state", h));
 
     const discord = vm.newObject();
     vm.newAsyncifiedFunction("get", async (routeHandle, optsHandle) => {
@@ -74,13 +89,28 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     vm.setProp(vm.global, "discord", discord);
     discord.dispose();
 
+    let attached = 0;
+    if (bindings.attach) {
+      const attach = bindings.attach;
+      vm.newFunction("__attach", (w, h, opsJson, name) => {
+        if (++attached > MAX_IMAGES_PER_RUN) throw new Error(`attachImage は1回の実行で${MAX_IMAGES_PER_RUN}回までです`);
+        const png = renderCanvas(vm.dump(w), vm.dump(h), JSON.parse(vm.getString(opsJson)));
+        return vm.newString(attach(png, vm.getString(name)));
+      }).consume((fn) => vm.setProp(vm.global, "__attach", fn));
+      vm.newFunction("__measure", (font, text) => toHandle(vm, measureText(vm.getString(font), vm.getString(text)))).consume((fn) => vm.setProp(vm.global, "__measure", fn));
+    }
+
     vm.newFunction("log", (...args) => {
       logs.push(args.map((a) => JSON.stringify(vm.dump(a))).join(" ").slice(0, 2000));
     }).consume((fn) => vm.setProp(vm.global, "log", fn));
 
     // Wrapped so the code can `return` its answer; JSON keeps host and guest values apart.
     // call()/rule()/plan() only build plain objects: a returned plan is a proposal, not a write.
-    const wrapped = `${PRELUDE}\nJSON.stringify((function () {\n${code}\n})())`;
+    // setState keeps a JSON copy, so later changes to the object do not leak into what is saved.
+    const prelude = bindings.attach ? `${PRELUDE}\n${CANVAS_PRELUDE}` : PRELUDE;
+    const wrapped = stateful
+      ? `${prelude}\nvar __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`
+      : `${prelude}\nJSON.stringify((function () {\n${code}\n})())`;
     const result = await vm.evalCodeAsync(wrapped, "agent.js");
     if (result.error) {
       const err = vm.dump(result.error) as { name?: string; message?: string } | string;
@@ -89,7 +119,10 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     }
     const json = vm.getString(result.value);
     result.value.dispose();
-    return { ok: true, value: json === undefined || json === "undefined" ? undefined : JSON.parse(json), logs };
+    const parsed = json === undefined || json === "undefined" ? undefined : JSON.parse(json);
+    if (!stateful) return { ok: true, value: parsed, logs };
+    const out = parsed as { value?: unknown; state?: { value: unknown } };
+    return { ok: true, value: out.value, ...(out.state ? { state: out.state } : {}), logs };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
   } finally {

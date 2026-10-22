@@ -30,6 +30,7 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number }; respo
   }
   let now = 1_000_000;
   const replies: string[] = [];
+  const uploads: string[][] = [];
   const dms: string[] = [];
   const responded: Array<{ apiKey: string; target: string }> = [];
   const judged: string[] = [];
@@ -37,7 +38,10 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number }; respo
     store, webSearch: false,
     selfId: () => SELF, botName: () => "bot", now: () => now,
     fetchBefore: async () => [],
-    sendReply: async (_c, _r, content) => void replies.push(content),
+    sendReply: async (_c, _r, content, files) => {
+      replies.push(content);
+      uploads.push((files ?? []).map((f) => f.name));
+    },
     sendDm: async (userId) => void dms.push(userId),
     typing: async () => undefined,
     makeReader: () => ({ messagesRead: 0 }) as unknown as Reader,
@@ -51,7 +55,7 @@ function setup(opts: { judge?: { addressed: boolean; confidence: number }; respo
     },
     log: () => undefined,
   };
-  return { conv: new Conversations(deps), store, replies, dms, responded, judged, advance: (ms: number) => (now += ms) };
+  return { conv: new Conversations(deps), store, replies, uploads, dms, responded, judged, advance: (ms: number) => (now += ms) };
 }
 
 test("ignores ordinary messages while asleep", async () => {
@@ -228,6 +232,98 @@ test("the store reports how long any channel stays awake", () => {
   store.saveConversation({ channelId: "11", startedBy: "1", awakeUntil: 300 });
   assert.equal(store.awakeUntil(100), 300);
   assert.equal(store.awakeUntil(300), undefined);
+});
+
+test("with a reaction model, a message that only needs a reaction gets one instead of words", async () => {
+  const t = setup();
+  t.store.setApiKey("1", "typesafe", "ts-key-for-1");
+  t.store.setModel("1", "reaction", { provider: "typesafe", model: "jev-latest" });
+  const reacted: string[] = [];
+  const deps = t.conv.deps as ConversationDeps;
+  deps.react = async (_c, messageId, emoji) => void reacted.push(`${messageId}:${emoji}`);
+  let choice: any = { action: "react", emoji: "👍" };
+  const asked: string[] = [];
+  deps.chooseReaction = async (input) => (asked.push(input.apiKey), choice);
+  await t.conv.handle(message("1", "1", "ありがとう", { mentions: [mention] }));
+  assert.deepEqual(reacted, ["1:👍"]);
+  assert.deepEqual(t.replies, []);
+  assert.deepEqual(asked, ["ts-key-for-1"]);
+  assert.equal(t.responded.length, 0);
+  // Words when the model says so; and someone without a reaction model is never asked.
+  choice = { action: "reply" };
+  await t.conv.handle(message("2", "1", "今のロール一覧は?", { mentions: [mention] }));
+  await t.conv.handle(message("3", "2", "それと人数も", { mentions: [mention] }));
+  assert.deepEqual(t.replies, ["answer", "answer"]);
+  assert.equal(asked.length, 2);
+});
+
+test("an answer that is only a reaction posts no text", async () => {
+  const t = setup({ respond: async (input) => (await input.react!("✅"), { text: "", progress: 0, turns: 1, toolCalls: ["react"], reactions: ["✅"] }) });
+  const reacted: string[] = [];
+  (t.conv.deps as ConversationDeps).react = async (_c, messageId, emoji) => void reacted.push(`${messageId}:${emoji}`);
+  await t.conv.handle(message("1", "1", "了解です", { mentions: [mention] }));
+  assert.deepEqual(reacted, ["1:✅"]);
+  assert.deepEqual(t.replies, []);
+});
+
+test("a reaction on the bot's message is taken as an answer only when the model says so", async () => {
+  const t = setup();
+  const deps = t.conv.deps as ConversationDeps;
+  const botMessage = message("50", SELF, "このチャンネルを消してよいですか?");
+  deps.fetchMessage = async () => botMessage;
+  let choice: any = { action: "none" };
+  const kinds: string[] = [];
+  deps.chooseReaction = async (input) => (kinds.push(`${input.kind}:${input.apiKey}`), choice);
+  const reaction = (user: string, extra: object = {}) => ({ user_id: user, channel_id: "10", message_id: "50", guild_id: "100", message_author_id: SELF, emoji: { name: "✅" }, ...extra });
+  await t.conv.reacted(reaction("1"));
+  assert.equal(t.responded.length, 0);
+  // Without a reaction model, the judge model decides.
+  assert.deepEqual(kinds, ["reaction:sk-ant-key-for-1"]);
+  choice = { action: "reply" };
+  await t.conv.reacted(reaction("1"));
+  assert.equal(t.responded.length, 1);
+  assert.match(t.responded[0]!.target, /✅ を付けました/);
+  assert.deepEqual(t.replies, ["answer"]);
+  // Not on the bot's message, by the bot, or by someone unregistered: nothing is asked.
+  await t.conv.reacted(reaction("1", { message_author_id: "2" }));
+  await t.conv.reacted(reaction(SELF));
+  await t.conv.reacted(reaction("7"));
+  assert.equal(kinds.length, 2);
+});
+
+test("reactions show in the transcript", async () => {
+  const { formatMessage } = await import("../src/agent/tools.ts");
+  const line = formatMessage(message("1", "1", "どう?", { reactions: [{ emoji: { id: null, name: "👍" }, count: 2, me: true } as never] }));
+  assert.match(line, /\[リアクション: 👍2\(Botも\)\]/);
+});
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+test("images a tool put in the box go out with the last post of the reply", async () => {
+  const t = setup({
+    respond: async (input) => {
+      input.attachments!.add({ data: PNG, name: "formula.png" });
+      return { text: "式です", progress: 0, turns: 2, toolCalls: [] };
+    },
+  });
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(t.replies, ["式です"]);
+  assert.deepEqual(t.uploads, [["formula.png"]]);
+});
+
+test("a reply that is only an image is still posted, and an image a change takes stays off the reply", async () => {
+  const t = setup({
+    respond: async (input) => {
+      const box = input.attachments!;
+      box.add({ data: PNG, name: "a.png" });
+      box.add({ data: PNG, name: "b.png" });
+      box.take(["img2"]);
+      return { text: "", progress: 0, turns: 2, toolCalls: [] };
+    },
+  });
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(t.replies, [""]);
+  assert.deepEqual(t.uploads, [["a.png"]]);
 });
 
 test("widening asks the speaker with a button unless they always allow it, and is audited", async () => {

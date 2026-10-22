@@ -71,7 +71,10 @@ export function normalizeSteps(drafts: StepDraft[], guildId: string, planId: str
       const value = path[name];
       if (value === undefined) errors.push(`${where}: パスパラメータ ${name} がありません`);
       else if (name === "guild" && value !== guildId) errors.push(`${where}: 別のサーバーは操作できません`);
-      else if (!isRef(value) && !(typeof value === "string" && /^\d{1,20}$/.test(value))) errors.push(`${where}: ${name} はIDの文字列にしてください`);
+      else if (spec.pathFormats?.[name]) {
+        const format = spec.pathFormats[name];
+        if (!(typeof value === "string" && format.pattern.test(value))) errors.push(`${where}: ${name} は${format.hint}にしてください`);
+      } else if (!isRef(value) && !(typeof value === "string" && /^\d{1,20}$/.test(value))) errors.push(`${where}: ${name} はIDの文字列にしてください`);
     }
     for (const ref of badRefs(path, ids)) errors.push(`${where}: 参照 ${ref} は前のステップの結果を指していません`);
     if (draft.query && Object.keys(draft.query).length > 0) errors.push(`${where}: クエリは使えません`);

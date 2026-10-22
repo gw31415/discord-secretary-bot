@@ -89,6 +89,9 @@ test("every selectable model is offered, with unique custom ids, within the comp
   assert.ok(offered("response").has("anthropic/claude-opus-5-5"));
   assert.ok(offered("judge").has("typesafe/jev-latest"), "Jev is offered for judgment");
   assert.ok(!offered("response").has("typesafe/jev-latest"), "a classifier cannot answer");
+  assert.ok(offered("reaction").has("typesafe/jev-latest"), "Jev is offered for reactions");
+  const reaction = selects.filter((s) => s.custom_id.startsWith("llm:model:reaction:")).flatMap((s) => s.options.map((o) => o.value));
+  assert.equal(reaction[0], "none");
 });
 
 test("custom ids parse into panel actions and reject unknown models", () => {
@@ -108,9 +111,12 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:response:tavily:0", ["tavily/search"]), null);
   assert.equal(parseCustomId("plan:run:1"), null);
   // The code model is optional: one select across providers, led by "leave it to the response model".
-  assert.deepEqual(parseCustomId("llm:model:code:all:0", ["none"]), { kind: "clearCodeModel" });
+  assert.deepEqual(parseCustomId("llm:model:code:all:0", ["none"]), { kind: "clearModel", role: "code" });
   assert.equal(parseCustomId("llm:model:code:all:0", ["typesafe/jev-latest"]), null);
   assert.equal(parseCustomId("llm:model:code:all:0", ["zai/glm-5.2"])?.kind, "selectModel");
+  // The reaction model is optional too, and takes a classifier.
+  assert.deepEqual(parseCustomId("llm:model:reaction:all:0", ["none"]), { kind: "clearModel", role: "reaction" });
+  assert.equal(parseCustomId("llm:model:reaction:all:0", ["typesafe/jev-latest"])?.kind, "selectModel");
 });
 
 test("the audit log keeps actions without secrets", () => {
