@@ -1,6 +1,8 @@
 import { newAsyncContext, shouldInterruptAfterDeadline } from "quickjs-emscripten";
 import type { QuickJSAsyncContext, QuickJSHandle } from "quickjs-emscripten";
 import { CANVAS_PRELUDE, MAX_IMAGES_PER_RUN, measureText, renderCanvas } from "./canvas.ts";
+import { checkDecideInput, DECIDE_PRELUDE, MAX_DECIDES_PER_RUN } from "./agent/decide.ts";
+import type { Decide } from "./agent/decide.ts";
 
 // Read-only code execution. The code runs in QuickJS inside WebAssembly and can
 // only reach the bindings passed in here: no network, files, timers or host objects.
@@ -26,6 +28,8 @@ export interface SandboxBindings {
   attach?: (png: Buffer, name: string) => string;
   /** Enables reply(text) for a command's run: the words go back to whoever ran the command. */
   reply?: (text: string) => void;
+  /** Enables judge()/rank() with the person's judge model (or language model). */
+  decide?: Decide;
   /** Enables renderMath()/convertImage(); each returns the new image's id. Options arrive unchecked. */
   media?: {
     math: (tex: string, options: unknown, name: string) => Promise<string>;
@@ -127,6 +131,16 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
       }).consume((fn) => vm.setProp(vm.global, "__convert", fn));
     }
 
+    if (bindings.decide) {
+      const decide = bindings.decide;
+      let judged = 0;
+      vm.newAsyncifiedFunction("__judge", async (state, questions) => {
+        if (++judged > MAX_DECIDES_PER_RUN) throw new Error(`judge・rank は1回の実行で${MAX_DECIDES_PER_RUN}回までです`);
+        const input = checkDecideInput(JSON.parse(vm.getString(state)), JSON.parse(vm.getString(questions)));
+        return vm.newString(JSON.stringify(await decide(input.state, input.questions)));
+      }).consume((fn) => vm.setProp(vm.global, "__judge", fn));
+    }
+
     if (bindings.reply) {
       const reply = bindings.reply;
       vm.newFunction("reply", (text) => {
@@ -141,7 +155,7 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     // Wrapped so the code can `return` its answer; JSON keeps host and guest values apart.
     // call()/rule()/plan() only build plain objects: a returned plan is a proposal, not a write.
     // setState keeps a JSON copy, so later changes to the object do not leak into what is saved.
-    const prelude = [PRELUDE, ...(bindings.attach ? [CANVAS_PRELUDE] : []), ...(bindings.media ? [MEDIA_PRELUDE] : [])].join("\n");
+    const prelude = [PRELUDE, ...(bindings.attach ? [CANVAS_PRELUDE] : []), ...(bindings.media ? [MEDIA_PRELUDE] : []), ...(bindings.decide ? [DECIDE_PRELUDE] : [])].join("\n");
     const wrapped = stateful
       ? `${prelude}\nvar __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`
       : `${prelude}\nJSON.stringify((function () {\n${code}\n})())`;

@@ -10,6 +10,7 @@ import type { Planner } from "../plan/service.ts";
 import type { Plan, Step, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
+import type { Decide } from "../agent/decide.ts";
 import type { SandboxResult } from "../sandbox.ts";
 import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
 import { createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
@@ -49,6 +50,8 @@ export interface RuleEngineDeps {
   notifyOwner?: (userId: string, content: string) => Promise<void>;
   log: (message: string, error?: unknown) => void;
   run?: typeof runSandboxed;
+  /** The owner's judge model, for judge() and rank() in rule code. */
+  decide?: (ownerId: string) => Decide | undefined;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -447,6 +450,7 @@ export class RuleEngine {
         if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
         return image.data;
       };
+      const decider = this.deps.decide?.(rule.ownerId);
       result = await (this.deps.run ?? runSandboxed)(
         rule.code,
         {
@@ -460,6 +464,7 @@ export class RuleEngine {
           get: (route, query) => source.get(route, query as Record<string, string>),
           ...(command ? { reply: (text: string) => void (replied = (replied ? `${replied}\n${text}` : text).slice(0, MAX_REPLY)) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
+          ...(decider ? { decide: decider } : {}),
           media: {
             math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.png`),
             convert: async (source: unknown, raw: unknown, name: string) => {

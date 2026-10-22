@@ -12,6 +12,8 @@ import { mimeOf } from "./attachments.ts";
 import type { ImageBox } from "./attachments.ts";
 import { ConvertOptionsSchema, convertImage, forModel, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { ConvertOptions, MathOptions } from "../media.ts";
+import { checkDecideInput, JUDGE_CODE_LINE, MAX_QUESTIONS, MAX_STATE_JSON as MAX_JUDGE_STATE_JSON } from "./decide.ts";
+import type { Decide } from "./decide.ts";
 import { AGENT_SANDBOX_LIMITS, RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { SandboxBindings } from "../sandbox.ts";
 import { catalogSummary } from "../plan/catalog.ts";
@@ -86,11 +88,12 @@ function tool<T extends TSchema>(definition: AgentTool<T>): AgentTool<any> {
 }
 
 /** The agent's code runs as the speaker, reading through the same reader as the tools. */
-function bindingsOf(reader: Reader): SandboxBindings {
+function bindingsOf(reader: Reader, decide?: Decide): SandboxBindings {
   return {
     guildId: reader.guild.id,
     actor: { kind: "user", userId: reader.scope.speakerId },
     get: (route, query) => reader.get(route, query as Record<string, string>),
+    ...(decide ? { decide } : {}),
   };
 }
 
@@ -108,6 +111,8 @@ export interface ToolOptions {
   attachments?: ImageBox;
   /** Asks the speaker to let this reply read up to their own permissions; true when allowed. */
   widen?: (reason: string) => Promise<boolean>;
+  /** Judgments by the speaker's judge model: the judge tool, and judge()/rank() in code. */
+  decide?: Decide;
 }
 
 export type Propose = (drafts: StepDraft[], code?: string, rules?: RuleProposal[]) => Promise<Plan>;
@@ -199,7 +204,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     },
   });
 
-  const sandboxBindings = bindingsOf(reader);
+  const sandboxBindings = bindingsOf(reader, options.decide);
   const box = options.attachments;
 
   /** An image the reply may use: one already in the box, or one on a message this channel may show. */
@@ -288,6 +293,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       "使えるもの: guild(サーバーID), actor, discord.get(route, { query }) (同期関数。例: discord.get(`/guilds/${guild}/roles`)), log(...)。",
       "読めるのは許可された経路だけで、結果は今のチャンネルで扱える範囲に絞られます。ネットワーク・タイマー・ファイルはありません。",
       ...(CANVAS_LINE ? [CANVAS_LINE] : []),
+      ...(options.decide ? [JUDGE_CODE_LINE] : []),
     ].join("\n"),
     parameters: Type.Object({ code: Type.String({ description: "関数本体。最後に return で結果を返す" }) }),
     execute: async (_id, params) => {
@@ -381,7 +387,8 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   const tools = [readMessages, searchMessages, listChannels, findMembers, coder ? runCodeTask : runCode];
   if (options.images) tools.push(viewImages);
   if (box) tools.push(renderMathTool, convertImageTool);
-  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools));
+  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide));
+  if (options.decide) tools.push(judgeTool(options.decide));
   if (options.rules) tools.push(...ruleReadTools(options.rules));
   if (options.widen && reader.narrowed) tools.push(widenRead(reader, options.widen));
   return tools;
@@ -580,7 +587,7 @@ const RULES_DESCRIPTION = [
   "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
   "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
-  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。1回4枚まで), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
+  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。1回4枚まで), judge・rank(作成者の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
   "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
   "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, channel?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の、channel はステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の実行直前の状態の JSON Schema です。決まったカテゴリの中のチャンネルにだけ投稿させるなら channel: { properties: { parent_id: { const: \"<カテゴリID>\" } }, required: [\"parent_id\"] } のようにします。コードが出したステップはどれか1つに合わないと実行されません。",
   "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
@@ -654,7 +661,30 @@ function listRules(rules: RuleTools): AgentTool<any> {
   });
 }
 
-function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = []): AgentTool<any> {
+/** Judging and ranking by the speaker's judge model, which is lighter than the agent's own. */
+function judgeTool(decideFn: Decide): AgentTool<any> {
+  return tool({
+    name: "judge",
+    label: "判定する",
+    description: [
+      "判定モデルに、データについての判定をまとめて頼みます。はい・いいえ(bool)、選択肢から1つ(choice)、段階での点数付け(score)ができます。",
+      "多くのメッセージやメンバーを分類する、条件に合うか見分ける、関連の強い順に並べるなど、判断の数が多いときに使います。自分で読んで判断するより軽く済みます。",
+      `state: 判定するデータ(オブジェクト。JSONで${MAX_JUDGE_STATE_JSON}文字まで)。questions: { キー: 質問 }(${MAX_QUESTIONS}個まで)。質問は { type: "bool", instructions, criteria: { true, false } }、{ type: "choice", instructions, criteria: { 選択肢キー: 説明 } }、{ type: "score", instructions, criteria: [低い段階の説明, …, 高い段階の説明] } です。`,
+      "答えは bool なら probability(0〜1)、choice なら choice と confidence、score なら score(段階の番号。小数あり)と confidence です。",
+    ].join("\n"),
+    parameters: Type.Object({
+      state: Type.Record(Type.String(), Type.Unknown()),
+      questions: Type.Record(Type.String(), Type.Unknown()),
+    }),
+    execute: async (_id, params) => {
+      const input = checkDecideInput(params.state, params.questions);
+      const answers = await decideFn(input.state, input.questions);
+      return text(JSON.stringify(answers, null, 1));
+    },
+  });
+}
+
+function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = [], decide?: Decide): AgentTool<any> {
   const codeLine = coder
     ? `code_task: 今すぐ行う変更を作るコードの依頼(steps と同時には使えません)。コード用のモデルが読み取り専用のJavaScriptを書いて実行し、変更の一覧を作ります。何を読んで、どんな条件で、どの対象に何をするかを書きます。${CODER_LIMIT_NOTE}`
     : `code: 今すぐ行う変更を作る読み取り専用のJavaScript(steps と同時には使えません)。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`;
@@ -664,7 +694,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
         `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code_task, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
       ).replace(/\n  code: イベントごとに[^\n]*\n    使えるもの:[^\n]*/, "")
     : RULES_DESCRIPTION;
-  const sandboxBindings = bindingsOf(reader);
+  const sandboxBindings = bindingsOf(reader, decide);
   return tool({
     name: "propose_plan",
     label: "変更を提案",

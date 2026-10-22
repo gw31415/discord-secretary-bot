@@ -150,7 +150,10 @@ export interface ModelRef {
 
 export interface UserSettings {
   response: ModelRef | null;
+  /** Judgments of every kind; unset means the response model judges. */
   judge: ModelRef | null;
+  /** Whether a message is addressed to the bot; unset means the judge model. */
+  addressee: ModelRef | null;
   /** Writes the agent's code (run_code, plans, rules). Unset means the response model writes it. */
   code: ModelRef | null;
   /** Decides whether to answer with a reaction alone, and which. Unset leaves reactions to the response model. */
@@ -254,6 +257,8 @@ export class Store {
     this.#masterKey = masterKey;
     this.#migrate();
     this.#ensureColumn("user_settings", "read_scope", "TEXT");
+    this.#ensureColumn("user_settings", "addressee_provider", "TEXT");
+    this.#ensureColumn("user_settings", "addressee_model", "TEXT");
   }
 
   /**
@@ -329,13 +334,14 @@ export class Store {
 
   getSettings(userId: string): UserSettings {
     const row = this.db.prepare("SELECT * FROM user_settings WHERE user_id = ?").get(userId) as
-      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; code_provider: string | null; code_model: string | null; reaction_provider: string | null; reaction_model: string | null; web_tool: string | null; read_scope: string | null }
+      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; addressee_provider: string | null; addressee_model: string | null; code_provider: string | null; code_model: string | null; reaction_provider: string | null; reaction_model: string | null; web_tool: string | null; read_scope: string | null }
       | undefined;
     const ref = (provider: string | null | undefined, model: string | null | undefined): ModelRef | null =>
       provider && model && isProviderId(provider) ? { provider, model } : null;
     return {
       response: ref(row?.default_provider, row?.default_model),
       judge: ref(row?.judge_provider, row?.judge_model),
+      addressee: ref(row?.addressee_provider, row?.addressee_model),
       code: ref(row?.code_provider, row?.code_model),
       reaction: ref(row?.reaction_provider, row?.reaction_model),
       web: row?.web_tool && isWebTool(row.web_tool) ? row.web_tool : "auto",
@@ -353,10 +359,11 @@ export class Store {
     this.db.prepare("UPDATE user_settings SET web_tool = ? WHERE user_id = ?").run(tool, userId);
   }
 
-  setModel(userId: string, role: "response" | "judge" | "code" | "reaction", ref: ModelRef | null): void {
+  setModel(userId: string, role: "response" | "judge" | "addressee" | "code" | "reaction", ref: ModelRef | null): void {
     const [providerCol, modelCol] = {
       response: ["default_provider", "default_model"],
       judge: ["judge_provider", "judge_model"],
+      addressee: ["addressee_provider", "addressee_model"],
       code: ["code_provider", "code_model"],
       reaction: ["reaction_provider", "reaction_model"],
     }[role];

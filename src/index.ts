@@ -3,6 +3,7 @@ import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { PresenceUpdateStatus } from "discord-api-types/v10";
 import { judgeAddressed, publicReplyScore } from "./agent/judge.ts";
+import { decideFor } from "./agent/decide.ts";
 import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
@@ -17,7 +18,7 @@ import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
-import { findChatModel, findJudgeModel } from "./llm/models.ts";
+import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
 import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
 import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
@@ -125,6 +126,7 @@ const engine = new RuleEngine({
   now: () => Date.now(),
   makeReader,
   notifyOwner: sendDm,
+  decide: (ownerId) => decideFor(store, ownerId),
   onRulesChanged: syncCommands,
   log,
 });
@@ -146,7 +148,7 @@ const rules = new RuleService({
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
   },
   visibilityScore: async ({ ownerId, command, options, reply, images, steps }) => {
-    const ref = store.getSettings(ownerId).judge;
+    const ref = judgeRef(store.getSettings(ownerId));
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
     if (!model || !apiKey) return null;
