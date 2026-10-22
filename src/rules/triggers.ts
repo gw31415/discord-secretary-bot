@@ -145,8 +145,8 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
   VOICE_STATE_UPDATE: {
     label: "ボイスチャンネルに入った・出た・移ったとき",
     intent: GatewayIntentBits.GuildVoiceStates,
-    payload: "guild_id, user_id, channel_id(抜けたときは null), member { roles, user }, self_mute, self_deaf",
-    channel: (d) => d.channel_id,
+    payload: "guild_id, user_id, channel_id(抜けたときは null), before_channel_id(直前にいたチャンネル。いなかったときは null), member { roles, user }, self_mute, self_deaf",
+    channel: (d) => d.channel_id ?? d.before_channel_id,
     actorId: (d) => d.user_id,
     resources: (d) => [`member:${d.user_id}`],
   },

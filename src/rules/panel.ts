@@ -1,29 +1,23 @@
-import { ButtonStyle, ComponentType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
-import type {
-  APIButtonComponent,
-  APIComponentInContainer,
-  APIMessageTopLevelComponent,
-  APIModalInteractionResponseCallbackData,
-} from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, MessageFlags } from "discord-api-types/v10";
+import type { APIButtonComponent, APIComponentInContainer, APIMessageTopLevelComponent } from "discord-api-types/v10";
 import type { AuditEntry, PlanRow } from "../db.ts";
 import { RISK_LABEL } from "../plan/types.ts";
-import { allowLines, allowRisk } from "./allow.ts";
+import type { RuleDryRun } from "../plan/types.ts";
+import { allowLines, allowRisk, valueText } from "./allow.ts";
 import type { Halt } from "./engine.ts";
 import { TRIGGERS } from "./triggers.ts";
 import type { Rule, RuleRun, RunOutcome } from "./types.ts";
 
-// What /rule shows: the confirmation for a new rule (or a new version), and the
-// management panel. Everything is drawn from the rule definition and the
-// database; the model's own words appear only as the summary, which another
-// model wrote from the code alone. All of it is ephemeral.
+// What /rules shows: the management panel. Everything is drawn from the rule
+// definition and the database; the model's own words appear only as the
+// summary, which another model wrote from the code alone. All of it is
+// ephemeral. New rules are confirmed in a plan's dialog (plan/dialog.ts).
 
 export type RuleAction =
-  | "save" | "revise" | "revisetext" | "discard" | "draftcode"
   | "home" | "open" | "enable" | "disable" | "dry" | "delete" | "delete2" | "code"
   | "plans" | "audit" | "halt" | "resume";
 
 const ACTIONS = new Set<RuleAction>([
-  "save", "revise", "revisetext", "discard", "draftcode",
   "home", "open", "enable", "disable", "dry", "delete", "delete2", "code",
   "plans", "audit", "halt", "resume",
 ]);
@@ -59,7 +53,7 @@ function row(buttons: APIButtonComponent[]): APIComponentInContainer {
   return { type: ComponentType.ActionRow, components: buttons.slice(0, 5) };
 }
 
-function container(texts: string[], rows: APIComponentInContainer[], accent?: number, ephemeral = true): Rendered {
+function container(texts: string[], rows: APIComponentInContainer[], accent?: number): Rendered {
   let budget = MAX_TOTAL;
   const parts: APIComponentInContainer[] = [];
   for (const t of texts) {
@@ -69,7 +63,7 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
     parts.push({ type: ComponentType.TextDisplay, content });
   }
   return {
-    flags: ephemeral ? MessageFlags.Ephemeral | MessageFlags.IsComponentsV2 : MessageFlags.IsComponentsV2,
+    flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
     components: [{ type: ComponentType.Container, ...(accent !== undefined ? { accent_color: accent } : {}), components: [...parts, ...rows] }],
   };
 }
@@ -79,21 +73,15 @@ export function triggerLabel(trigger: Rule["trigger"]): string {
   return `${label}(\`${trigger.event}\`)${trigger.includeBotOrigin ? " ⚠️ Bot自身が起こしたイベントでも動きます" : ""}`;
 }
 
-export interface DryRunView {
-  /** Where the event came from, e.g. "直近のメッセージ". Null when there was none. */
-  source: string | null;
-  outcome: "none" | "steps" | "error" | "no_event";
-  lines: string[];
-  problems: string[];
-  logs: string[];
-}
-
-function dryRunText(dry: DryRunView): string {
+export function dryRunText(dry: RuleDryRun): string {
   const head = `**ドライラン**${dry.source ? `(${dry.source}で実行。実際の変更はしていません)` : ""}`;
   const body: string[] = [];
   switch (dry.outcome) {
     case "no_event":
       body.push("試せるイベントがありませんでした。");
+      break;
+    case "pending":
+      body.push("この変更で作るものの値を使うため、登録まで試せません(コードがエラーにならないことだけ確かめました)。");
       break;
     case "none":
       body.push("このイベントでは何も変更しません。");
@@ -110,68 +98,26 @@ function dryRunText(dry: DryRunView): string {
   return [head, ...body].join("\n");
 }
 
-export type DraftStatus = "pending" | "saved" | "discarded" | "replaced" | "expired";
-
-export interface DraftView {
-  draftId: string;
-  ownerId: string;
-  name: string;
-  trigger: Rule["trigger"];
-  allow: Rule["allow"];
-  code: string;
-  summary: string | null;
-  limits: Rule["limits"];
-  dry: DryRunView;
-  /** The rule this draft would replace, with its current version. */
-  replaces?: { name: string; version: number };
-  status: DraftStatus;
-  expiresAt: string;
-  /** Shown under the status, e.g. why saving failed. */
-  note?: string;
-}
-
-function definitionTexts(d: { ownerId: string; trigger: Rule["trigger"]; allow: Rule["allow"]; code: string; summary: string | null; limits: Rule["limits"] }, label: (id: string) => string): string[] {
+function definitionTexts(d: Pick<Rule, "ownerId" | "trigger" | "allow" | "code" | "params" | "summary" | "limits">, label: (id: string) => string): string[] {
   const risk = allowRisk(d.allow);
   return [
     `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · 1分に${d.limits.perMinute}回まで · ${d.limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`,
     `**許す操作**(これ以外の変更は実行されません)\n${allowLines(d.allow, label).join("\n")}`,
+    d.params ? `**params**(コードが読む値)\n${paramsText(d.params, label)}` : "",
     `**コードの説明**(依頼を見ていない別のAIがコードだけを読んで書いたものです)\n${d.summary ?? "説明を作れませんでした。コードを読んで確かめてください。"}`,
     fenced("js", d.code.length > MAX_CODE ? `${d.code.slice(0, MAX_CODE)}\n// …(続きは「コードをファイルで」)` : d.code),
   ];
 }
 
-function draftStatusLine(d: DraftView): string {
-  switch (d.status) {
-    case "pending":
-      return `依頼者が「${d.replaces ? "この内容に変更" : "登録"}」を押すと登録され、以後は人の確認なしにイベントごとに動きます。違うところがあれば「修正」から直せます。期限 <t:${unix(d.expiresAt)}:R>`;
-    case "saved":
-      return `✅ 登録しました。\`/rules\` で止めたり実行履歴を見たりできます。`;
-    case "discarded":
-      return "取り消しました。";
-    case "replaced":
-      return "修正版に置き換えました。";
-    case "expired":
-      return "期限切れになりました。もう一度頼んでください。";
-  }
-}
-
-/** The rule confirmation, posted in the conversation like a plan's dialog. */
-export function draftView(d: DraftView, label: (id: string) => string): Rendered {
-  const title = d.replaces ? `### ルール変更の確認: ${d.replaces.name}(v${d.replaces.version} → v${d.replaces.version + 1})` : `### ルール登録の確認: ${d.name}`;
-  const texts = [title, ...definitionTexts(d, label), dryRunText(d.dry), draftStatusLine(d)];
-  if (d.note) texts.push(`-# ${d.note}`);
-  const risk = allowRisk(d.allow);
-  const buttons: APIButtonComponent[] = [];
-  if (d.status === "pending") {
-    buttons.push(
-      button(ruleCustomId("save", d.draftId), d.replaces ? "この内容に変更" : "登録", risk === "destructive" ? ButtonStyle.Danger : ButtonStyle.Primary),
-      button(ruleCustomId("revise", d.draftId), "修正"),
-      button(ruleCustomId("discard", d.draftId), "取り消し"),
-    );
-  }
-  buttons.push(button(ruleCustomId("draftcode", d.draftId), "コードをファイルで"));
-  const accent = d.status === "saved" ? 0x57f287 : d.status === "pending" ? (risk === "destructive" ? 0xed4245 : 0x5865f2) : 0x80848e;
-  return container(texts, [row(buttons)], accent, false);
+/** A rule's params, with ids named where the cache knows them. */
+export function paramsText(params: Record<string, unknown>, label: (id: string) => string): string {
+  return Object.entries(params)
+    .slice(0, 10)
+    .map(([k, v]) => {
+      const text = typeof v === "string" && label(v) !== v ? `${label(v)}(${v})` : valueText(v, (id) => JSON.stringify(id));
+      return `- ${k}: ${clip(text ?? "null", 120)}`;
+    })
+    .join("\n");
 }
 
 const OUTCOME_LABEL: Record<RunOutcome, string> = {
@@ -245,7 +191,7 @@ export interface DetailInput {
   rule: Rule;
   runs: RuleRun[];
   can: { enable: boolean; disable: boolean; remove: boolean; owner: boolean };
-  dry?: DryRunView;
+  dry?: RuleDryRun;
   notice?: string;
   confirmDelete?: boolean;
 }
@@ -319,15 +265,4 @@ export function auditView(entries: AuditEntry[], all: boolean): Rendered {
     [`### 監査ログ\n${all ? "このサーバーの最近の記録です。" : "あなたの操作の記録です。全件を見るには監査ログ表示の権限が必要です。"}`, lines.join("\n") || "ありません"],
     [row([button(ruleCustomId("home"), "戻る")])],
   );
-}
-
-export function instructionModal(customId: string, title: string, label: string, placeholder: string): APIModalInteractionResponseCallbackData {
-  return {
-    custom_id: customId,
-    title,
-    components: [{
-      type: ComponentType.ActionRow,
-      components: [{ type: ComponentType.TextInput, custom_id: "instruction", label, style: TextInputStyle.Paragraph, placeholder, required: true, max_length: 1500 }],
-    }],
-  };
 }

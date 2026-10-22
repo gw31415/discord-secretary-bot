@@ -42,3 +42,10 @@ test("host errors surface as sandbox errors", async () => {
   assert.equal(r.ok, false);
   assert.match(r.error!, /denied!/);
 });
+
+test("plan(steps, rules) carries rules, and a rule's code reads its params", async () => {
+  const r = await runSandboxed(`return plan([call("DELETE /channels/{channel}", { path: { channel: "1" } })], [rule({ name: "x", trigger_event: "VOICE_STATE_UPDATE" })]);`, bindings, limits);
+  assert.deepEqual(r.value, { steps: [{ op: "DELETE /channels/{channel}", path: { channel: "1" } }], rules: [{ name: "x", trigger_event: "VOICE_STATE_UPDATE" }] });
+  const p = await runSandboxed(`return [params.lobby, event.channel_id];`, { ...bindings, params: { lobby: "7" }, event: { channel_id: "7" } }, limits);
+  assert.deepEqual(p.value, ["7", "7"]);
+});

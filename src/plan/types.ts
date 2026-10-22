@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import type { Static } from "typebox";
+import type { RuleTrigger } from "../rules/types.ts";
 
 // Core Plan types. TypeBox gives both the TypeScript type and the JSON Schema
 // that validates what the agent proposes.
@@ -70,6 +71,8 @@ export interface Plan {
   source?: PlanSource;
   /** Set when an event rule made the plan; it runs without a dialog, inside `allow`. */
   rule?: PlanRule;
+  /** Event rules the plan registers once its steps have run, approved with the same dialog. */
+  rules?: PlanRuleDraft[];
   hash: string;
   createdAt: string;
   expiresAt: string;
@@ -92,8 +95,49 @@ export interface AllowEntry {
   op: string;
   path?: Record<string, Record<string, unknown>>;
   body?: Record<string, unknown>;
+  /**
+   * JSON Schema the target's current state must satisfy, read from REST right
+   * before the step runs, e.g. { properties: { name: { pattern: "^📞" } } }.
+   */
+  target?: Record<string, unknown>;
   /** Steps of this kind per run. Absent means up to the plan limit. */
   maxStepsPerRun?: number;
+}
+
+/**
+ * A rule inside a plan. `allow` and `params` may hold refs to the plan's step
+ * results (e.g. the id of a channel the plan creates); they are filled in when
+ * the steps have run, and the rule is registered then.
+ */
+export interface PlanRuleDraft {
+  /** "r1", "r2", … within the plan. */
+  key: string;
+  name: string;
+  trigger: RuleTrigger;
+  allow: AllowEntry[];
+  code: string;
+  /** Values the code reads as `params`. */
+  params?: Record<string, unknown>;
+  /** Written from the code alone by a model that did not see the request. */
+  summary: string | null;
+  /** An existing rule of the owner's this is a new version of. */
+  replaces?: { id: string; name: string; version: number };
+  /** The dry run at proposal. */
+  dry: RuleDryRun;
+  /** Kept so proposing the plan again can dry-run the same way. */
+  sampleEvent?: unknown;
+  /** The request the rule was written for, kept as the rule's source. */
+  request: string;
+}
+
+export interface RuleDryRun {
+  /** Where the event came from, e.g. "直近のメッセージ". Null when there was none. */
+  source: string | null;
+  /** "pending": it depends on values the plan's steps produce, so it was not tried. */
+  outcome: "none" | "steps" | "error" | "no_event" | "pending";
+  lines: string[];
+  problems: string[];
+  logs: string[];
 }
 
 export interface PlanSource {

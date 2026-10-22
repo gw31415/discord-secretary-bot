@@ -104,3 +104,16 @@ test("a thread from another server is refused even if its parent id looks sharea
   });
   await assert.rejects(makeReader(rest, "10", "3").get("/channels/78/messages"), /この場所では扱えません/);
 });
+
+test("voice states come from the Gateway, narrowed to channels this reply may show", async () => {
+  const { rest, calls } = fakeRest({});
+  const reader = makeReader(rest, "10", "3");
+  reader.cache.setVoice("3", "10");
+  reader.cache.setVoice("2", "11"); // staff: hidden from regular members
+  assert.equal(reader.cache.setVoice("2", "11"), "11");
+  assert.deepEqual(await reader.get(`/guilds/${GUILD}/voice-states`), [{ user_id: "3", channel_id: "10" }]);
+  assert.deepEqual(await reader.get(`/guilds/${GUILD}/voice-states`, { channel_id: "11" }), []);
+  assert.equal(reader.cache.setVoice("3", null), "10");
+  assert.deepEqual(await reader.get(`/guilds/${GUILD}/voice-states`), []);
+  assert.equal(calls.length, 0);
+});

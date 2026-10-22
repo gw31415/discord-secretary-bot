@@ -48,6 +48,11 @@ export function allowShapeProblems(allow: AllowEntry[]): string[] {
       const p = schemaProblem(entry.body, `${where}.body`);
       if (p) problems.push(p);
     }
+    if (entry.target !== undefined) {
+      if (!spec.target) problems.push(`${where}: この操作には対象の条件を付けられません`);
+      const p = schemaProblem(entry.target, `${where}.target`);
+      if (p) problems.push(p);
+    }
     if (entry.maxStepsPerRun !== undefined && !(Number.isInteger(entry.maxStepsPerRun) && entry.maxStepsPerRun >= 1 && entry.maxStepsPerRun <= MAX_STEPS)) {
       problems.push(`${where}: maxStepsPerRun は1〜${MAX_STEPS}の整数にしてください`);
     }
@@ -55,8 +60,15 @@ export function allowShapeProblems(allow: AllowEntry[]): string[] {
   return problems;
 }
 
+/**
+ * The current state of each step's target, by step id; null when it does not
+ * exist. A step missing from the map has its target conditions checked later
+ * (at proposal, or while its target still waits on an earlier step).
+ */
+export type Targets = Map<string, Record<string, unknown> | null>;
+
 /** Whether a step fits an entry. Values still waiting on an earlier step pass until they are known. */
-export function fits(step: Step, entry: AllowEntry): boolean {
+export function fits(step: Step, entry: AllowEntry, targets?: Targets): boolean {
   if (step.op !== entry.op) return false;
   for (const [name, schema] of Object.entries(entry.path ?? {})) {
     const value = step.pathParams[name];
@@ -64,7 +76,16 @@ export function fits(step: Step, entry: AllowEntry): boolean {
     if (!Value.Check(schema as never, value)) return false;
   }
   if (entry.body !== undefined && !Value.Check(entry.body as never, containsRef(step.body) ? withoutRefs(step.body) : step.body ?? {})) return false;
+  if (entry.target !== undefined && targets?.has(step.id)) {
+    const target = targets.get(step.id);
+    if (!target || !Value.Check(entry.target as never, target)) return false;
+  }
   return true;
+}
+
+/** Whether any entry for this step's operation has conditions on its target. */
+export function needsTarget(step: Step, allow: AllowEntry[]): boolean {
+  return allow.some((entry) => entry.op === step.op && entry.target !== undefined);
 }
 
 function containsRef(value: unknown): boolean {
@@ -81,11 +102,11 @@ function withoutRefs(body: unknown): unknown {
 }
 
 /** Steps outside the allow list, and entries used more often than they permit. */
-export function allowProblems(steps: Step[], allow: AllowEntry[]): string[] {
+export function allowProblems(steps: Step[], allow: AllowEntry[], targets?: Targets): string[] {
   const problems: string[] = [];
   const used = new Map<number, number>();
   for (const step of steps) {
-    const index = allow.findIndex((entry) => fits(step, entry));
+    const index = allow.findIndex((entry) => fits(step, entry, targets));
     const label = CATALOG.get(step.op)?.label ?? step.op;
     if (index < 0) {
       problems.push(`${step.id}(${label}): 許可された操作の範囲外です`);
@@ -160,6 +181,15 @@ function compact(schema: unknown, max = 160): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** A value of a schema or of params, with a ref to a step result shown as such. */
+export function valueText(value: unknown, label: (id: string) => string = (id) => id): string {
+  if (isRef(value)) {
+    const m = /^steps\.([^.]+)\.result\.?(.*)$/.exec(value.$ref);
+    return m ? `(${m[1]} で作るものの${m[2] || "結果"})` : value.$ref;
+  }
+  return typeof value === "string" ? label(value) : JSON.stringify(value);
+}
+
 /** One line per entry, drawn only from the entry itself. */
 export function allowLines(allow: AllowEntry[], label: (id: string) => string = (id) => id): string[] {
   return allow.map((entry) => {
@@ -168,10 +198,11 @@ export function allowLines(allow: AllowEntry[], label: (id: string) => string = 
     for (const [name, schema] of Object.entries(entry.path ?? {})) {
       const s = schema as { enum?: unknown[]; const?: unknown };
       const values = s.enum ?? (s.const !== undefined ? [s.const] : null);
-      parts.push(values ? `${name}: ${values.map((v) => label(String(v))).join("、")} のみ` : `${name}: ${compact(schema)}`);
+      parts.push(values ? `${name}: ${values.map((v) => valueText(v, label)).join("、")} のみ` : `${name}: ${compact(schema)}`);
     }
     if (spec?.channel && !entry.path?.[spec.channel]) parts.push(`${spec.channel}: どこでも`);
     if (entry.body !== undefined) parts.push(`本文: ${compact(entry.body)}`);
+    if (entry.target !== undefined) parts.push(`対象の条件: ${compact(entry.target)}`);
     parts.push(entry.maxStepsPerRun !== undefined ? `1回に${entry.maxStepsPerRun}件まで` : `1回に${MAX_STEPS}件まで`);
     return `- ${parts.join(" / ")}`;
   });

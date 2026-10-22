@@ -200,8 +200,8 @@ interface RuleDbRow {
 }
 
 function definitionOf(rule: RuleDefinition): RuleDefinition {
-  const { name, sourcePrompt, trigger, allow, code, summary, limits } = rule;
-  return { name, sourcePrompt, trigger, allow, code, summary, limits };
+  const { name, sourcePrompt, trigger, allow, code, params, summary, limits } = rule;
+  return { name, sourcePrompt, trigger, allow, code, ...(params ? { params } : {}), summary, limits };
 }
 
 function toRule(row: RuleDbRow): Rule {
@@ -511,7 +511,7 @@ export class Store {
   updateRuleDefinition(id: string, definition: RuleDefinition, version: number): void {
     this.db
       .prepare("UPDATE rules SET name = ?, rule_json = ?, version = ?, enabled = 1, consecutive_failures = 0, disabled_reason = NULL, updated_at = ? WHERE id = ?")
-      .run(definition.name, JSON.stringify(definition), version, new Date().toISOString(), id);
+      .run(definition.name, JSON.stringify(definitionOf(definition)), version, new Date().toISOString(), id);
   }
 
   getRule(id: string): Rule | undefined {

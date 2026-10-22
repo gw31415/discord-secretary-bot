@@ -41,6 +41,9 @@ test("an allow list is checked for shape and for the permissions it needs", () =
   assert.match(allowShapeProblems([{ op: "DELETE /channels/{channel}", body: {} }]).join(), /本文を取りません/);
   assert.match(allowShapeProblems([{ op: "DELETE /channels/{channel}", path: { user: {} } }]).join(), /不明なパスパラメータ/);
   assert.deepEqual(allowShapeProblems([POST_GENERAL]), []);
+  // Conditions on the target need an operation that has one.
+  assert.match(allowShapeProblems([{ op: "POST /guilds/{guild}/channels", target: {} }]).join(), /対象の条件を付けられません/);
+  assert.deepEqual(allowShapeProblems([{ op: "DELETE /channels/{channel}", target: { properties: { name: { pattern: "^📞" } } } }]), []);
 
   const guild = makeGuild();
   // Everyone may post in #general; the staff channel is hidden from regular members.
@@ -203,58 +206,7 @@ test("who may see, switch off and delete rules follows Discord permissions", () 
 
 test("rule custom ids round-trip and refuse unknown actions", () => {
   assert.deepEqual(parseRuleCustomId("rule:open:"), { action: "open", arg: "" });
-  assert.deepEqual(parseRuleCustomId("rule:save:abc123"), { action: "save", arg: "abc123" });
-  assert.equal(parseRuleCustomId("rule:drop:abc"), null);
+  assert.deepEqual(parseRuleCustomId("rule:disable:abc123"), { action: "disable", arg: "abc123" });
+  assert.equal(parseRuleCustomId("rule:save:abc"), null);
   assert.equal(parseRuleCustomId("plan:run:abc:12345678"), null);
-});
-
-test("a rule proposed in conversation is dry-run, posted for confirmation, and only its requester registers it", async () => {
-  const w = world();
-  const posted: any[] = [];
-  const api = {
-    channels: {
-      createMessage: async (channelId: string, body: any) => (posted.push({ kind: "create", channelId, body }), { id: "m1" }),
-      editMessage: async (_c: string, _m: string, body: any) => void posted.push({ kind: "edit", body }),
-    },
-    interactions: {
-      reply: async (_i: string, _t: string, body: any) => void posted.push({ kind: "reply", body }),
-      updateMessage: async (_i: string, _t: string, body: any) => void posted.push({ kind: "update", body }),
-    },
-  } as any;
-  const { RuleService } = await import("../src/rules/service.ts");
-  const service = new RuleService({ api, store: w.store, caches: { get: (id) => (id === GUILD ? w.cache : undefined) }, admin: w.admin, engine: w.engine, selfId: () => SELF, now: () => w.now.t, log: () => {}, summarize: async () => "投稿に返事します。" });
-  const reader = {
-    shareable: () => new Set(["10"]),
-    get: async (route: string) => (route.endsWith("/messages") ? [{ id: "600", channel_id: "10", content: "hi", author: { id: "3" } }] : null),
-  } as any;
-  const draft = { name: "挨拶", trigger: { event: "MESSAGE_CREATE" }, allow: [POST_GENERAL], code: "return plan([call(...)])" };
-  const input = { guildId: GUILD, channelId: "10", replyToId: "400", ownerId: "1", request: "投稿に返事して", draft, reader };
-
-  // A channel the conversation cannot show is refused before anything is posted.
-  await assert.rejects(service.propose({ ...input, draft: { ...draft, allow: [{ ...POST_GENERAL, path: { channel: { enum: ["11"] } } }] } }), /この場所では扱えません/);
-  // The dry run's steps must fit the allow list.
-  w.setCode(() => ({ ok: true, value: { steps: [{ op: "POST /channels/{channel}/messages", path: { channel: "12" }, body: { content: "x" } }] }, logs: [] }));
-  await assert.rejects(service.propose(input), /ドライラン: .*範囲外/);
-  assert.equal(posted.length, 0);
-
-  w.setCode(() => ({ ok: true, value: { steps: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "ようこそ" } }] }, logs: [] }));
-  const { draftId } = await service.propose(input);
-  const dialog = posted[0];
-  assert.equal(dialog.body.message_reference.message_id, "400");
-  const text = JSON.stringify(dialog.body.components);
-  assert.match(text, /ルール登録の確認/);
-  assert.match(text, /#general のみ/);
-  assert.match(text, /投稿に返事します/);
-  assert.match(text, /このチャンネルの直近のメッセージ/);
-
-  const click = (userId: string, action: string) => ({ id: "i", token: "t", application_id: "app", guild_id: GUILD, type: 3, member: { user: { id: userId } }, data: { custom_id: `rule:${action}:${draftId}`, component_type: 2 } }) as any;
-  await service.handleInteraction(click("3", "save"));
-  assert.match(posted.at(-1).body.content, /依頼した本人だけ/);
-  assert.equal(w.store.listRules(GUILD).length, 0);
-  await service.handleInteraction(click("1", "save"));
-  assert.match(JSON.stringify(posted.at(-1).body.components), /登録しました/);
-  const [rule] = w.store.listRules(GUILD);
-  assert.equal(rule!.ownerId, "1");
-  assert.equal(rule!.summary, "投稿に返事します。");
-  assert.equal(rule!.sourcePrompt, "投稿に返事して");
 });

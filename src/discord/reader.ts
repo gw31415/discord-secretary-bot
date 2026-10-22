@@ -61,6 +61,7 @@ const RULES: RouteRule[] = [
   { pattern: /^\/guilds\/(\d+)\/stickers$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}/stickers`, {}) },
   { pattern: /^\/guilds\/(\d+)\/scheduled-events$/, handle: (r, [g], q) => r.guildRoute(g!, `/guilds/${g}/scheduled-events`, q) },
   { pattern: /^\/guilds\/(\d+)\/channels$/, handle: (r, [g]) => r.listChannels(g!) },
+  { pattern: /^\/guilds\/(\d+)\/voice-states$/, handle: async (r, [g], q) => r.voiceStates(g!, q) },
   { pattern: /^\/guilds\/(\d+)\/threads\/active$/, handle: (r, [g]) => r.activeThreads(g!) },
   { pattern: /^\/guilds\/(\d+)\/messages\/search$/, handle: (r, [g], q) => r.searchMessages(g!, q) },
   { pattern: /^\/channels\/(\d+)$/, handle: (r, [c]) => r.channelRoute(c!, `/channels/${c}`, {}) },
@@ -173,6 +174,19 @@ export class Reader {
     const all = (await this.rest.get(`/guilds/${guildId}/channels`)) as APIChannel[];
     const allowed = this.shareable();
     return all.filter((c) => allowed.has(c.id));
+  }
+
+  /**
+   * Who is in which voice channel, from the Gateway (Discord has no REST route
+   * for the whole server). Only channels this reply may show are included.
+   */
+  voiceStates(guildId: string, query: Query): Array<{ user_id: string; channel_id: string }> {
+    this.#assertGuild(guildId);
+    const allowed = this.shareable();
+    const only = query.channel_id === undefined ? null : String(query.channel_id);
+    return [...this.cache.voice]
+      .filter(([, channelId]) => allowed.has(channelId) && (only === null || channelId === only))
+      .map(([userId, channelId]) => ({ user_id: userId, channel_id: channelId }));
   }
 
   async activeThreads(guildId: string): Promise<unknown> {

@@ -6,9 +6,11 @@ import type {
   APIModalInteractionResponseCallbackData,
 } from "discord-api-types/v10";
 import type { StepRow } from "../db.ts";
+import { allowLines, allowRisk } from "../rules/allow.ts";
+import { paramsText, triggerLabel } from "../rules/panel.ts";
 import type { Body } from "./catalog.ts";
 import { RISK_LABEL } from "./types.ts";
-import type { Plan, PlanStatus, Risk } from "./types.ts";
+import type { Plan, PlanRuleDraft, PlanStatus, Risk } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
 
 // The approval dialog, drawn only from the Plan and its step states. Nothing
@@ -161,13 +163,14 @@ function statusLine(plan: Plan, state: DialogState): string {
   switch (state.status) {
     case "pending_approval": {
       const how = needsTypedConfirm(plan) ? "戻せない操作を含むため、実行時に確認の入力があります。" : "";
-      return `依頼者が「実行」を押すと実行します。${how}違うところがあれば「修正」から直せます。期限 <t:${unix(plan.expiresAt)}:R>`;
+      const rules = plan.rules?.length ? `${plan.steps.length > 0 ? "変更のあとに" : ""}ルールを登録し、以後はイベントのたびに人の確認なしで動きます。` : "";
+      return `依頼者が「実行」を押すと実行します。${rules}${how}違うところがあれば「修正」から直せます。期限 <t:${unix(plan.expiresAt)}:R>`;
     }
     case "approved":
     case "executing":
       return plan.steps.length > 1 ? `実行中… ${done}/${plan.steps.length}` : "実行中…";
     case "succeeded":
-      return "✅ 実行しました";
+      return plan.rules?.length ? `✅ 実行し、ルール${plan.rules.length}件を登録しました。\`/rules\` で止めたり実行履歴を見たりできます。` : "✅ 実行しました";
     case "failed":
       return `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)。${state.reason ?? ""}${state.actions === false ? "" : "\n「再開」で残りを実行、「復元」で済んだ変更を戻す変更を提案、「そのまま」で終了します。"}`;
     case "cancelled":
@@ -215,15 +218,21 @@ function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
         break;
     }
   }
-  if (plan.source) {
+  if (hasCode(plan)) {
     out.push(viewOf(plan, state) === "code" ? button(customId("result", plan), "結果を見る", ButtonStyle.Secondary) : button(customId("code", plan), "コードを見る", ButtonStyle.Secondary));
   }
   out.push(button(customId("json", plan), "JSONを見る", ButtonStyle.Secondary));
   return out;
 }
 
+function hasCode(plan: Plan): boolean {
+  return !!plan.source || !!plan.rules?.length;
+}
+
+/** A plan from code opens on the code; one with rules but no code opens on what it does. */
 function viewOf(plan: Plan, state: DialogState): DialogView {
-  return plan.source ? (state.view ?? "code") : "result";
+  if (!hasCode(plan)) return "result";
+  return state.view ?? (plan.source ? "code" : "result");
 }
 
 /** Keeps a code block from being closed by its own content. */
@@ -232,29 +241,70 @@ function fenced(lang: string, body: string): string {
 }
 
 function codeBody(plan: Plan, room: number): string[] {
-  const { code, summary } = plan.source!;
-  const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
-  const head = [`**コードの説明**(会話を見ていない別のAIがコードだけを読んで書いたものです)\n${explained}`];
-  const limit = Math.max(200, Math.min(MAX_CODE, room - explained.length - 200));
-  const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;
-  return [...head, fenced("js", shown)];
+  const parts: Array<{ title: string; code: string; summary: string | null }> = [
+    ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
+    ...(plan.rules ?? []).map((r) => ({ title: `ルール「${r.name}」のコードの説明`, code: r.code, summary: r.summary })),
+  ];
+  const share = Math.floor(room / Math.max(1, parts.length));
+  return parts.flatMap(({ title, code, summary }) => {
+    const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
+    const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
+    const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;
+    return [`**${title}**(会話を見ていない別のAIがコードだけを読んで書いたものです)\n${explained}`, fenced("js", shown)];
+  });
+}
+
+function dryLine(r: PlanRuleDraft): string {
+  const where = r.dry.source ? `${r.dry.source}で` : "";
+  switch (r.dry.outcome) {
+    case "steps":
+      return `ドライラン(${where}試行): ${r.dry.lines.length}種類の変更をします\n${r.dry.lines.slice(0, 3).map((l) => `　${l}`).join("\n")}`;
+    case "none":
+      return `ドライラン(${where}試行): 何も変更しません`;
+    case "pending":
+      return "ドライラン: この変更で作るものを使うため、登録後に動きます(コードがエラーにならないことは確かめました)";
+    case "no_event":
+      return "ドライラン: 試せるイベントがありませんでした";
+    case "error":
+      return `ドライラン: エラー ${r.dry.problems[0] ?? ""}`;
+  }
+}
+
+/** The rules a plan registers, drawn only from their definitions. */
+function ruleTexts(plan: Plan): string[] {
+  if (!plan.rules?.length) return [];
+  const owner = label(plan, plan.actor.userId);
+  const lookup = (id: string) => label(plan, id);
+  return [
+    `**登録するルール**(${owner} の権限で、人の確認なしに動きます)`,
+    ...plan.rules.map((r) =>
+      [
+        `**${r.name}**${r.replaces ? `(「${r.replaces.name}」v${r.replaces.version} を置き換え)` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
+        `きっかけ: ${triggerLabel(r.trigger)}`,
+        `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n")}`,
+        ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),
+        dryLine(r),
+      ].join("\n"),
+    ),
+  ];
 }
 
 function resultBody(plan: Plan, state: DialogState): string[] {
   const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps);
   const listed = lines.slice(0, MAX_LISTED);
   if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「JSONを見る」)`);
-  if (plan.source) {
+  if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
     const json = JSON.stringify(plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) })));
     if (json.length <= MAX_STEPS_JSON) listed.push(fenced("json", json));
   }
-  return listed;
+  return [...listed, ...ruleTexts(plan)];
 }
 
 export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
   const title = "### 変更の確認";
-  const header = `${title}\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${plan.steps.length}件 · \`${plan.id}\``;
+  const counts = [`${plan.steps.length}件`, ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join(" · ");
+  const header = `${title}\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts} · \`${plan.id}\``;
   const status = statusLine(plan, state);
   const body = viewOf(plan, state) === "code" ? codeBody(plan, MAX_TEXT - header.length - status.length) : resultBody(plan, state);
   const text = [header, ...body, "", status].join("\n").slice(0, MAX_TEXT);

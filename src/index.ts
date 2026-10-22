@@ -80,6 +80,10 @@ const planner = new Planner({
     return summarizeCode({ model, apiKey, code });
   },
   onWrite: (plan, step, response) => engine.noteWrite(plan, step, response),
+  rules: {
+    prepare: (input) => rules.prepare(input),
+    register: (guildId, ownerId, draft) => rules.register(guildId, ownerId, draft),
+  },
 });
 
 function makeReader(scope: ReadScope): Reader {
@@ -120,7 +124,6 @@ const rules = new RuleService({
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
   },
-  revise: (input) => conversations.reviseRule(input),
 });
 
 const conversations = new Conversations({
@@ -145,7 +148,6 @@ const conversations = new Conversations({
   judge: judgeAddressed,
   propose: (input) => planner.propose(input),
   rules: {
-    propose: (input) => rules.propose(input),
     list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
   },
   onAwake: () => presence.refresh(),
@@ -217,6 +219,12 @@ client.on(GatewayDispatchEvents.GuildMemberRemove, ({ data }) => {
   engine.ownerLeft(data.guild_id, data.user.id);
 });
 
+client.on(GatewayDispatchEvents.VoiceStateUpdate, ({ data }) => {
+  // Rules are told where the user was before; the payload only says where they are now.
+  const before = caches.get(data.guild_id)?.setVoice(data.user_id, data.channel_id) ?? null;
+  (data as typeof data & { before_channel_id: string | null }).before_channel_id = before;
+});
+
 // Rules see each event after the cache has taken it in (listeners run in the order added).
 for (const event of Object.keys(TRIGGERS)) {
   client.on(event as GatewayDispatchEvents.MessageCreate, ({ data }) => {
@@ -263,7 +271,6 @@ function guildOf(channel: object): string | undefined {
 const sweeper = setInterval(() => {
   conversations.sweep();
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
-  rules.sweep().catch((e) => log("ルール案の期限処理に失敗", e));
   engine.sweep();
   store.deleteRuleRunsBefore(new Date(Date.now() - SNAPSHOT_RETENTION_MS));
 }, 60_000);

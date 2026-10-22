@@ -1,6 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import type { TSchema } from "@earendil-works/pi-ai";
+import type { Static, TSchema } from "@earendil-works/pi-ai";
+import { Value } from "typebox/value";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
 import { ChannelType, ComponentType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";
@@ -11,9 +12,9 @@ import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
 import type { Plan, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
-import { RuleRejected } from "../rules/service.ts";
-import { TRIGGERS, triggerSummary } from "../rules/triggers.ts";
-import type { Rule, RuleDraft } from "../rules/types.ts";
+import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
+import { triggerSummary } from "../rules/triggers.ts";
+import type { Rule, RuleProposal } from "../rules/types.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
 // narrows results to what may be shown in the channel the reply goes to.
@@ -65,14 +66,15 @@ export interface ToolOptions {
   /** The model accepts images, so view_images is offered. */
   images: boolean;
   fetch?: typeof fetch;
-  /** Posts an approval dialog for the steps. Present when writes are allowed. */
-  propose?: (drafts: StepDraft[], code?: string) => Promise<Plan>;
-  /** Event rules: proposing one (with a dry run and a confirmation in the channel), and reading the speaker's own. */
+  /** Posts an approval dialog for the steps (and rules). Present when writes are allowed. */
+  propose?: Propose;
+  /** Event rules: whether propose_plan may carry them, and reading the speaker's own. */
   rules?: RuleTools;
 }
 
+export type Propose = (drafts: StepDraft[], code?: string, rules?: RuleProposal[]) => Promise<Plan>;
+
 export interface RuleTools {
-  propose: (draft: RuleDraft, replacesRule?: string) => Promise<{ draftId: string; report: string }>;
   /** The speaker's rules in this server; `shown` is false when its contents may not appear in this channel. */
   list: () => Array<{ rule: Rule; shown: boolean }>;
 }
@@ -202,8 +204,8 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
 
   const tools = [readMessages, searchMessages, listChannels, findMembers, runCode];
   if (options.images) tools.push(viewImages);
-  if (options.propose) tools.push(proposePlan(reader, options.propose));
-  if (options.rules) tools.push(...ruleTools(options.rules));
+  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules));
+  if (options.rules) tools.push(listRules(options.rules));
   return tools;
 }
 
@@ -211,61 +213,71 @@ const AllowSchema = Type.Object({
   op: Type.String(),
   path: Type.Optional(Type.Record(Type.String(), Type.Record(Type.String(), Type.Unknown()), { description: "パスパラメータ名 → JSON Schema。例: { channel: { enum: [\"123\"] } }" })),
   body: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "本文の JSON Schema" })),
+  target: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "対象(チャンネル・ロール・メンバーなど)の実行直前の状態が満たすべき JSON Schema" })),
   max_steps_per_run: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
 });
 
-function ruleTools(rules: RuleTools): AgentTool<any>[] {
-  const propose = tool({
-    name: "propose_rule",
-    label: "ルールを提案",
-    description: [
-      "イベントルールの案を出します。ルールは、サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。",
-      "案はその場でドライランし、問題があれば理由を返すので直して出し直してください。問題がなければチャンネルに登録の確認を投稿し、依頼者が「登録」を押すと有効になります。",
-      "trigger_event: きっかけ(下の一覧から1つ)。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。",
-      "code: イベントごとに読み取り専用のサンドボックスで動く関数本体。変更がなければ return null か return plan([])、あれば return plan([call(op, { id?, path, body }), ...])。",
-      "  使えるもの: event(発火したイベント), guild, actor, discord.get(route, { query })(同期関数), call, plan, log。実行は1回10秒・discord.get 50回まで。ネットワーク・タイマー・乱数はありません。",
-      "allow: ルールに許す操作。各要素 { op, path?, body?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の JSON Schema です。コードが出したステップはどれか1つに合わないと実行されません。",
-      "  できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。",
-      "sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
-      "replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
-      "きっかけにできるイベント:",
-      triggerSummary(),
-      "操作は propose_plan と同じ一覧から選びます。",
-    ].join("\n"),
-    parameters: Type.Object({
-      name: Type.String({ maxLength: 60, description: "ルールの短い名前" }),
-      trigger_event: Type.String(),
-      include_bot_origin: Type.Optional(Type.Boolean()),
-      allow: Type.Array(AllowSchema, { minItems: 1, maxItems: MAX_ALLOW_ENTRIES }),
-      code: Type.String({ maxLength: 8000 }),
-      sample_event: Type.Optional(Type.Unknown()),
-      replaces_rule: Type.Optional(Type.String()),
-    }),
-    execute: async (_id, params) => {
-      if (!TRIGGERS[params.trigger_event]) throw new Error(`きっかけ ${params.trigger_event} には対応していません`);
-      const draft: RuleDraft = {
-        name: params.name.slice(0, 60),
-        trigger: { event: params.trigger_event, ...(params.include_bot_origin ? { includeBotOrigin: true } : {}) },
-        allow: params.allow.map((a) => ({
-          op: a.op,
-          ...(a.path ? { path: a.path } : {}),
-          ...(a.body ? { body: a.body } : {}),
-          ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
-        })),
-        code: params.code,
-        ...(params.sample_event !== undefined ? { sampleEvent: params.sample_event } : {}),
-      };
-      try {
-        const { draftId, report } = await rules.propose(draft, params.replaces_rule);
-        return text(`登録の確認を投稿しました(ルール案 ${draftId}、ドライラン: ${report})。依頼者が「登録」を押すと有効になります。返答では何をするルールかを一言添えるだけにしてください。`);
-      } catch (e) {
-        if (e instanceof RuleRejected) throw new Error(`このままでは出せません:\n${e.reasons.join("\n")}`);
-        throw e;
-      }
-    },
-  });
+const RuleSchema = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 60, description: "ルールの短い名前" }),
+  trigger_event: Type.String(),
+  include_bot_origin: Type.Optional(Type.Boolean()),
+  allow: Type.Array(AllowSchema, { minItems: 1, maxItems: MAX_ALLOW_ENTRIES }),
+  code: Type.String({ maxLength: 8000 }),
+  params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  sample_event: Type.Optional(Type.Unknown()),
+  replaces_rule: Type.Optional(Type.String()),
+});
+type RuleInput = Static<typeof RuleSchema>;
 
-  const list = tool({
+function toProposal(r: RuleInput): RuleProposal {
+  return {
+    name: r.name.slice(0, 60),
+    trigger: { event: r.trigger_event, ...(r.include_bot_origin ? { includeBotOrigin: true } : {}) },
+    allow: r.allow.map((a) => ({
+      op: a.op,
+      ...(a.path ? { path: a.path } : {}),
+      ...(a.body ? { body: a.body } : {}),
+      ...(a.target ? { target: a.target } : {}),
+      ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
+    })),
+    code: r.code,
+    ...(r.params ? { params: r.params } : {}),
+    ...(r.sample_event !== undefined ? { sampleEvent: r.sample_event } : {}),
+    ...(r.replaces_rule ? { replaces: r.replaces_rule } : {}),
+  };
+}
+
+/** Rules returned from plan code, checked like the tool's own parameter. */
+function rulesFromCode(value: unknown): RuleProposal[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("plan(steps, rules) の rules は配列にしてください");
+  return value.map((r, i) => {
+    if (!Value.Check(RuleSchema, r)) {
+      const problems = [...Value.Errors(RuleSchema, r)].slice(0, 3).map((e) => `${e.instancePath || "/"} ${e.message}`);
+      throw new Error(`rules[${i}] の形が違います: ${problems.join("; ")}`);
+    }
+    return toProposal(r);
+  });
+}
+
+const RULES_DESCRIPTION = [
+  "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
+  "  各要素 { name, trigger_event, include_bot_origin?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
+  "  trigger_event: きっかけ(下の一覧から1つ)。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。",
+  "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
+  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log。実行は1回10秒・discord.get 50回まで。ネットワーク・タイマー・乱数はありません。",
+  "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
+  "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の JSON Schema です。コードが出したステップはどれか1つに合わないと実行されません。",
+  "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
+  "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
+  "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
+  "  ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
+  "  きっかけにできるイベント:",
+  triggerSummary(),
+].join("\n");
+
+function listRules(rules: RuleTools): AgentTool<any> {
+  return tool({
     name: "list_rules",
     label: "ルールを見る",
     description: "話し手が作ったイベントルールの一覧(ID・名前・状態・きっかけ・許す操作・コード)を返します。ルールを直す依頼のときに使います。",
@@ -277,17 +289,16 @@ function ruleTools(rules: RuleTools): AgentTool<any>[] {
         items
           .map(({ rule, shown }) =>
             shown
-              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, code: rule.code })
+              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, code: rule.code })
               : `${rule.id} ${rule.name}: このチャンネルでは扱えないチャンネルを使うため、内容は表示できません`,
           )
           .join("\n"),
       );
     },
   });
-  return [propose, list];
 }
 
-function proposePlan(reader: Reader, propose: (drafts: StepDraft[], code?: string) => Promise<Plan>): AgentTool<any> {
+function proposePlan(reader: Reader, propose: Propose, withRules: boolean): AgentTool<any> {
   return tool({
     name: "propose_plan",
     label: "変更を提案",
@@ -295,16 +306,25 @@ function proposePlan(reader: Reader, propose: (drafts: StepDraft[], code?: strin
       "書き込み操作の変更案を出し、チャンネルに承認ダイアログを投稿します。依頼者が「実行」を押したときだけ実行されます。",
       "steps か code のどちらかを渡します。基本は steps です。code は対象が多いときや、条件で対象を選ぶとき(「30日発言していない人全員」など)だけ使います。",
       "steps: [{ id?, op, path, body? }]。op は下の一覧のどれか、path はパスパラメータ(guild は省略可)。前のステップの結果は { \"$ref\": \"steps.<id>.result.id\" } で参照できます。",
-      "code: 読み取り専用のJavaScript。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。",
+      `code: 読み取り専用のJavaScript。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`,
+      ...(withRules
+        ? [
+            "1つの依頼に必要な変更とルールは、まとめて1つの変更案にします(承認は1回で済みます)。例: チャンネルを作るステップと、そのチャンネルを params や allow で $ref 参照するルール。",
+            RULES_DESCRIPTION,
+          ]
+        : []),
       "使える操作(これ以外と、仕様にないフィールドは拒否されます):",
       catalogSummary(),
     ].join("\n"),
     parameters: Type.Object({
       steps: Type.Optional(Type.Array(StepDraftSchema, { maxItems: 100 })),
-      code: Type.Optional(Type.String({ description: "plan([...]) を return する関数本体" })),
+      code: Type.Optional(Type.String({ description: withRules ? "plan([...]) か plan([...], [rule({...})]) を return する関数本体" : "plan([...]) を return する関数本体" })),
+      rules: Type.Optional(Type.Array(RuleSchema, { maxItems: MAX_RULES_PER_PLAN, description: withRules ? "イベントルール" : "ここでは使えません" })),
     }),
     execute: async (_id, params) => {
+      if (params.rules?.length && !withRules) throw new Error("ルールはここでは作れません");
       let drafts: StepDraft[];
+      let rules: RuleProposal[] = (params.rules ?? []).map(toProposal);
       if (params.code) {
         const result = await runSandboxed(
           params.code,
@@ -316,18 +336,24 @@ function proposePlan(reader: Reader, propose: (drafts: StepDraft[], code?: strin
           AGENT_SANDBOX_LIMITS,
         );
         if (!result.ok) throw new Error(result.error);
-        const value = result.value as { steps?: unknown } | undefined;
+        const value = result.value as { steps?: unknown; rules?: unknown } | undefined;
         if (!value || !Array.isArray(value.steps)) throw new Error("code は plan([...]) を return してください");
         drafts = value.steps as StepDraft[];
+        const fromCode = rulesFromCode(value.rules);
+        if (fromCode.length > 0 && !withRules) throw new Error("ルールはここでは作れません");
+        rules = [...rules, ...fromCode];
       } else if (params.steps) {
         drafts = params.steps;
+      } else if (rules.length > 0) {
+        drafts = [];
       } else {
         throw new Error("steps か code を渡してください");
       }
       try {
-        const plan = await propose(drafts, params.code);
+        const plan = await propose(drafts, params.code, rules.length > 0 ? rules : undefined);
+        const what = [`${plan.steps.length}件`, ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join("・");
         return text(
-          `承認ダイアログを投稿しました(変更 ${plan.id}、${plan.steps.length}件、危険度: ${RISK_LABEL[plan.risk]})。依頼者が「実行」を押すと実行され、結果はダイアログに表示されます。詳細はダイアログにあるので、返答では何を提案したかを一言添えるだけにしてください。`,
+          `承認ダイアログを投稿しました(変更 ${plan.id}、${what}、危険度: ${RISK_LABEL[plan.risk]})。依頼者が「実行」を押すと実行され${plan.rules?.length ? "、ルールが登録され" : ""}、結果はダイアログに表示されます。詳細はダイアログにあるので、返答では何を提案したかを一言添えるだけにしてください。`,
         );
       } catch (e) {
         if (e instanceof PlanRejected) throw new Error(`変更案は拒否されました:\n${e.reasons.join("\n")}`);

@@ -210,7 +210,7 @@ export class RuleEngine {
     store.audit({ kind: "system" }, "rule.auto_disable", { reason, lastError: error?.slice(0, MAX_ERROR) ?? null }, undefined, rule.id);
     void this.deps.notifyOwner?.(
       rule.ownerId,
-      `ルール「${rule.name}」は${count}回続けて失敗したため止めました。最後のエラー: ${(error ?? "").slice(0, 300)}\n直したら \`/rule\` の管理パネルから有効にできます。`,
+      `ルール「${rule.name}」は${count}回続けて失敗したため止めました。最後のエラー: ${(error ?? "").slice(0, 300)}\n直したら \`/rules\` の管理パネルから有効にできます。`,
     ).catch(() => undefined);
   }
 
@@ -218,7 +218,7 @@ export class RuleEngine {
    * Runs the rule's code on one event and returns the steps it asks for.
    * Used for real runs and for dry runs, which stop here.
    */
-  async evaluate(rule: Pick<Rule, "guildId" | "ownerId" | "code">, event: unknown, reader?: Pick<Reader, "get">): Promise<Evaluation> {
+  async evaluate(rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params">, event: unknown, reader?: Pick<Reader, "get">): Promise<Evaluation> {
     let result: SandboxResult;
     try {
       const source = reader ?? this.ownerReader(rule.guildId, rule.ownerId);
@@ -228,6 +228,7 @@ export class RuleEngine {
           guildId: rule.guildId,
           actor: { kind: "user", userId: rule.ownerId, via: "rule" },
           event,
+          params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
         },
         RULE_SANDBOX_LIMITS,
@@ -236,8 +237,9 @@ export class RuleEngine {
       return { kind: "error", error: (e instanceof Error ? e.message : String(e)).slice(0, MAX_ERROR), logs: [] };
     }
     if (!result.ok) return { kind: "error", error: (result.error ?? "不明なエラー").slice(0, MAX_ERROR), logs: result.logs };
-    const value = result.value as { steps?: unknown } | null | undefined;
+    const value = result.value as { steps?: unknown; rules?: unknown[] } | null | undefined;
     if (value === undefined || value === null) return { kind: "none", logs: result.logs };
+    if (Array.isArray(value.rules) && value.rules.length > 0) return { kind: "error", error: "ルールの中からルールは作れません", logs: result.logs };
     if (!Array.isArray(value.steps)) return { kind: "error", error: "コードは plan([...]) を return してください", logs: result.logs };
     if (value.steps.length === 0) return { kind: "none", logs: result.logs };
     return { kind: "steps", drafts: value.steps as StepDraft[], logs: result.logs };

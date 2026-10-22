@@ -32,7 +32,7 @@ function replaceRefs(value: unknown, onRef: (ref: string) => unknown): unknown {
 }
 
 /** Refs inside `value` that do not point to an earlier step. */
-function badRefs(value: unknown, earlier: Set<string>): string[] {
+export function badRefs(value: unknown, earlier: Set<string>): string[] {
   const bad: string[] = [];
   replaceRefs(value, (ref) => {
     const m = REF_PATTERN.exec(ref);
@@ -43,9 +43,9 @@ function badRefs(value: unknown, earlier: Set<string>): string[] {
 }
 
 /** Turns drafts into steps, or throws with every shape problem found. */
-export function normalizeSteps(drafts: StepDraft[], guildId: string, planId: string): Step[] {
+export function normalizeSteps(drafts: StepDraft[], guildId: string, planId: string, allowEmpty = false): Step[] {
   const errors: string[] = [];
-  if (drafts.length === 0) errors.push("ステップがありません");
+  if (drafts.length === 0 && !allowEmpty) errors.push("ステップがありません");
   if (drafts.length > MAX_STEPS) errors.push(`ステップは${MAX_STEPS}個までです(${drafts.length}個)`);
   const ids = new Set<string>();
   const steps: Step[] = [];
@@ -175,7 +175,8 @@ export function permissionProblems(step: Step, ctx: CheckContext): string[] {
     }
   }
   const memberParam = spec.hierarchy?.member;
-  if (memberParam && !isRef(step.pathParams[memberParam])) {
+  const memberHierarchy = !spec.hierarchyFields || Object.keys(body ?? {}).some((k) => spec.hierarchyFields!.includes(k));
+  if (memberParam && memberHierarchy && !isRef(step.pathParams[memberParam])) {
     const target = guild.members.get(String(step.pathParams[memberParam]));
     // Someone who is not in the server (e.g. a ban by id) has no roles to compare.
     if (target) {

@@ -27,6 +27,8 @@ export interface RuleDefinition {
   trigger: RuleTrigger;
   allow: AllowEntry[];
   code: string;
+  /** Values the code reads as `params`, e.g. the id of a channel made with the rule. */
+  params?: Record<string, unknown>;
   /** Written from the code alone by a model that did not see the request. */
   summary: string | null;
   limits: RuleLimits;
@@ -60,12 +62,15 @@ export interface RuleRun {
   finishedAt: string | null;
 }
 
-/** A rule as the agent proposes it, before anyone approves it. */
-export interface RuleDraft {
+/** A rule as the agent proposes it inside a plan, before anyone approves it. */
+export interface RuleProposal {
   name: string;
   trigger: RuleTrigger;
   allow: AllowEntry[];
   code: string;
+  params?: Record<string, unknown>;
   /** An event the agent made up for the dry run when no real one is at hand. */
   sampleEvent?: unknown;
+  /** The id of the owner's rule this is a new version of. */
+  replaces?: string;
 }

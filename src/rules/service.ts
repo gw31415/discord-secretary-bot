@@ -1,39 +1,34 @@
-import { randomBytes } from "node:crypto";
 import type { API } from "@discordjs/core";
 import { InteractionType, MessageFlags } from "discord-api-types/v10";
 import type { APIInteraction, APIMessage } from "discord-api-types/v10";
 import type { Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
-import { modalValue } from "../discord/modal.ts";
 import type { GuildState } from "../discord/permissions.ts";
 import type { Reader } from "../discord/reader.ts";
 import { CATALOG } from "../plan/catalog.ts";
 import { stepLines } from "../plan/dialog.ts";
-import type { Plan } from "../plan/types.ts";
-import { normalizeSteps, permissionProblems, PlanRejected, planRisk, visibilityProblems } from "../plan/validate.ts";
+import type { PrepareRulesInput } from "../plan/service.ts";
+import { isRef } from "../plan/types.ts";
+import type { Plan, PlanRuleDraft, RuleDryRun } from "../plan/types.ts";
+import { badRefs, normalizeSteps, permissionProblems, PlanRejected, planRisk, visibilityProblems } from "../plan/validate.ts";
 import { AdminDenied } from "./admin.ts";
 import type { RuleAdmin } from "./admin.ts";
 import { allowProblems } from "./allow.ts";
 import type { RuleEngine } from "./engine.ts";
-import { auditView, detailView, draftView, homeView, instructionModal, parseRuleCustomId, plansView, ruleCustomId } from "./panel.ts";
-import type { DraftStatus, DryRunView, Rendered } from "./panel.ts";
+import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
+import type { Rendered } from "./panel.ts";
+import { isTrigger } from "./triggers.ts";
 import { DEFAULT_LIMITS } from "./types.ts";
-import type { Rule, RuleDefinition, RuleDraft } from "./types.ts";
+import type { Rule, RuleDefinition, RuleProposal } from "./types.ts";
 
-// Rules are made in conversation: the agent proposes one with propose_rule,
-// it is dry-run on the spot, and a confirmation is posted in the channel like
-// a plan's dialog. Only the requester can register it. /rules opens the
-// management panel, which is only visible to whoever opened it.
+// Rules are made in conversation, inside a plan: propose_plan can carry rules
+// next to its steps, and one approval runs the steps and registers the rules.
+// Here they are checked and dry-run at proposal (prepare) and registered after
+// the steps have run (register). /rules opens the management panel, which is
+// only visible to whoever opened it.
 
-export const DRAFT_MS = 10 * 60_000;
-
-export class RuleRejected extends Error {
-  readonly reasons: string[];
-  constructor(reasons: string[]) {
-    super(reasons.join("\n"));
-    this.reasons = reasons;
-  }
-}
+/** Rules one plan may register. */
+export const MAX_RULES_PER_PLAN = 5;
 
 export interface RuleServiceDeps {
   api: API;
@@ -46,52 +41,9 @@ export interface RuleServiceDeps {
   log: (message: string, error?: unknown) => void;
   /** Explains rule code from the code alone, paid for by the owner. */
   summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
-  /** Asks the agent to rework a pending draft; it proposes again with `replacesDraft`. */
-  revise?: (input: ReviseRuleInput) => Promise<void>;
 }
 
-export interface ReviseRuleInput {
-  draftId: string;
-  guildId: string;
-  channelId: string;
-  messageId: string;
-  ownerId: string;
-  draft: RuleDraft;
-  replacesRule?: string;
-  instruction: string;
-}
-
-export interface ProposeRuleInput {
-  guildId: string;
-  channelId: string;
-  replyToId: string | null;
-  ownerId: string;
-  /** The request the rule was written for, kept as the rule's source. */
-  request: string;
-  draft: RuleDraft;
-  /** The conversation's reader: the dry run and the dialog stay within what this channel may show. */
-  reader: Reader;
-  /** An existing rule of the owner's this draft is a new version of. */
-  replacesRule?: string;
-  /** A pending draft whose dialog this one takes over. */
-  replacesDraft?: string;
-}
-
-interface PendingDraft {
-  id: string;
-  guildId: string;
-  ownerId: string;
-  channelId: string;
-  messageId: string;
-  request: string;
-  draft: RuleDraft;
-  summary: string | null;
-  dry: DryRunView;
-  replacesRule?: { id: string; name: string; version: number };
-  status: DraftStatus;
-  expiresAt: string;
-  note?: string;
-}
+type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent">;
 
 /** Display names from the cache: channels and roles; anything else stays an id. */
 export function cacheLabel(guild: GuildState | null | undefined): (id: string) => string {
@@ -104,8 +56,16 @@ export function cacheLabel(guild: GuildState | null | undefined): (id: string) =
   };
 }
 
+/** Whether a value holds refs to a plan's step results. */
+function hasRefs(value: unknown): boolean {
+  if (isRef(value)) return true;
+  if (Array.isArray(value)) return value.some(hasRefs);
+  if (value && typeof value === "object") return Object.values(value).some(hasRefs);
+  return false;
+}
+
 /** Channels an allow list pins its entries to. */
-function pinnedIds(draft: RuleDraft): string[] {
+function pinnedIds(draft: Pick<RuleProposal, "allow">): string[] {
   const ids: string[] = [];
   for (const entry of draft.allow) {
     const spec = CATALOG.get(entry.op);
@@ -118,7 +78,6 @@ function pinnedIds(draft: RuleDraft): string[] {
 
 export class RuleService {
   readonly deps: RuleServiceDeps;
-  readonly #drafts = new Map<string, PendingDraft>();
 
   constructor(deps: RuleServiceDeps) {
     this.deps = deps;
@@ -133,7 +92,7 @@ export class RuleService {
   // --- Dry run ------------------------------------------------------------
 
   /** A real event to try the rule on, read with `reader`; otherwise the agent's sample. */
-  async sample(guildId: string, ownerId: string, channelId: string, draft: Pick<RuleDraft, "trigger" | "sampleEvent">, reader: Pick<Reader, "get">): Promise<{ event: unknown; source: string | null }> {
+  async sample(guildId: string, ownerId: string, channelId: string, draft: Pick<RuleProposal, "trigger" | "sampleEvent">, reader: Pick<Reader, "get">): Promise<{ event: unknown; source: string | null }> {
     const event = draft.trigger.event;
     try {
       if ((event === "MESSAGE_CREATE" || event === "MESSAGE_UPDATE") && channelId) {
@@ -156,10 +115,10 @@ export class RuleService {
    * Runs the rule's code on one event and checks what it asks for, without
    * changing anything. `shareable` limits which channels the result may name.
    */
-  async dryRun(guildId: string, ownerId: string, channelId: string, rule: Pick<RuleDraft, "code" | "allow" | "trigger" | "sampleEvent">, reader: Pick<Reader, "get">, shareable?: Set<string>): Promise<DryRunView> {
+  async dryRun(guildId: string, ownerId: string, channelId: string, rule: DryRunInput, reader: Pick<Reader, "get">, shareable?: Set<string>): Promise<RuleDryRun> {
     const { event, source } = await this.sample(guildId, ownerId, channelId, rule, reader);
     if (event === null) return { source: null, outcome: "no_event", lines: [], problems: [], logs: [] };
-    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code }, event, reader);
+    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs };
     const guild = this.#guild(guildId);
@@ -184,66 +143,89 @@ export class RuleService {
     return { source, outcome: "steps", lines: problems.some((p) => p.includes("この場所では扱えません")) ? [] : stepLines(pseudo), problems, logs: result.logs };
   }
 
-  // --- Proposal from the conversation ---------------------------------------
+  // --- Rules inside a plan -------------------------------------------------
 
-  async propose(input: ProposeRuleInput): Promise<{ draftId: string; report: string }> {
-    const { draft } = input;
-    const shareable = input.reader.shareable();
-    const definition: RuleDefinition = { name: draft.name, sourcePrompt: input.request, trigger: draft.trigger, allow: draft.allow, code: draft.code, summary: null, limits: DEFAULT_LIMITS };
-    const problems = this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition);
-    for (const id of pinnedIds(draft)) {
-      if (!shareable.has(id)) problems.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
-    }
-    let replacesRule: PendingDraft["replacesRule"];
-    if (input.replacesRule) {
-      const rule = this.deps.store.getRule(input.replacesRule);
-      if (!rule || rule.guildId !== input.guildId) problems.push(`ルール ${input.replacesRule} が見つかりません`);
-      else if (rule.ownerId !== input.ownerId) problems.push("ルールを直せるのは作成者だけです");
-      else replacesRule = { id: rule.id, name: rule.name, version: rule.version };
-    }
-    if (problems.length > 0) throw new RuleRejected(problems);
+  /**
+   * Checks the rules a plan proposes, dry-runs and explains each one. A rule
+   * whose allow list or params wait on the plan's steps is only tried for
+   * errors, since the values it needs do not exist yet.
+   */
+  async prepare(input: PrepareRulesInput): Promise<PlanRuleDraft[]> {
+    if (input.rules.length > MAX_RULES_PER_PLAN) throw new PlanRejected([`ルールは1つの変更につき${MAX_RULES_PER_PLAN}個までです`]);
+    const stepIds = new Set(input.stepIds);
+    const drafts: PlanRuleDraft[] = [];
+    const problems: string[] = [];
+    for (const [i, r] of input.rules.entries()) {
+      const where = `ルール「${r.name}」`;
+      const own: string[] = [];
+      if (!r.name.trim()) own.push("名前がありません");
+      if (!isTrigger(r.trigger.event)) own.push(`きっかけ ${r.trigger.event} には対応していません`);
+      for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
+      const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, summary: null, limits: DEFAULT_LIMITS };
+      if (isTrigger(r.trigger.event)) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
+      for (const id of pinnedIds(r)) {
+        if (!input.shareable.has(id)) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
+      }
+      let replaces: PlanRuleDraft["replaces"];
+      if (r.replaces) {
+        const rule = this.deps.store.getRule(r.replaces);
+        if (!rule || rule.guildId !== input.guildId) own.push(`ルール ${r.replaces} が見つかりません`);
+        else if (rule.ownerId !== input.ownerId) own.push("ルールを直せるのは作成者だけです");
+        else replaces = { id: rule.id, name: rule.name, version: rule.version };
+      }
+      if (own.length > 0) {
+        problems.push(...own.map((p) => `${where}: ${p}`));
+        continue;
+      }
 
-    const dry = await this.dryRun(input.guildId, input.ownerId, input.channelId, draft, input.reader, shareable);
-    const dryProblems = dry.outcome === "no_event" && draft.sampleEvent === undefined
-      ? ["このきっかけは試せる実際のイベントがないので、sample_event を付けて出し直してください"]
-      : dry.problems;
-    if (dryProblems.length > 0) throw new RuleRejected(dryProblems.map((p) => `ドライラン: ${p}`));
-
-    const summary = await this.#summarize(draft.code, input.ownerId, draft.trigger.event);
-    const pending: PendingDraft = {
-      id: randomBytes(6).toString("hex"),
-      guildId: input.guildId,
-      ownerId: input.ownerId,
-      channelId: input.channelId,
-      messageId: "",
-      request: input.request,
-      draft,
-      summary,
-      dry,
-      ...(replacesRule ? { replacesRule } : {}),
-      status: "pending",
-      expiresAt: new Date(this.deps.now() + DRAFT_MS).toISOString(),
-    };
-    const old = input.replacesDraft ? this.#drafts.get(input.replacesDraft) : undefined;
-    if (old && old.ownerId === input.ownerId && old.channelId === input.channelId && old.messageId) {
-      // Takes over the earlier dialog, so the channel keeps one message per request.
-      pending.messageId = old.messageId;
-      pending.request = old.request;
-      old.status = "replaced";
-      this.#drafts.set(pending.id, pending);
-      await this.deps.api.channels.editMessage(old.channelId, old.messageId, this.#view(pending));
-    } else {
-      this.#drafts.set(pending.id, pending);
-      const message = await this.deps.api.channels.createMessage(input.channelId, {
-        ...this.#view(pending),
-        allowed_mentions: { parse: [] },
-        ...(input.replyToId ? { message_reference: { message_id: input.replyToId, fail_if_not_exists: false } } : {}),
+      let dry = r.dry;
+      if (!dry) {
+        const waits = hasRefs(r.allow) || hasRefs(r.params);
+        const tried = input.reader
+          ? await this.dryRun(input.guildId, input.ownerId, input.channelId, r, input.reader, input.shareable)
+          : { source: null, outcome: "no_event" as const, lines: [], problems: [], logs: [] };
+        if (waits) {
+          if (tried.outcome === "error") problems.push(...tried.problems.map((p) => `${where}: ドライラン: ${p}`));
+          dry = { source: null, outcome: "pending", lines: [], problems: [], logs: tried.logs };
+        } else if (tried.outcome === "no_event" && r.sampleEvent === undefined && input.reader) {
+          problems.push(`${where}: このきっかけは試せる実際のイベントがないので、sample_event を付けて出し直してください`);
+        } else {
+          problems.push(...tried.problems.map((p) => `${where}: ドライラン: ${p}`));
+          dry = tried;
+        }
+      }
+      if (!dry || problems.length > 0) continue;
+      drafts.push({
+        key: `r${i + 1}`,
+        name: r.name.slice(0, 60),
+        trigger: r.trigger,
+        allow: r.allow,
+        code: r.code,
+        ...(r.params ? { params: r.params } : {}),
+        summary: r.summary !== undefined ? r.summary : await this.#summarize(r.code, input.ownerId, r.trigger.event),
+        ...(replaces ? { replaces } : {}),
+        dry,
+        ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),
+        request: r.request ?? input.request,
       });
-      pending.messageId = message.id;
     }
-    this.deps.store.audit({ kind: "user", userId: input.ownerId, via: "conversation" }, "rule.propose", { guildId: input.guildId, draft: pending.id, trigger: draft.trigger, replaces: replacesRule?.id ?? null });
-    const report = dry.outcome === "steps" ? `${dry.lines.length}種類の変更` : dry.outcome === "none" ? "変更なし" : "試せるイベントなし";
-    return { draftId: pending.id, report };
+    if (problems.length > 0) throw new PlanRejected(problems);
+    return drafts;
+  }
+
+  /** Registers a plan's rule once its steps have run. Ownership is checked again on the filled-in values. */
+  register(guildId: string, ownerId: string, draft: PlanRuleDraft): string {
+    const definition: RuleDefinition = {
+      name: draft.name,
+      sourcePrompt: draft.request,
+      trigger: draft.trigger,
+      allow: draft.allow,
+      code: draft.code,
+      ...(draft.params ? { params: draft.params } : {}),
+      summary: draft.summary,
+      limits: DEFAULT_LIMITS,
+    };
+    return this.deps.admin.save(guildId, ownerId, definition, draft.replaces?.id).id;
   }
 
   async #summarize(code: string, ownerId: string, trigger: string): Promise<string | null> {
@@ -254,27 +236,6 @@ export class RuleService {
       this.deps.log("ルールのコードの要約に失敗", e);
       return null;
     }
-  }
-
-  #view(d: PendingDraft): Rendered {
-    return draftView(
-      {
-        draftId: d.id,
-        ownerId: d.ownerId,
-        name: d.draft.name,
-        trigger: d.draft.trigger,
-        allow: d.draft.allow,
-        code: d.draft.code,
-        summary: d.summary,
-        limits: DEFAULT_LIMITS,
-        dry: d.dry,
-        ...(d.replacesRule ? { replaces: { name: d.replacesRule.name, version: d.replacesRule.version } } : {}),
-        status: d.status,
-        expiresAt: d.expiresAt,
-        ...(d.note ? { note: d.note } : {}),
-      },
-      cacheLabel(this.deps.caches.get(d.guildId)?.guild),
-    );
   }
 
   /** The rules of the speaker's that the agent may read here, for a request to change one. */
@@ -306,7 +267,7 @@ export class RuleService {
     });
   }
 
-  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: DryRunView; notice?: string; confirmDelete?: boolean } = {}): Rendered {
+  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean } = {}): Rendered {
     const { admin } = this.deps;
     const rule = admin.get(guildId, userId, ruleId);
     return detailView({ rule, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), ...extra }, cacheLabel(this.deps.caches.get(guildId)?.guild));
@@ -327,12 +288,6 @@ export class RuleService {
 
     try {
       switch (parsed.action) {
-        case "save":
-        case "revise":
-        case "revisetext":
-        case "discard":
-        case "draftcode":
-          return await this.#draftAction(interaction, parsed.action, parsed.arg, userId, ephemeral);
         case "home":
           await update(this.#home(guildId, userId));
           return true;
@@ -397,8 +352,8 @@ export class RuleService {
     }
   }
 
-  async #codeFile(interaction: APIInteraction, name: string, definition: Pick<RuleDraft, "trigger" | "allow" | "code">): Promise<void> {
-    const json = JSON.stringify({ trigger: definition.trigger, allow: definition.allow }, null, 2);
+  async #codeFile(interaction: APIInteraction, name: string, definition: Pick<Rule, "trigger" | "allow" | "code" | "params">): Promise<void> {
+    const json = JSON.stringify({ trigger: definition.trigger, allow: definition.allow, params: definition.params ?? null }, null, 2);
     await this.deps.api.interactions.reply(interaction.id, interaction.token, {
       content: `ルール「${name}」のコードと許す操作です`,
       files: [
@@ -408,92 +363,5 @@ export class RuleService {
       flags: MessageFlags.Ephemeral,
       allowed_mentions: { parse: [] },
     });
-  }
-
-  async #draftAction(interaction: APIInteraction, action: "save" | "revise" | "revisetext" | "discard" | "draftcode", draftId: string, userId: string, ephemeral: (content: string) => Promise<unknown>): Promise<boolean> {
-    const { api, store } = this.deps;
-    const d = this.#drafts.get(draftId);
-    if (!d) {
-      await ephemeral("このルール案は見つかりません(Botが再起動すると消えます)。もう一度頼んでください。");
-      return true;
-    }
-    if (action === "draftcode") {
-      await this.#codeFile(interaction, d.draft.name, d.draft);
-      return true;
-    }
-    if (userId !== d.ownerId) {
-      await ephemeral("このルール案を操作できるのは依頼した本人だけです");
-      return true;
-    }
-    const expired = Date.parse(d.expiresAt) <= this.deps.now();
-    if (d.status !== "pending" || (expired && action !== "discard")) {
-      if (expired && d.status === "pending") {
-        d.status = "expired";
-        await api.interactions.updateMessage(interaction.id, interaction.token, this.#view(d));
-        return true;
-      }
-      await ephemeral("このルール案はもう確認待ちではありません");
-      return true;
-    }
-    const actor = { kind: "user" as const, userId, via: "conversation" as const };
-    switch (action) {
-      case "save": {
-        const definition: RuleDefinition = { name: d.draft.name, sourcePrompt: d.request, trigger: d.draft.trigger, allow: d.draft.allow, code: d.draft.code, summary: d.summary, limits: DEFAULT_LIMITS };
-        try {
-          this.deps.admin.save(d.guildId, d.ownerId, definition, d.replacesRule?.id);
-          d.status = "saved";
-          d.note = undefined;
-        } catch (e) {
-          if (!(e instanceof AdminDenied)) throw e;
-          d.note = `登録できませんでした: ${e.message}`;
-        }
-        await api.interactions.updateMessage(interaction.id, interaction.token, this.#view(d));
-        return true;
-      }
-      case "discard":
-        d.status = "discarded";
-        store.audit(actor, "rule.discard", { guildId: d.guildId, draft: d.id });
-        await api.interactions.updateMessage(interaction.id, interaction.token, this.#view(d));
-        return true;
-      case "revise":
-        if (!this.deps.revise) {
-          await ephemeral("今は修正できません");
-          return true;
-        }
-        await api.interactions.createModal(interaction.id, interaction.token, instructionModal(ruleCustomId("revisetext", d.id), "ルール案の修正", "どう直しますか", "例: 対象は #雑談 だけにして / Botの投稿は無視して"));
-        return true;
-      case "revisetext": {
-        const instruction = interaction.type === InteractionType.ModalSubmit ? modalValue(interaction, "instruction")?.trim() : undefined;
-        if (!instruction || !this.deps.revise) {
-          await ephemeral("修正の内容がありません");
-          return true;
-        }
-        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
-        store.audit(actor, "rule.revise", { guildId: d.guildId, draft: d.id, instruction: instruction.slice(0, 500) });
-        void this.deps
-          .revise({ draftId: d.id, guildId: d.guildId, channelId: d.channelId, messageId: d.messageId, ownerId: d.ownerId, draft: d.draft, ...(d.replacesRule ? { replacesRule: d.replacesRule.id } : {}), instruction })
-          .catch((e) => {
-            this.deps.log(`ルール案 ${d.id} の修正に失敗`, e);
-            void api.interactions
-              .followUp(interaction.application_id, interaction.token, { content: `修正版を作れませんでした: ${e instanceof Error ? e.message : String(e)}`.slice(0, 1800), flags: MessageFlags.Ephemeral })
-              .catch(() => undefined);
-          });
-        return true;
-      }
-    }
-  }
-
-  /** Marks unanswered drafts expired and forgets old ones. Called every minute. */
-  async sweep(): Promise<void> {
-    const now = this.deps.now();
-    for (const [id, d] of this.#drafts) {
-      const expires = Date.parse(d.expiresAt);
-      if (d.status === "pending" && expires <= now) {
-        d.status = "expired";
-        await this.deps.api.channels.editMessage(d.channelId, d.messageId, this.#view(d)).catch((e) => this.deps.log(`ルール案 ${id} の表示更新に失敗`, e));
-      }
-      // Kept a while after closing, so the code can still be downloaded.
-      if (expires + DRAFT_MS * 6 <= now) this.#drafts.delete(id);
-    }
   }
 }

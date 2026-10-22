@@ -38,6 +38,8 @@ export function toMember(member: Pick<APIGuildMember, "roles"> & { user: { id: s
 export class GuildCache {
   guild: GuildState | null = null;
   readonly guildId: string;
+  /** Who is in which voice channel: user id -> channel id. */
+  readonly voice = new Map<string, string>();
 
   constructor(guildId: string) {
     this.guildId = guildId;
@@ -57,6 +59,16 @@ export class GuildCache {
       channels: new Map([...data.channels, ...data.threads].map((c) => [c.id, toChannel(c as APIChannel)])),
       members: new Map(data.members.filter((m) => m.user).map((m) => [m.user.id, toMember(m)])),
     };
+    this.voice.clear();
+    for (const v of data.voice_states ?? []) if (v.channel_id) this.voice.set(v.user_id, v.channel_id);
+  }
+
+  /** Records a voice state change and returns the channel the user was in before. */
+  setVoice(userId: string, channelId: string | null): string | null {
+    const before = this.voice.get(userId) ?? null;
+    if (channelId) this.voice.set(userId, channelId);
+    else this.voice.delete(userId);
+    return before;
   }
 
   setOwner(ownerId: string): void {

@@ -6,10 +6,9 @@ import { lightestThinking, llm } from "../llm/models.ts";
 import { downloadImages } from "./images.ts";
 import type { ImageRef } from "./images.ts";
 import { readTools } from "./tools.ts";
-import type { RuleTools } from "./tools.ts";
+import type { Propose, RuleTools } from "./tools.ts";
 import { ANTHROPIC_WEB_TOOLS, webTools } from "./web.ts";
 import type { WebAccess } from "./web.ts";
-import type { Plan, StepDraft } from "../plan/types.ts";
 
 export interface RespondInput {
   model: Model<Api>;
@@ -29,8 +28,8 @@ export interface RespondInput {
   web: WebAccess | null;
   signal?: AbortSignal;
   /** Posts an approval dialog for a write. Absent means the bot stays read-only. */
-  propose?: (drafts: StepDraft[], code?: string) => Promise<Plan>;
-  /** Proposing and reading event rules. */
+  propose?: Propose;
+  /** Event rules: propose_plan may carry them, and list_rules reads the speaker's own. */
   rules?: RuleTools;
   /** Posts what the agent says it is about to do, while it works. */
   onProgress?: (text: string) => Promise<void>;
@@ -99,7 +98,7 @@ const WRITES = [
 ];
 
 const RULES = [
-  "- 「〜したら〜する」のように、決まったことが起きるたびに自動でしてほしいと頼まれたら、propose_rule でイベントルールを提案します。1回だけの変更は propose_plan です。",
+  "- 「〜したら〜する」のように、決まったことが起きるたびに自動でしてほしいと頼まれたら、propose_plan の rules でイベントルールを提案します。その仕組みに必要なチャンネル作成などの変更も、同じ変更案の steps に入れて1回の承認で済むようにします。",
   "- ルールは依頼者の権限で、人の確認なしに動きます。許す操作(allow)はできるだけ狭くし、無限に連鎖しないようにしてください。",
   "- 既存のルールを直す依頼なら list_rules で確かめ、replaces_rule を付けて出し直します。止める・削除するは /rules の管理パネルでできると伝えます。",
 ];
