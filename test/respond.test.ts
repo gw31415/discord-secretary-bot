@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import type { REST } from "@discordjs/rest";
 import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider, Type } from "@earendil-works/pi-ai";
 import { llm } from "../src/llm/models.ts";
-import { Inbox, respond, typicalLength } from "../src/agent/respond.ts";
+import { Inbox, ReplyFailed, respond, typicalLength } from "../src/agent/respond.ts";
+import { isTransient } from "../src/agent/retry.ts";
 import { stripComments } from "../src/agent/summarize.ts";
 import { formatMessage } from "../src/agent/tools.ts";
 import { GuildCache } from "../src/discord/cache.ts";
@@ -38,6 +39,70 @@ test("the agent calls read tools through the reader and returns its final text",
   } finally {
     llm.deleteProvider(faux.provider.id);
   }
+});
+
+function listOnlyReader(): Reader {
+  const rest = {
+    get: async (path: string) => {
+      if (path === `/guilds/${GUILD}/channels`) return [{ id: "10", type: 0, name: "general" }];
+      throw new Error(`unexpected ${path}`);
+    },
+  } as unknown as REST;
+  const cache = new GuildCache(GUILD);
+  cache.guild = makeGuild();
+  return new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "2" }, { maxMessages: 500 });
+}
+
+test("a model call cut off mid-reply is made again, keeping the tools already run", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("list_channels", {})], { stopReason: "toolUse" }),
+      fauxAssistantMessage([], { stopReason: "error", errorMessage: "This operation was aborted" }),
+      fauxAssistantMessage([fauxText("チャンネルは #general です")]),
+    ]);
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
+      transcript: [], target: "[1] user: チャンネルを教えて", web: null,
+    });
+    assert.equal(result.text, "チャンネルは #general です");
+    assert.deepEqual(result.toolCalls, ["list_channels"]);
+    assert.equal(result.retries, 1);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
+test("an account error is not retried and says how far the reply got", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("list_channels", {})], { stopReason: "toolUse" }),
+      fauxAssistantMessage([], { stopReason: "error", errorMessage: "429: Insufficient balance" }),
+      fauxAssistantMessage([fauxText("呼ばれないはず")]),
+    ]);
+    await assert.rejects(
+      respond({
+        model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
+        transcript: [], target: "[1] user: チャンネルを教えて", web: null,
+      }),
+      (e: unknown) => e instanceof ReplyFailed && e.retries === 0 && e.toolCalls.join() === "list_channels" && e.message.includes("429"),
+    );
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
+test("only passing failures count as transient", () => {
+  assert.ok(isTransient("This operation was aborted"));
+  assert.ok(isTransient("terminated"));
+  assert.ok(isTransient("503 Service Unavailable"));
+  assert.ok(isTransient("Stream ended without finish_reason"));
+  assert.ok(!isTransient("429: {\"code\":\"1113\",\"message\":\"Insufficient balance\"}"));
+  assert.ok(!isTransient("401 invalid api key"));
+  assert.ok(!isTransient("400 timeout parameter is invalid"));
 });
 
 test("the typical length is the median of the human samples", () => {
