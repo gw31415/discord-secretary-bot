@@ -73,6 +73,8 @@ export interface Plan {
   rule?: PlanRule;
   /** Event rules the plan registers once its steps have run, approved with the same dialog. */
   rules?: PlanRuleDraft[];
+  /** Channels the plan deletes that have never had a message, so nothing is lost for good. */
+  emptyChannels?: string[];
   hash: string;
   createdAt: string;
   expiresAt: string;

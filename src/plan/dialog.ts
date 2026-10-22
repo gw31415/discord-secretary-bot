@@ -10,7 +10,7 @@ import { allowLines, allowRisk } from "../rules/allow.ts";
 import { paramsText, triggerLabel } from "../rules/panel.ts";
 import type { Body } from "./catalog.ts";
 import { RISK_LABEL } from "./types.ts";
-import type { Plan, PlanRuleDraft, PlanStatus, Risk } from "./types.ts";
+import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
 
 // The approval dialog, drawn only from the Plan and its step states. Nothing
@@ -124,9 +124,34 @@ export function stepLines(plan: Plan, steps?: StepRow[]): string[] {
   return groups(plan, steps).map((g, i) => groupLine(g, started, i));
 }
 
-/** What the person must type to run a plan with irreversible steps: the target's name, or the count. */
+/** Single messages deleted up to this many, and DMs up to this many, take one click. */
+const LIGHT_MESSAGE_DELETES = 3;
+const LIGHT_DMS = 10;
+
+/**
+ * Irreversible steps that are worth typing a name for. Lighter losses take one click:
+ * moving someone in voice, deleting a channel that never had a message, a few
+ * single messages, and a handful of DMs (their text is in the dialog).
+ */
+export function typedConfirmSteps(plan: Plan): Step[] {
+  const empty = new Set(plan.emptyChannels ?? []);
+  const lossy = irreversibleSteps(plan.steps).filter((s) => {
+    if (s.op === "PATCH /guilds/{guild}/members/{user}") return false;
+    if (s.op === "DELETE /channels/{channel}") return !empty.has(String(s.pathParams.channel));
+    return true;
+  });
+  const messages = lossy.filter((s) => s.op === "DELETE /channels/{channel}/messages/{message}");
+  const dms = lossy.filter((s) => s.op === "POST /users/{user}/dm");
+  return lossy.filter(
+    (s) =>
+      !(messages.length <= LIGHT_MESSAGE_DELETES && messages.includes(s)) &&
+      !(dms.length <= LIGHT_DMS && dms.includes(s)),
+  );
+}
+
+/** What the person must type to run a plan with serious irreversible steps: the target's name, or the count. */
 export function confirmPhrase(plan: Plan): string {
-  const irreversible = irreversibleSteps(plan.steps);
+  const irreversible = typedConfirmSteps(plan);
   if (irreversible.length === 1) {
     // Name the thing itself (channel, role, member); a message has no name, so its count is asked.
     const p = irreversible[0]!.pathParams;
@@ -138,7 +163,7 @@ export function confirmPhrase(plan: Plan): string {
 }
 
 export function needsTypedConfirm(plan: Plan): boolean {
-  return irreversibleSteps(plan.steps).length > 0;
+  return typedConfirmSteps(plan).length > 0;
 }
 
 /** "code": the code and its explanation; "result": the steps it produced. */

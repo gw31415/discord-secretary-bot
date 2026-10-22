@@ -190,6 +190,20 @@ export class Planner {
     }
   }
 
+  /**
+   * Channels being deleted that never had a message, read from REST: the cache's
+   * last_message_id is not kept up to date as messages arrive.
+   */
+  async #emptyChannels(steps: Step[]): Promise<{ emptyChannels?: string[] }> {
+    const ids = steps.filter((s) => s.op === "DELETE /channels/{channel}" && typeof s.pathParams.channel === "string").map((s) => s.pathParams.channel as string);
+    const empty: string[] = [];
+    for (const id of ids.slice(0, 20)) {
+      const channel = (await this.#get(`/channels/${id}`).catch(() => null)) as { last_message_id?: string | null } | null;
+      if (channel && !channel.last_message_id) empty.push(id);
+    }
+    return empty.length > 0 ? { emptyChannels: empty } : {};
+  }
+
   /** Current state of a resource key, straight from REST (never the cache). */
   async resource(guildId: string, key: string): Promise<Resource> {
     const sep = key.indexOf(":");
@@ -257,6 +271,7 @@ export class Planner {
         ...(input.replaces ? { revises: input.replaces } : {}),
         ...(source ? { source } : {}),
         ...(rules ? { rules } : {}),
+        ...(await this.#emptyChannels(steps)),
         createdAt: createdAt.toISOString(),
         expiresAt: new Date(createdAt.getTime() + APPROVAL_MS).toISOString(),
       };

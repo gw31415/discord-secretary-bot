@@ -7,7 +7,7 @@ import { InteractionType, ComponentType, PermissionFlagsBits as P } from "discor
 import type { APIInteraction } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
-import { confirmPhrase, dialogButtons, dialogText, parsePlanCustomId, renderDialog } from "../src/plan/dialog.ts";
+import { confirmPhrase, needsTypedConfirm, dialogButtons, dialogText, parsePlanCustomId, renderDialog } from "../src/plan/dialog.ts";
 import { Planner } from "../src/plan/service.ts";
 import { RuleAdmin } from "../src/rules/admin.ts";
 import { RuleEngine } from "../src/rules/engine.ts";
@@ -257,7 +257,14 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
 });
 
 test("destructive plans ask for the target's name before running", async () => {
-  const { planner, store, calls, replies } = setup();
+  const { planner, store, calls, replies, channels } = setup();
+  // A channel that never had a message is deleted with one click.
+  const empty = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "DELETE /channels/{channel}", path: { channel: "10" } }],
+  });
+  assert.equal(needsTypedConfirm(empty), false);
+  channels["10"].last_message_id = "499";
   const plan = await planner.propose({
     guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
     drafts: [{ op: "DELETE /channels/{channel}", path: { channel: "10" } }],
@@ -277,13 +284,15 @@ test("destructive plans ask for the target's name before running", async () => {
   assert.equal(store.getSnapshot(plan.id, "s1")!.data!.name, "general");
 });
 
-test("a message deletion asks for the count, since a message has no name", async () => {
+test("a few message deletions take one click; more ask for the count, since a message has no name", async () => {
   const { planner } = setup();
   const plan = await planner.propose({
     guildId: GUILD, channelId: "10", replyToId: null, actorId: "2", shareable: new Set(["10"]),
     drafts: [{ op: "DELETE /channels/{channel}/messages/{message}", path: { channel: "10", message: "500" } }],
   });
-  assert.equal(confirmPhrase(plan), "1");
+  assert.equal(needsTypedConfirm(plan), false);
+  const many = { ...plan, steps: [1, 2, 3, 4].map((n) => ({ ...plan.steps[0]!, id: `s${n}`, pathParams: { ...plan.steps[0]!.pathParams, message: String(500 + n) } })) };
+  assert.equal(confirmPhrase(many), "4");
   assert.match(dialogText(renderDialog(plan, { status: "pending_approval" })), /alice「spam spam」を削除/);
 });
 
