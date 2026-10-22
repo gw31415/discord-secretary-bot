@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import { PermissionFlagsBits as P } from "discord-api-types/v10";
+import { FILE_ID_PATTERN, MAX_IMAGES_PER_REPLY } from "./types.ts";
 import type { Risk, StepDraft } from "./types.ts";
 
 // The permission table: every write the bot can make, with the Discord
@@ -11,6 +12,14 @@ import type { Risk, StepDraft } from "./types.ts";
 const Id = Type.String({ pattern: "^\\d{1,20}$" });
 const Bits = Type.String({ pattern: "^\\d{1,20}$", description: "権限ビットの10進文字列" });
 const Content = Type.String({ minLength: 1, maxLength: 2000 });
+/** Images drawn with attach_image in the same reply, by id; content or files must be present. */
+const Files = Type.Array(Type.String({ pattern: FILE_ID_PATTERN }), { minItems: 1, maxItems: MAX_IMAGES_PER_REPLY, uniqueItems: true, description: "attach_image で作った画像のID" });
+const MessageBody = Type.Object({ content: Type.Optional(Content), files: Type.Optional(Files) }, { additionalProperties: false });
+
+function filesNote(b: Record<string, unknown> | undefined): string {
+  const files = Array.isArray(b?.files) ? b.files.length : 0;
+  return files > 0 ? `(画像${files}枚)` : "";
+}
 
 const Overwrite = Type.Object(
   { id: Id, type: Type.Union([Type.Literal(0), Type.Literal(1)]), allow: Type.Optional(Bits), deny: Type.Optional(Bits) },
@@ -133,9 +142,9 @@ const ops: OpSpec[] = [
     risk: "write",
     channel: "channel",
     always: P.ViewChannel | P.SendMessages,
-    body: Type.Object({ content: Content }, { additionalProperties: false }),
+    body: MessageBody,
     channels: (p) => [p.channel],
-    describe: (p, b, _before, l) => ({ target: l(p.channel), change: `「${short(b?.content, 80)}」` }),
+    describe: (p, b, _before, l) => ({ target: l(p.channel), change: `${b?.content ? `「${short(b.content, 80)}」` : "画像のみ"}${filesNote(b)}` }),
     inverse: (p, _b, _s, result) => (result?.id ? { op: "DELETE /channels/{channel}/messages/{message}", path: { channel: p.channel, message: result.id } } : null),
   },
   {
@@ -455,10 +464,10 @@ const ops: OpSpec[] = [
     label: "DM送信",
     risk: "destructive",
     always: P.ManageGuild,
-    body: Type.Object({ content: Content }, { additionalProperties: false }),
+    body: MessageBody,
     target: (p) => `member:${p.user}`,
     mentions: (p) => [{ id: p.user, kind: "user" }],
-    describe: (p, b, _before, l) => ({ target: l(p.user), change: `DM「${short(b?.content, 60)}」` }),
+    describe: (p, b, _before, l) => ({ target: l(p.user), change: `DM${b?.content ? `「${short(b.content, 60)}」` : "(画像のみ)"}${filesNote(b)}` }),
   },
 ];
 

@@ -2,6 +2,7 @@ import { ButtonStyle, ComponentType, MessageFlags, TextInputStyle } from "discor
 import type {
   APIActionRowComponent,
   APIButtonComponent,
+  APIMediaGalleryComponent,
   APIMessageTopLevelComponent,
   APIModalInteractionResponseCallbackData,
 } from "discord-api-types/v10";
@@ -9,6 +10,7 @@ import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
 import { paramsText, triggerLabel } from "../rules/panel.ts";
 import type { Body } from "./catalog.ts";
+import { dialogFileName } from "./files.ts";
 import { RISK_LABEL } from "./types.ts";
 import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
@@ -351,6 +353,13 @@ function resultBody(plan: Plan, state: DialogState): string[] {
   return [...listed, ...ruleTexts(plan)];
 }
 
+/** The images the plan posts, uploaded with the dialog so the approver sees them. */
+function gallery(plan: Plan): APIMediaGalleryComponent[] {
+  const ids = Object.keys(plan.attachments ?? {});
+  if (ids.length === 0) return [];
+  return [{ type: ComponentType.MediaGallery, items: ids.map((id) => ({ media: { url: `attachment://${dialogFileName(id)}` }, description: plan.attachments![id]!.name })) }];
+}
+
 export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
   const title = "### 変更の確認";
   const counts = [`${plan.steps.length}件`, ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join(" · ");
@@ -364,7 +373,7 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
       {
         type: ComponentType.Container,
         accent_color: color(plan, state.status),
-        components: [{ type: ComponentType.TextDisplay, content: text }, row],
+        components: [{ type: ComponentType.TextDisplay, content: text }, ...gallery(plan), row],
       },
     ],
     flags: MessageFlags.IsComponentsV2,
