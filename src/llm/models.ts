@@ -31,7 +31,12 @@ export const KEY_PROVIDERS = {
 } as const;
 
 export type KeyProviderId = keyof typeof KEY_PROVIDERS;
-export type ModelRole = "response" | "judge" | "code" | "reaction";
+export type ModelRole = "response" | "judge" | "addressee" | "code" | "reaction";
+
+/** Roles that take a classifier as well as a chat model. */
+export function judgesOnly(role: ModelRole): boolean {
+  return role === "judge" || role === "addressee" || role === "reaction";
+}
 
 /** Answers use a chat model; judgment takes a chat model or a classifier. */
 export type JudgeModel = Model<Api> | ClassifierModel<ClassifierApi>;
@@ -62,7 +67,7 @@ const OPENAI_CURRENT = /^gpt-(5\.[5-9]|[6-9])(\.\d+)?(-(luna|sol|terra|astra))?$
 export function selectableModels(provider: ProviderId, role: ModelRole): JudgeModel[] {
   const chat = llm.getModels(provider).filter((m) => !DATED_SNAPSHOT.test(m.id) && (provider !== "openai" || OPENAI_CURRENT.test(m.id)));
   // Judging and choosing reactions also take classifiers.
-  if (role !== "judge" && role !== "reaction") return chat;
+  if (!judgesOnly(role)) return chat;
   // A classifier shadows a chat model of the same id (gpt-6-luna): settings store only the id,
   // and findJudgeModel picks the classifier.
   const classifiers = llm.getModelsOfType("classifier", provider);
@@ -78,7 +83,7 @@ export function findJudgeModel(provider: ProviderId, modelId: string): JudgeMode
 }
 
 export function findModel(role: ModelRole, provider: ProviderId, modelId: string): JudgeModel | undefined {
-  return role === "judge" || role === "reaction" ? findJudgeModel(provider, modelId) : findChatModel(provider, modelId);
+  return judgesOnly(role) ? findJudgeModel(provider, modelId) : findChatModel(provider, modelId);
 }
 
 /** The judge model, or the default language model when none is set. */

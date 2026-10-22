@@ -1,4 +1,5 @@
 import { Agent } from "@earendil-works/pi-agent-core";
+import type { Decide } from "./decide.ts";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
@@ -50,6 +51,8 @@ export interface RespondInput {
   imageTools?: ImageTools;
   /** Asks the speaker to let this reply read up to their own permissions. Absent keeps reads to the channel's audience. */
   widen?: (reason: string) => Promise<boolean>;
+  /** Judgments by the speaker's judge model (or language model). */
+  decide?: Decide;
 }
 
 export interface RespondResult {
@@ -274,7 +277,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
       systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.react, !!input.attachments, !!input.widen && input.reader.narrowed),
       model,
       tools: [
-        ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder, widen: input.widen, ...(input.attachments ? { attachments: input.attachments } : {}) }),
+        ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder, widen: input.widen, ...(input.decide ? { decide: input.decide } : {}), ...(input.attachments ? { attachments: input.attachments } : {}) }),
         ...(web ? webTools(web, input.fetch) : []),
         ...(input.react ? [reactTool(input.react, reactions)] : []),
         ...imageTools,

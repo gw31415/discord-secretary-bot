@@ -15,6 +15,7 @@ import type { ChooseInput, ReactionChoice } from "./agent/react.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
 import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
 import { llmCoder } from "./agent/coder.ts";
+import { decideFor } from "./agent/decide.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
@@ -228,7 +229,8 @@ export class Conversations {
 
   async #addressed(judgeUserId: string, transcript: string[], message: GuildMessage): Promise<boolean> {
     const { store } = this.deps;
-    const ref = judgeRef(store.getSettings(judgeUserId));
+    const settings = store.getSettings(judgeUserId);
+    const ref = settings.addressee ?? judgeRef(settings);
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(judgeUserId, ref.provider);
     if (!model || !apiKey) return false; // The waker's setup broke; stay quiet rather than guess.
@@ -482,6 +484,7 @@ export class Conversations {
         web,
         inbox,
         coder,
+        decide: decideFor(store, speaker),
         ...(this.deps.react ? { react: (emoji: string) => this.deps.react!(channelId, input.replyToId, emoji) } : {}),
         widen,
         onProgress: async (content) => {

@@ -3,6 +3,7 @@ import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { PresenceUpdateStatus } from "discord-api-types/v10";
 import { judgeAddressed, publicReplyScore } from "./agent/judge.ts";
+import { decideFor } from "./agent/decide.ts";
 import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
@@ -125,6 +126,7 @@ const engine = new RuleEngine({
   now: () => Date.now(),
   makeReader,
   notifyOwner: sendDm,
+  decide: (ownerId) => decideFor(store, ownerId),
   onRulesChanged: syncCommands,
   log,
 });

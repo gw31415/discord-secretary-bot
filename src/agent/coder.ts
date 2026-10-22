@@ -6,6 +6,7 @@ import { lightestThinking, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { triggerSummary } from "../rules/triggers.ts";
 import { runSandboxed } from "../sandbox.ts";
+import { JUDGE_CODE_LINE } from "./decide.ts";
 import { retryFailedCall } from "./retry.ts";
 
 // A second agent, on the model the speaker picked for writing code. The conversation
@@ -61,6 +62,7 @@ const COMMON = [
   "- コードは関数本体として実行され、最後に return した値が結果になります。async/await・Promise・タイマー・ネットワーク・import はありません。乱数(Math.random)と日時(Date)は使えます。",
   "- 使えるもの: guild(サーバーIDの文字列), actor, discord.get(route, { query }) (同期関数。Discord REST API の GET を読み、JSONを返す。例: discord.get(`/guilds/${guild}/roles`)), log(...)。",
   "- 読める経路は Discord REST API の GET のうち許可されたものだけで、結果は権限と公開範囲に合わせて絞られます。ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
+  `- ${JUDGE_CODE_LINE}`,
   "- 依頼に書かれたID・名前・条件をそのまま使い、書かれていないことは推測で足さないでください。",
   "- 読みやすく書きます。変数名は内容がわかるものにします。",
 ];

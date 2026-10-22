@@ -65,8 +65,9 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
   store.setWebTool("u1", "anthropic");
   store.setModel("u1", "code", { provider: "anthropic", model: selectableModels("anthropic", "code")[0]!.id });
-  const panel = renderPanel(store, "u1", undefined, "models");
-  assert.match(JSON.stringify(panel), /応答モデルがClaudeではない/);
+  const models = renderPanel(store, "u1", undefined, "models");
+  const advanced = renderPanel(store, "u1", undefined, "advanced");
+  assert.match(JSON.stringify(advanced), /応答モデルがClaudeではない/);
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
   const walk = (node: unknown): void => {
@@ -78,9 +79,14 @@ test("every selectable model is offered, with unique custom ids, within the comp
     if (c.type === 1 && Array.isArray(c.components)) assert.ok(c.components.length <= 5, "action row over five components");
     walk(c.components);
   };
-  walk(panel.components);
-  assert.ok(components <= 40, `${components} components`);
-  assert.equal(new Set(selects.map((s) => s.custom_id)).size, selects.length);
+  for (const panel of [models, advanced]) {
+    components = 0;
+    const before = selects.length;
+    walk(panel.components);
+    assert.ok(components <= 40, `${components} components`);
+    const ids = selects.slice(before).map((s) => s.custom_id);
+    assert.equal(new Set(ids).size, ids.length);
+  }
   // Discord rejects a select whose options repeat a value (gpt-6-luna is both a chat model and a classifier).
   for (const s of selects) assert.equal(new Set(s.options.map((o) => o.value)).size, s.options.length, s.custom_id);
   const offered = (role: string) =>
@@ -88,7 +94,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   const code = selects.filter((s) => s.custom_id.startsWith("llm:model:code:")).flatMap((s) => s.options.map((o) => o.value));
   assert.equal(code[0], "none");
   assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length + selectableModels("openai", "code").length);
-  for (const role of ["response", "judge"] as const) {
+  for (const role of ["response", "judge", "addressee"] as const) {
     for (const provider of ["anthropic", "typesafe", "zai", "openai"] as const) {
       for (const m of selectableModels(provider, role)) assert.ok(offered(role).has(`${provider}/${m.id}`), `${role} ${provider}/${m.id}`);
     }
@@ -212,10 +218,12 @@ test("the settings panel moves between its pages with buttons, each well within 
   assert.match(home, /llm:page:models/);
   assert.match(home, /判定モデル\*\*: 言語モデルを使う/);
   assert.match(home, /llm:read:scope/);
-  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "models")), /llm:web:tool/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "advanced")), /llm:web:tool/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "advanced")), /llm:model:addressee:/);
+  assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1", undefined, "models")), /llm:model:(addressee|code|reaction):/);
   assert.doesNotMatch(home, /llm:model:/);
   const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
   assert.match(keys, /llm:key:set/);
   assert.match(keys, /llm:page:home/);
-  for (const page of ["home", "keys", "models"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
+  for (const page of ["home", "keys", "models", "advanced"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
 });
