@@ -10,8 +10,8 @@ import type { Store } from "../db.ts";
 
 export const COMMANDS: RESTPutAPIApplicationGuildCommandsJSONBody = [
   {
-    name: "llm",
-    description: "あなたのAPIキーと、応答・宛先判定に使うモデルを設定します",
+    name: "settings",
+    description: "あなたの設定(APIキー・使うモデル・Webツール・読み取りを広げる許可)を開きます",
     type: ApplicationCommandType.ChatInput,
   },
   {

@@ -142,8 +142,8 @@ test("judgements parse defensively", () => {
   assert.equal(parseJudgement('{"addressed": "yes"}'), null);
 });
 
-test("the setup notice points to /llm", () => {
-  assert.match(SETUP_NOTICE, /\/llm/);
+test("the setup notice points to /settings", () => {
+  assert.match(SETUP_NOTICE, /\/settings/);
 });
 
 test("the model's <next> lines split a reply into separate posts", () => {

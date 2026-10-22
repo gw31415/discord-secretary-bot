@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { KeyProviderId, ProviderId } from "../llm/models.ts";
 
-// Web access for the agent. Each person picks the service in /llm; the keys are theirs.
+// Web access for the agent. Each person picks the service in /settings; the keys are theirs.
 // Claude's own tools run on Anthropic's servers. The others are ordinary tools the bot
 // calls, so they work with any model: GLM Coding Plan's Web Search / Web Reader MCP
 // servers, and Tavily's search and extract API.
