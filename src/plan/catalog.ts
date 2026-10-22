@@ -38,6 +38,8 @@ export interface OpSpec {
   extraPerms?: (body: Body) => bigint;
   /** Path params whose target must sit below both the actor and the bot. */
   hierarchy?: { member?: string; role?: string };
+  /** Body fields that make `hierarchy.member` apply. Absent means it always does. */
+  hierarchyFields?: string[];
   /** Permission bits the step hands out; the actor and the bot must hold each one. */
   grants?: (body: Body) => bigint;
   /** Absent means the operation takes no body. */
@@ -383,6 +385,8 @@ const ops: OpSpec[] = [
       channel_id: { perms: P.MoveMembers },
     },
     hierarchy: { member: "user" },
+    // Discord checks role hierarchy for nicknames and timeouts, not for moving, muting or deafening.
+    hierarchyFields: ["nick", "communication_disabled_until"],
     body: Type.Object(
       {
         nick: Type.Optional(Type.Union([Type.String({ maxLength: 32 }), Type.Null()])),

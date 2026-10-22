@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { REST } from "@discordjs/rest";
-import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider, Type } from "@earendil-works/pi-ai";
 import { llm } from "../src/llm/models.ts";
 import { Inbox, respond, typicalLength } from "../src/agent/respond.ts";
 import { stripComments } from "../src/agent/summarize.ts";
@@ -141,6 +141,35 @@ test("a failed web tool is reported with its reason", async () => {
       web: { kind: "tavily", apiKey: "bad" }, fetch,
     });
     assert.deepEqual(result.toolErrors, [{ tool: "web_search", error: "Tavilyのキーが無効です" }]);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
+test("the coding agent tries code, looks at rule runs, fixes a failed submission and stops once it is accepted", async () => {
+  const { llmCoder } = await import("../src/agent/coder.ts");
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("rule_runs", { rule_id: "r1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("try_code", { code: "return discord.get('/x')", event: { channel_id: "5" } })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("submit_code", { code: "return (" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("submit_code", { code: "return null" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("ここには来ません")]),
+    ]);
+    const seen: string[] = [];
+    const runsTool = {
+      name: "rule_runs", label: "runs", description: "", parameters: Type.Object({ rule_id: Type.String() }),
+      execute: async () => (seen.push("runs"), { content: [{ type: "text" as const, text: "[]" }], details: {} }),
+    };
+    const result = await llmCoder(faux.getModel(), "k").write("rule", "直して", {
+      check: async (code) => (code === "return (" ? "SyntaxError" : null),
+      run: async (code, event) => (seen.push(`run:${code}:${JSON.stringify(event)}`), { ok: true, value: 1, logs: [] }),
+      tools: [runsTool],
+    });
+    assert.deepEqual(result, { code: "return null", attempts: 2 });
+    assert.deepEqual(seen, ["runs", `run:return discord.get('/x'):{"channel_id":"5"}`]);
   } finally {
     llm.deleteProvider(faux.provider.id);
   }

@@ -5,6 +5,7 @@ import type {
   APIRole,
   GatewayGuildCreateDispatchData,
 } from "discord-api-types/v10";
+import { ChannelType } from "discord-api-types/v10";
 import type { ChannelState, GuildState, MemberState, OverwriteState, RoleState } from "./permissions.ts";
 
 // In-memory mirror of each guild the bot serves, kept current from Gateway
@@ -13,7 +14,7 @@ import type { ChannelState, GuildState, MemberState, OverwriteState, RoleState }
 // for one server can reach a conversation in another.
 
 export function toRole(role: APIRole): RoleState {
-  return { id: role.id, permissions: BigInt(role.permissions), position: role.position };
+  return { id: role.id, permissions: BigInt(role.permissions), position: role.position, name: role.name };
 }
 
 function toOverwrite(o: APIOverwrite): OverwriteState {
@@ -35,9 +36,18 @@ export function toMember(member: Pick<APIGuildMember, "roles"> & { user: { id: s
   return { userId: member.user.id, roleIds: [...member.roles], bot: member.user.bot ?? false };
 }
 
+const THREAD_TYPES = new Set<number>([ChannelType.AnnouncementThread, ChannelType.PublicThread, ChannelType.PrivateThread]);
+
 export class GuildCache {
   guild: GuildState | null = null;
   readonly guildId: string;
+  /** Who is in which voice channel: user id -> channel id. */
+  readonly voice = new Map<string, string>();
+  /**
+   * Channels (not threads) and roles as Discord sent them, so reads can be
+   * answered without a REST round trip. Null until GUILD_CREATE has arrived.
+   */
+  raw: { channels: Map<string, APIChannel>; roles: Map<string, APIRole> } | null = null;
 
   constructor(guildId: string) {
     this.guildId = guildId;
@@ -57,6 +67,20 @@ export class GuildCache {
       channels: new Map([...data.channels, ...data.threads].map((c) => [c.id, toChannel(c as APIChannel)])),
       members: new Map(data.members.filter((m) => m.user).map((m) => [m.user.id, toMember(m)])),
     };
+    this.raw = {
+      channels: new Map(data.channels.map((c) => [c.id, { ...c, guild_id: data.id } as APIChannel])),
+      roles: new Map(data.roles.map((r) => [r.id, r])),
+    };
+    this.voice.clear();
+    for (const v of data.voice_states ?? []) if (v.channel_id) this.voice.set(v.user_id, v.channel_id);
+  }
+
+  /** Records a voice state change and returns the channel the user was in before. */
+  setVoice(userId: string, channelId: string | null): string | null {
+    const before = this.voice.get(userId) ?? null;
+    if (channelId) this.voice.set(userId, channelId);
+    else this.voice.delete(userId);
+    return before;
   }
 
   setOwner(ownerId: string): void {
@@ -65,18 +89,22 @@ export class GuildCache {
 
   upsertRole(role: APIRole): void {
     this.guild?.roles.set(role.id, toRole(role));
+    this.raw?.roles.set(role.id, role);
   }
 
   deleteRole(roleId: string): void {
     this.guild?.roles.delete(roleId);
+    this.raw?.roles.delete(roleId);
   }
 
   upsertChannel(channel: APIChannel): void {
     this.guild?.channels.set(channel.id, toChannel(channel));
+    if (!THREAD_TYPES.has(channel.type)) this.raw?.channels.set(channel.id, channel);
   }
 
   deleteChannel(channelId: string): void {
     this.guild?.channels.delete(channelId);
+    this.raw?.channels.delete(channelId);
   }
 
   upsertMember(member: Pick<APIGuildMember, "roles"> & { user: { id: string; bot?: boolean } }): void {
@@ -85,6 +113,32 @@ export class GuildCache {
 
   deleteMember(userId: string): void {
     this.guild?.members.delete(userId);
+  }
+
+  /**
+   * Takes in a write the bot just made, from the REST response. The Gateway
+   * event for it can arrive a moment later, and reads in between (a rule run
+   * right after a create) must already see the change.
+   */
+  applyWrite(op: string, params: Record<string, unknown>, response: unknown): void {
+    const res = response as { id?: string; type?: number } | null | undefined;
+    switch (op) {
+      case "POST /guilds/{guild}/channels":
+      case "PATCH /channels/{channel}":
+      case "POST /channels/{channel}/threads":
+        if (res?.id && typeof res.type === "number") this.upsertChannel(res as APIChannel);
+        break;
+      case "DELETE /channels/{channel}":
+        this.deleteChannel(String(params.channel));
+        break;
+      case "POST /guilds/{guild}/roles":
+      case "PATCH /guilds/{guild}/roles/{role}":
+        if (res?.id) this.upsertRole(res as APIRole);
+        break;
+      case "DELETE /guilds/{guild}/roles/{role}":
+        this.deleteRole(String(params.role));
+        break;
+    }
   }
 
   member(userId: string): MemberState | undefined {

@@ -9,11 +9,13 @@ import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
 import { findChatModel, findJudgeModel } from "./llm/models.ts";
+import { llmCoder } from "./agent/coder.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
+import type { Rule, RuleRun } from "./rules/types.ts";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -41,6 +43,11 @@ export interface ConversationDeps {
   judge: (input: { model: JudgeModel; apiKey: string; botName: string; transcript: string[]; message: string }) => Promise<Judgement>;
   /** Posts an approval dialog for writes. Absent keeps conversations read-only. */
   propose?: (input: ProposeInput) => Promise<Plan>;
+  /** Event rules, proposed inside plans. Absent means the agent cannot propose them. */
+  rules?: {
+    list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean }>;
+    runs: (guildId: string, ownerId: string, ruleId: string, shareable: Set<string>, limit: number) => RuleRun[] | null;
+  };
   /** A conversation woke or was extended. */
   onAwake?: () => void;
   log: (message: string, error?: unknown) => void;
@@ -292,6 +299,11 @@ export class Conversations {
     const ref = store.getSettings(speaker).response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
+    const codeRef = store.getSettings(speaker).code;
+    const codeModel = codeRef && findChatModel(codeRef.provider, codeRef.model);
+    const codeKey = codeRef && store.getApiKey(speaker, codeRef.provider);
+    // A coding model whose key was removed falls back to the response model.
+    const coder = codeModel && codeKey ? llmCoder(codeModel, codeKey) : undefined;
     const web = this.deps.webSearch
       ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p))
       : null;
@@ -311,7 +323,7 @@ export class Conversations {
     };
     let progress = 0;
     let text: string;
-    let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}`, web: web?.kind ?? null };
+    let detail: Record<string, unknown> = { ...input.audit, model: `${ref.provider}/${ref.model}`, ...(coder ? { codeModel: `${codeRef!.provider}/${codeRef!.model}` } : {}), web: web?.kind ?? null };
     try {
       const result = await this.deps.respond({
         model,
@@ -324,12 +336,13 @@ export class Conversations {
         images: input.images,
         web,
         inbox,
+        coder,
         onProgress: async (content) => {
           await post(content);
           await this.deps.typing(channelId).catch(() => undefined);
         },
         propose: this.deps.propose
-          ? (drafts, code) =>
+          ? (drafts, code, rules) =>
               this.deps.propose!({
                 guildId: input.guildId,
                 channelId,
@@ -339,7 +352,14 @@ export class Conversations {
                 shareable: reader.shareable(),
                 ...(code ? { code } : {}),
                 ...(input.replaces ? { replaces: input.replaces } : {}),
+                ...(rules ? { rules, reader, request: input.target } : {}),
               })
+          : undefined,
+        rules: this.deps.rules
+          ? {
+              list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
+              runs: (ruleId, limit) => this.deps.rules!.runs(input.guildId, speaker, ruleId, reader.shareable(), limit),
+            }
           : undefined,
       });
       progress = result.progress;

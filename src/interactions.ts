@@ -51,11 +51,17 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         if (hasKey) {
           store.setModel(userId, action.role, { provider: action.provider, model: action.model });
           store.audit(actor, "llm.model.set", { role: action.role, provider: action.provider, model: action.model });
-          notice = `${action.role === "response" ? "応答" : "宛先判定"}に使うモデルを ${action.model} にしました`;
+          notice = `${{ response: "応答に使う", judge: "宛先判定に使う", code: "コードを書く" }[action.role]}モデルを ${action.model} にしました`;
         } else {
           notice = `${PROVIDERS[action.provider].label}のキーが登録されていません`;
         }
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice));
+        return;
+      }
+      case "clearCodeModel": {
+        store.setModel(userId, "code", null);
+        store.audit(actor, "llm.model.set", { role: "code", provider: null, model: null });
+        await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, "コードは応答に使うモデルが書くようにしました"));
         return;
       }
       case "selectWeb": {

@@ -13,8 +13,12 @@ import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
 import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
-import { isRef } from "./types.ts";
-import type { Plan, Precondition, Step, StepDraft } from "./types.ts";
+import { isRef, maxRisk } from "./types.ts";
+import type { AllowEntry, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
+import type { Reader } from "../discord/reader.ts";
+import { allowProblems, allowRisk, needsTarget } from "../rules/allow.ts";
+import type { Targets } from "../rules/allow.ts";
+import type { RuleProposal } from "../rules/types.ts";
 import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
@@ -36,6 +40,40 @@ export interface PlannerDeps {
   revise?: (input: ReviseInput) => Promise<void>;
   /** Explains plan code from the code alone, paid for by the actor. */
   summarize?: (code: string, actorId: string) => Promise<string | null>;
+  /** A step went through; event rules use this to tell the bot's own changes from others'. */
+  onWrite?: (plan: Plan, step: Step, response: unknown) => void;
+  /** Event rules proposed together with a plan. Absent means plans cannot carry rules. */
+  rules?: PlanRuleHooks;
+}
+
+/** A rule as a proposal carries it; when proposing a plan again, what was worked out the first time comes along. */
+export type RuleInput = RuleProposal & { summary?: string | null; dry?: RuleDryRun; request?: string };
+
+export interface PlanRuleHooks {
+  /** Checks the proposed rules, dry-runs and explains them. Throws PlanRejected. */
+  prepare: (input: PrepareRulesInput) => Promise<PlanRuleDraft[]>;
+  /** Registers a rule whose refs are filled in, once the plan's steps have run. Returns its id. */
+  register: (guildId: string, ownerId: string, draft: PlanRuleDraft) => string;
+}
+
+export interface PrepareRulesInput {
+  guildId: string;
+  ownerId: string;
+  channelId: string;
+  shareable: Set<string>;
+  /** The conversation's reader, for the dry run; absent when proposing again. */
+  reader?: Pick<Reader, "get">;
+  rules: RuleInput[];
+  /** Ids of the plan's steps, which the rules' refs may point to. */
+  stepIds: string[];
+  request: string;
+}
+
+export interface RuleRunInput {
+  guildId: string;
+  ownerId: string;
+  rule: PlanRule;
+  drafts: StepDraft[];
 }
 
 export interface ReviseInput {
@@ -60,6 +98,12 @@ export interface ProposeInput {
   code?: string;
   /** An explanation already written for this exact code (proposing the same plan again). */
   summary?: string | null;
+  /** Event rules to register once the steps have run, approved with the same dialog. */
+  rules?: RuleInput[];
+  /** The conversation's reader, for dry-running the rules. */
+  reader?: Pick<Reader, "get">;
+  /** The request the plan answers, kept as each rule's source. */
+  request?: string;
 }
 
 type Resource = Record<string, unknown> | null;
@@ -82,8 +126,8 @@ export function fingerprint(resource: Resource, fields: string[]): string {
 }
 
 export function planHash(plan: Omit<Plan, "hash">): string {
-  const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, createdAt, expiresAt } = plan;
-  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, createdAt, expiresAt }));
+  const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, createdAt, expiresAt } = plan;
+  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, createdAt, expiresAt }));
 }
 
 /** Fields shown as "before" in the preview, on top of the ones the step depends on. */
@@ -105,6 +149,19 @@ function memberLabel(m: APIGuildMember): string {
 
 /** Thrown when the world changed between approval and execution. */
 class Aborted extends Error {}
+
+/** The steps ran but a rule could not be registered (e.g. its owner lost a permission it needs). */
+class RuleNotRegistered extends Error {}
+
+/** A plan's rule as input for proposing the plan again. */
+function ruleInputOf(r: PlanRuleDraft): RuleInput {
+  return {
+    name: r.name, trigger: r.trigger, allow: r.allow, code: r.code, summary: r.summary, dry: r.dry, request: r.request,
+    ...(r.params ? { params: r.params } : {}),
+    ...(r.replaces ? { replaces: r.replaces.id } : {}),
+    ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),
+  };
+}
 
 export class Planner {
   readonly deps: PlannerDeps;
@@ -131,6 +188,20 @@ export class Planner {
       if (e instanceof DiscordAPIError && e.status === 404) return null;
       throw e;
     }
+  }
+
+  /**
+   * Channels being deleted that never had a message, read from REST: the cache's
+   * last_message_id is not kept up to date as messages arrive.
+   */
+  async #emptyChannels(steps: Step[]): Promise<{ emptyChannels?: string[] }> {
+    const ids = steps.filter((s) => s.op === "DELETE /channels/{channel}" && typeof s.pathParams.channel === "string").map((s) => s.pathParams.channel as string);
+    const empty: string[] = [];
+    for (const id of ids.slice(0, 20)) {
+      const channel = (await this.#get(`/channels/${id}`).catch(() => null)) as { last_message_id?: string | null } | null;
+      if (channel && !channel.last_message_id) empty.push(id);
+    }
+    return empty.length > 0 ? { emptyChannels: empty } : {};
   }
 
   /** Current state of a resource key, straight from REST (never the cache). */
@@ -165,14 +236,28 @@ export class Planner {
     if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
     const guild = cache.guild;
     const id = randomBytes(6).toString("hex");
-    const steps = normalizeSteps(input.drafts, input.guildId, id);
+    const ruleInputs = input.rules ?? [];
+    if (ruleInputs.length > 0 && !this.deps.rules) throw new PlanRejected(["ルールはここでは作れません"]);
+    const steps = normalizeSteps(input.drafts, input.guildId, id, ruleInputs.length > 0);
     const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId() };
     const problems = steps.flatMap((s) => [...permissionProblems(s, ctx), ...visibilityProblems(s, input.shareable)]);
     if (problems.length > 0) throw new PlanRejected(problems);
+    const rules = ruleInputs.length > 0
+      ? await this.deps.rules!.prepare({
+          guildId: input.guildId,
+          ownerId: input.actorId,
+          channelId: input.channelId,
+          shareable: input.shareable,
+          ...(input.reader ? { reader: input.reader } : {}),
+          rules: ruleInputs,
+          stepIds: steps.map((s) => s.id),
+          request: input.request ?? "",
+        })
+      : undefined;
 
     {
       const preconditions = await this.#preconditions(input.guildId, steps);
-      const labels = await this.#labels(input.guildId, guild, steps, input.actorId);
+      const labels = await this.#labels(input.guildId, guild, steps, input.actorId, rules?.flatMap((r) => r.allow) ?? []);
       const source = input.code === undefined ? undefined : { code: input.code, summary: input.summary !== undefined ? input.summary : await this.#summarize(input.code, input.actorId) };
       const createdAt = new Date(this.deps.now());
       const draft: Omit<Plan, "hash"> = {
@@ -182,15 +267,17 @@ export class Planner {
         preconditions,
         steps,
         labels,
-        risk: planRisk(steps),
+        risk: maxRisk([planRisk(steps), ...(rules ?? []).map((r) => allowRisk(r.allow))]),
         ...(input.replaces ? { revises: input.replaces } : {}),
         ...(source ? { source } : {}),
+        ...(rules ? { rules } : {}),
+        ...(await this.#emptyChannels(steps)),
         createdAt: createdAt.toISOString(),
         expiresAt: new Date(createdAt.getTime() + APPROVAL_MS).toISOString(),
       };
       const plan: Plan = { ...draft, hash: planHash(draft) };
       this.deps.store.insertPlan(plan);
-      this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op) }, plan.id);
+      this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op), ...(rules ? { rules: rules.map((r) => r.trigger.event) } : {}) }, plan.id);
 
       const oldRow = input.replaces ? this.deps.store.getPlan(input.replaces) : undefined;
       if (oldRow?.channelId && oldRow.messageId) {
@@ -209,6 +296,56 @@ export class Planner {
       this.deps.store.setPlanMessage(plan.id, input.channelId, message.id);
       return plan;
     }
+  }
+
+  /**
+   * A rule's plan: no dialog, since the owner approved the rule. Every step
+   * must fit the rule's allow list and the owner's (and the bot's) current
+   * permissions; then it runs through the same executor as any other plan.
+   */
+  async runForRule(input: RuleRunInput): Promise<{ plan: Plan; status: PlanStatus; reason: string | null }> {
+    const cache = this.deps.caches.get(input.guildId);
+    if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
+    const guild = cache.guild;
+    const id = randomBytes(6).toString("hex");
+    const steps = normalizeSteps(input.drafts, input.guildId, id);
+    const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
+    const targets = await this.#targets(input.guildId, steps, input.rule.allow);
+    const problems = [...allowProblems(steps, input.rule.allow, targets), ...steps.flatMap((s) => permissionProblems(s, ctx))];
+    if (problems.length > 0) throw new PlanRejected(problems);
+
+    const preconditions = await this.#preconditions(input.guildId, steps);
+    const labels = await this.#labels(input.guildId, guild, [], input.ownerId);
+    const createdAt = new Date(this.deps.now()).toISOString();
+    const draft: Omit<Plan, "hash"> = {
+      id,
+      guildId: input.guildId,
+      actor: { kind: "user", userId: input.ownerId, via: "rule" },
+      preconditions,
+      steps,
+      labels,
+      risk: planRisk(steps),
+      rule: input.rule,
+      createdAt,
+      expiresAt: createdAt,
+    };
+    const plan: Plan = { ...draft, hash: planHash(draft) };
+    this.deps.store.insertPlan(plan, "approved");
+    this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op), event: input.rule.eventId }, plan.id, input.rule.id);
+    await this.execute(plan.id);
+    const row = this.deps.store.getPlan(plan.id)!;
+    return { plan, status: row.status, reason: row.reason };
+  }
+
+  /** Current state of the targets an allow list puts conditions on, for steps whose target is known. */
+  async #targets(guildId: string, steps: Step[], allow: AllowEntry[]): Promise<Targets> {
+    const targets: Targets = new Map();
+    for (const step of steps) {
+      const spec = specOf(step);
+      if (!spec.target || !needsTarget(step, allow) || Object.values(step.pathParams).some(isRef)) continue;
+      targets.set(step.id, await this.resource(guildId, spec.target(step.pathParams, guildId)));
+    }
+    return targets;
   }
 
   async #summarize(code: string, actorId: string): Promise<string | null> {
@@ -245,7 +382,7 @@ export class Planner {
     return result;
   }
 
-  async #labels(guildId: string, guild: GuildState, steps: Step[], actorId: string): Promise<Record<string, string>> {
+  async #labels(guildId: string, guild: GuildState, steps: Step[], actorId: string, allow: AllowEntry[] = []): Promise<Record<string, string>> {
     const labels: Record<string, string> = {};
     let roles: APIRole[] | null = null;
     const user = async (id: string) => {
@@ -279,6 +416,18 @@ export class Planner {
         if (kind === "user") await user(id);
         else if (kind === "role") await role(id);
         else await channel(id);
+      }
+    }
+    // Ids a rule's allow list pins its path parameters to, named after the parameter.
+    for (const entry of allow) {
+      for (const [name, schema] of Object.entries(entry.path ?? {})) {
+        const s = schema as { enum?: unknown[]; const?: unknown };
+        for (const id of s.enum ?? (s.const !== undefined ? [s.const] : [])) {
+          if (typeof id !== "string" || labels[id]) continue;
+          if (name === "user") await user(id);
+          else if (name === "role") await role(id);
+          else if (name === "channel") await channel(id);
+        }
       }
     }
     return labels;
@@ -439,6 +588,7 @@ export class Planner {
             guildId: plan.guildId, channelId: row.channelId, replyToId: null, actorId: plan.actor.userId, drafts,
             shareable: this.#shareable(plan, row.channelId), replaces: plan.id,
             ...(plan.source ? { code: plan.source.code, summary: plan.source.summary } : {}),
+            ...(plan.rules ? { rules: plan.rules.map(ruleInputOf) } : {}),
           });
         } catch (e) {
           await followUp(`出し直せませんでした:\n${why(e)}`);
@@ -531,7 +681,9 @@ export class Planner {
       const dm = await api.users.createDM(String(step.pathParams.user));
       return api.channels.createMessage(dm.id, { content: String(body?.content), allowed_mentions: { parse: [] } });
     }
-    const reason = `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
+    const reason = plan.rule
+      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更 ${plan.id})`
+      : `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
     const { method, path } = routeOf(step.op, step.pathParams);
     let payload: unknown = body;
     if (spec.op === "POST /channels/{channel}/messages") {
@@ -579,12 +731,15 @@ export class Planner {
           const resolved: Step = { ...step, pathParams: resolveRefs(step.pathParams, results), ...(step.body !== undefined ? { body: resolveRefs(step.body, results) } : {}) };
           const spec = specOf(resolved);
           await this.#addChannel(state, resolved);
-          const stepProblems = permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() });
+          const key = spec.target?.(resolved.pathParams, plan.guildId);
+          const before = key ? await this.resource(plan.guildId, key) : null;
+          const stepProblems = [
+            ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
+            // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
+            ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined) : []),
+          ];
           if (stepProblems.length > 0) throw new Error(stepProblems.join(" / "));
-          if (spec.target) {
-            const key = spec.target(resolved.pathParams, plan.guildId);
-            store.saveSnapshot(plan.id, step.id, key, await this.resource(plan.guildId, key));
-          }
+          if (key) store.saveSnapshot(plan.id, step.id, key, before);
           if (spec.op === "POST /users/{user}/dm") {
             const wait = lastDm + DM_INTERVAL_MS - this.deps.now();
             if (wait > 0) await sleep(wait);
@@ -595,12 +750,15 @@ export class Planner {
           const resultId = (response as { id?: string } | undefined)?.id ?? null;
           store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
           results.set(step.id, response ?? null);
+          this.deps.onWrite?.(plan, resolved, response);
           // Progress on long plans, without editing the dialog on every step.
           if (plan.steps.length > 1 && this.deps.now() - lastRefresh >= PROGRESS_INTERVAL_MS) {
             lastRefresh = this.deps.now();
             await this.#refresh(plan.id).catch(() => undefined);
           }
         }
+        current = undefined;
+        if (plan.rules?.length) await this.#registerRules(plan, results);
         store.transitionPlan(plan.id, ["executing"], "succeeded", { reason: null });
         store.audit(plan.actor, "plan.succeeded", { steps: plan.steps.length }, plan.id);
       } catch (e) {
@@ -610,7 +768,9 @@ export class Planner {
           store.audit(plan.actor, "plan.aborted", { reason: message }, plan.id);
         } else {
           if (current) store.finishStep(plan.id, current.id, { state: "failed", error: message.slice(0, 500) });
-          const reason = current ? `${current.id} で失敗: ${message.slice(0, 300)}` : `実行前の確認で失敗: ${message.slice(0, 300)}`;
+          const reason = current
+            ? `${current.id} で失敗: ${message.slice(0, 300)}`
+            : e instanceof RuleNotRegistered ? message.slice(0, 400) : `実行前の確認で失敗: ${message.slice(0, 300)}`;
           store.transitionPlan(plan.id, ["executing"], "failed", { reason });
           store.audit(plan.actor, "plan.failed", { step: current?.id, error: message.slice(0, 500) }, plan.id);
           this.deps.log(`変更 ${plan.id} の実行に失敗`, e);
@@ -618,6 +778,29 @@ export class Planner {
       }
     }
     await this.#refresh(plan.id).catch((e) => this.deps.log(`変更 ${plan.id} の表示更新に失敗`, e));
+  }
+
+  /**
+   * Registers the plan's rules with the steps' results filled in. A rule that
+   * cannot be registered fails the plan; resuming registers the rest.
+   */
+  async #registerRules(plan: Plan, results: Map<string, unknown>): Promise<void> {
+    const { store } = this.deps;
+    for (const draft of plan.rules ?? []) {
+      const key = `plan_rule:${plan.id}:${draft.key}`;
+      if (store.getMeta(key)) continue;
+      try {
+        const resolved: PlanRuleDraft = {
+          ...draft,
+          allow: resolveRefs(draft.allow, results),
+          ...(draft.params ? { params: resolveRefs(draft.params, results) } : {}),
+        };
+        const ruleId = this.deps.rules!.register(plan.guildId, plan.actor.userId, resolved);
+        store.setMeta(key, ruleId);
+      } catch (e) {
+        throw new RuleNotRegistered(`ルール「${draft.name}」を登録できませんでした: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   }
 
   /**

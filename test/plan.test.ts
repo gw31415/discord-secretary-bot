@@ -7,8 +7,11 @@ import { InteractionType, ComponentType, PermissionFlagsBits as P } from "discor
 import type { APIInteraction } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
-import { confirmPhrase, dialogButtons, dialogText, parsePlanCustomId, renderDialog } from "../src/plan/dialog.ts";
+import { confirmPhrase, needsTypedConfirm, dialogButtons, dialogText, parsePlanCustomId, renderDialog } from "../src/plan/dialog.ts";
 import { Planner } from "../src/plan/service.ts";
+import { RuleAdmin } from "../src/rules/admin.ts";
+import { RuleEngine } from "../src/rules/engine.ts";
+import { RuleService } from "../src/rules/service.ts";
 import type { Plan } from "../src/plan/types.ts";
 import { normalizeSteps, permissionProblems, PlanRejected, planRisk, visibilityProblems } from "../src/plan/validate.ts";
 import { BOT_ROLE, GUILD, makeGuild, MOD_ROLE, SELF } from "./helpers.ts";
@@ -69,6 +72,12 @@ test("both the actor and the bot need the permission, and hierarchy applies", ()
   // Nobody may act on the owner.
   const [kick] = normalizeSteps([{ op: "DELETE /guilds/{guild}/members/{user}" , path: { user: "1" } }], GUILD, "p");
   assert.match(permissionProblems(kick!, ctx("2")).join(), /オーナー/);
+  // Moving someone between voice channels has no hierarchy (as in Discord); a nickname does.
+  guild.roles.set(MOD_ROLE, { id: MOD_ROLE, permissions: P.MoveMembers | P.ManageNicknames, position: 1 });
+  const [move] = normalizeSteps([{ op: "PATCH /guilds/{guild}/members/{user}", path: { user: "1" }, body: { channel_id: "10" } }], GUILD, "p");
+  assert.deepEqual(permissionProblems(move!, ctx("2")), []);
+  const [nick] = normalizeSteps([{ op: "PATCH /guilds/{guild}/members/{user}", path: { user: "1" }, body: { nick: "x" } }], GUILD, "p");
+  assert.match(permissionProblems(nick!, ctx("2")).join(), /オーナー/);
 });
 
 test("the preview may only reveal channels this conversation can show", () => {
@@ -174,7 +183,7 @@ function setup(now = { t: Date.parse("2026-10-21T00:00:00Z") }) {
       return "全員に @Mod を付けます。";
     },
   });
-  return { ...discord, store, planner, now, summarized };
+  return { ...discord, store, planner, now, summarized, cache };
 }
 
 function click(plan: Plan, action: string, userId: string, extra: Partial<APIInteraction> = {}): APIInteraction {
@@ -248,7 +257,14 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
 });
 
 test("destructive plans ask for the target's name before running", async () => {
-  const { planner, store, calls, replies } = setup();
+  const { planner, store, calls, replies, channels } = setup();
+  // A channel that never had a message is deleted with one click.
+  const empty = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "DELETE /channels/{channel}", path: { channel: "10" } }],
+  });
+  assert.equal(needsTypedConfirm(empty), false);
+  channels["10"].last_message_id = "499";
   const plan = await planner.propose({
     guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
     drafts: [{ op: "DELETE /channels/{channel}", path: { channel: "10" } }],
@@ -268,13 +284,15 @@ test("destructive plans ask for the target's name before running", async () => {
   assert.equal(store.getSnapshot(plan.id, "s1")!.data!.name, "general");
 });
 
-test("a message deletion asks for the count, since a message has no name", async () => {
+test("a few message deletions take one click; more ask for the count, since a message has no name", async () => {
   const { planner } = setup();
   const plan = await planner.propose({
     guildId: GUILD, channelId: "10", replyToId: null, actorId: "2", shareable: new Set(["10"]),
     drafts: [{ op: "DELETE /channels/{channel}/messages/{message}", path: { channel: "10", message: "500" } }],
   });
-  assert.equal(confirmPhrase(plan), "1");
+  assert.equal(needsTypedConfirm(plan), false);
+  const many = { ...plan, steps: [1, 2, 3, 4].map((n) => ({ ...plan.steps[0]!, id: `s${n}`, pathParams: { ...plan.steps[0]!.pathParams, message: String(500 + n) } })) };
+  assert.equal(confirmPhrase(many), "4");
   assert.match(dialogText(renderDialog(plan, { status: "pending_approval" })), /alice「spam spam」を削除/);
 });
 
@@ -488,7 +506,7 @@ test("a plan made from code opens on the code and its explanation, and switches 
   assert.deepEqual(summarized, [code]);
   assert.deepEqual(plan.source, { code, summary: "全員に @Mod を付けます。" });
   const opened = replies.at(-1)!.body;
-  assert.match(dialogText(opened), /コードだけを読んで[\s\S]*全員に @Mod を付けます。[\s\S]*```js\nconst ids/);
+  assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*```js\nconst ids/);
   assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "結果を見る", "JSONを見る"]);
 
   // Anyone may switch the view; it stays switched when the dialog is redrawn.
@@ -510,4 +528,259 @@ test("a plan made from steps has no code view", async () => {
   });
   assert.equal(summarized.length, 0);
   assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["実行", "修正", "取り消し", "JSONを見る"]);
+});
+
+// --- Plans made by event rules -------------------------------------------------
+
+const RULE = {
+  id: "r1",
+  version: 1,
+  name: "挨拶",
+  eventId: "MESSAGE_CREATE:500:x",
+  allow: [{ op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } }, body: { type: "object", properties: { content: { type: "string", maxLength: 50 } }, additionalProperties: false }, maxStepsPerRun: 1 }],
+};
+
+test("a rule's plan runs without a dialog, as its owner, inside its allow list", async () => {
+  const { planner, store, calls, replies } = setup();
+  const written: string[] = [];
+  planner.deps.onWrite = (_plan, step) => void written.push(step.op);
+  const done = await planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "ようこそ" } }] });
+  assert.equal(done.status, "succeeded");
+  assert.equal(replies.length, 0); // no dialog
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["POST /channels/10/messages"]);
+  assert.match(calls[0]!.options!.reason!, /owner のルール「挨拶」/);
+  const row = store.getPlan(done.plan.id)!;
+  assert.equal(row.plan.actor.via, "rule");
+  assert.equal(row.approvedBy, "1");
+  assert.deepEqual(written, ["POST /channels/{channel}/messages"]);
+});
+
+test("a rule's steps outside its allow list, or past its count, are rejected before anything runs", async () => {
+  const { planner, calls } = setup();
+  const run = (drafts: any[]) => planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts });
+  await assert.rejects(run([{ op: "POST /channels/{channel}/messages", path: { channel: "11" }, body: { content: "x" } }]), (e: unknown) => e instanceof PlanRejected && /範囲外/.test(e.reasons.join()));
+  await assert.rejects(run([{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x".repeat(60) } }]), PlanRejected);
+  await assert.rejects(run([{ op: "DELETE /channels/{channel}", path: { channel: "10" } }]), PlanRejected);
+  await assert.rejects(
+    run([
+      { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "a" } },
+      { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "b" } },
+    ]),
+    (e: unknown) => e instanceof PlanRejected && /1回に1件まで/.test(e.reasons.join()),
+  );
+  // The owner's own permissions still apply.
+  const manage = { ...RULE, allow: [{ op: "PATCH /channels/{channel}" }] };
+  await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "3", rule: manage, drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { topic: "x" } }] }), /依頼者に権限 ManageChannels/);
+  assert.equal(calls.length, 0);
+});
+
+test("a value from an earlier step is checked against the allow list once it is known", async () => {
+  const { planner, calls } = setup();
+  const rule = { ...RULE, allow: [{ op: "POST /guilds/{guild}/channels" }, { op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } } }] };
+  const done = await planner.runForRule({
+    guildId: GUILD, ownerId: "1", rule,
+    drafts: [
+      { op: "POST /guilds/{guild}/channels", body: { name: "new" } },
+      { op: "POST /channels/{channel}/messages", path: { channel: { $ref: "steps.s1.result.id" } }, body: { content: "hi" } },
+    ],
+  });
+  assert.equal(done.status, "failed");
+  assert.match(done.reason!, /範囲外/);
+  assert.deepEqual(calls.map((c) => c.method), ["POST"]); // the message was never sent
+});
+
+test("a rule's target conditions are checked on the target as it is right before the step", async () => {
+  const { planner, calls, channels, cache } = setup();
+  channels["60"] = { id: "60", type: 2, name: "📞 alice", guild_id: GUILD, permission_overwrites: [] };
+  cache.guild!.channels.set("60", { id: "60", type: 2, name: "📞 alice", parentId: null, overwrites: [] });
+  const rule = { ...RULE, allow: [{ op: "DELETE /channels/{channel}", target: { properties: { name: { pattern: "^📞" } }, required: ["name"] }, maxStepsPerRun: 1 }] };
+  const run = (channel: string) => planner.runForRule({ guildId: GUILD, ownerId: "1", rule, drafts: [{ op: "DELETE /channels/{channel}", path: { channel } }] });
+  await assert.rejects(run("10"), (e: unknown) => e instanceof PlanRejected && /範囲外/.test(e.reasons.join()));
+  assert.equal(calls.length, 0);
+  assert.equal((await run("60")).status, "succeeded");
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["DELETE /channels/60"]);
+});
+
+// The dynamic voice channel example: a lobby made by the plan, and two rules that use it.
+const LOBBY_RULE = {
+  name: "通話部屋を作る",
+  trigger: { event: "VOICE_STATE_UPDATE" },
+  allow: [
+    { op: "POST /guilds/{guild}/channels", body: { type: "object", properties: { name: { type: "string", pattern: "^📞" }, type: { const: 2 } }, required: ["name", "type"], additionalProperties: false }, maxStepsPerRun: 1 },
+    { op: "PATCH /guilds/{guild}/members/{user}", body: { type: "object", properties: { channel_id: { type: "string" } }, required: ["channel_id"], additionalProperties: false }, maxStepsPerRun: 1 },
+  ],
+  code: "if (event.channel_id !== params.lobby) return null; return plan([]);",
+  params: { lobby: { $ref: "steps.s1.result.id" } },
+};
+const CLEANUP_RULE = {
+  name: "空き部屋を消す",
+  trigger: { event: "VOICE_STATE_UPDATE", includeBotOrigin: true },
+  allow: [{ op: "DELETE /channels/{channel}", target: { properties: { name: { pattern: "^📞" } }, required: ["name"] }, maxStepsPerRun: 1 }],
+  code: "return null;",
+  sampleEvent: { guild_id: GUILD, user_id: "3", channel_id: null, before_channel_id: "10" },
+};
+
+function withRules(t: ReturnType<typeof setup>) {
+  const caches = { get: (id: string | undefined) => (id === GUILD ? t.cache : undefined) };
+  const admin = new RuleAdmin({ store: t.store, caches, selfId: () => SELF, now: () => t.now.t });
+  const engine = new RuleEngine({
+    store: t.store, caches, planner: t.planner, selfId: () => SELF, now: () => t.now.t, log: () => {},
+    makeReader: () => ({ get: async () => null }) as never,
+    run: async () => ({ ok: true, value: null, logs: [] }),
+  });
+  const service = new RuleService({ api: t.api, store: t.store, caches, admin, engine, selfId: () => SELF, now: () => t.now.t, log: () => {}, summarize: async () => "説明です。" });
+  t.planner.deps.rules = { prepare: (i) => service.prepare(i), register: (g, o, d) => service.register(g, o, d) };
+  return { admin, engine, service };
+}
+
+const reader = { get: async () => null };
+
+test("one approval runs the steps and registers the rules, with the steps' results filled in", async () => {
+  const t = setup();
+  withRules(t);
+  const plan = await t.planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: "400", actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /guilds/{guild}/channels", body: { name: "vc作成", type: 2 } }],
+    rules: [LOBBY_RULE, CLEANUP_RULE], reader, request: "vcを動的に作成削除する仕組みを作りたい",
+  });
+  assert.equal(plan.rules!.length, 2);
+  assert.equal(plan.rules![0]!.dry.outcome, "pending"); // it needs the lobby's id
+  assert.equal(plan.rules![1]!.dry.outcome, "none");
+  assert.equal(plan.risk, "destructive"); // the cleanup rule may delete channels
+  const dialog = t.replies.find((r) => r.kind === "createMessage")!.body;
+  const text = dialogText(dialog);
+  assert.match(text, /1件 · ルール2件/);
+  assert.match(text, /登録するルール/);
+  assert.match(text, /通話部屋を作る/);
+  assert.match(text, /lobby: \(s1 で作るもののid\)/);
+  assert.match(text, /対象の条件: .*📞/);
+  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "コードを見る", "JSONを見る"]);
+  assert.equal(t.store.listRules(GUILD).length, 0); // nothing is registered before the approval
+
+  // One click: the lobby is made, then both rules are registered.
+  await t.planner.handleInteraction(click(plan, "run", "1"));
+  await settle(() => t.store.getPlan(plan.id)!.status === "succeeded");
+  const lobby = t.store.getSteps(plan.id)[0]!.resultId!;
+  const rules = t.store.listRules(GUILD);
+  assert.equal(rules.length, 2);
+  const made = rules.find((r) => r.name === "通話部屋を作る")!;
+  assert.deepEqual(made.params, { lobby });
+  assert.equal(made.ownerId, "1");
+  assert.equal(made.summary, "説明です。");
+  assert.equal(made.sourcePrompt, "vcを動的に作成削除する仕組みを作りたい");
+  assert.equal(rules.find((r) => r.name === "空き部屋を消す")!.trigger.includeBotOrigin, true);
+  assert.match(dialogText(t.replies.at(-1)!.body), /ルール2件を登録しました/);
+});
+
+test("rules are checked at proposal: refs must point to the plan's steps, and a plan may be rules alone", async () => {
+  const t = setup();
+  withRules(t);
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "x" };
+  await assert.rejects(
+    t.planner.propose({ ...base, drafts: [], rules: [{ ...LOBBY_RULE, params: { lobby: { $ref: "steps.s9.result.id" } } }] }),
+    (e: unknown) => e instanceof PlanRejected && /指していません/.test(e.reasons.join()),
+  );
+  // A regular member cannot own a rule that deletes channels.
+  await assert.rejects(t.planner.propose({ ...base, actorId: "3", drafts: [], rules: [CLEANUP_RULE] }), /ManageChannels/);
+  // Without a real event or a sample, the agent is asked for one.
+  const { sampleEvent: _, ...unsampled } = CLEANUP_RULE;
+  await assert.rejects(t.planner.propose({ ...base, drafts: [], rules: [unsampled] }), /sample_event/);
+
+  const plan = await t.planner.propose({ ...base, drafts: [], rules: [CLEANUP_RULE] });
+  assert.equal(plan.steps.length, 0);
+  await t.planner.handleInteraction(click(plan, "run", "1"));
+  await settle(() => t.store.getPlan(plan.id)!.status === "succeeded");
+  assert.equal(t.store.listRules(GUILD).length, 1);
+  assert.equal(t.calls.length, 0);
+});
+
+test("a new version of a rule shows what it did before and what it will do", async () => {
+  const t = setup();
+  withRules(t);
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "x" };
+  const first = await t.planner.propose({ ...base, drafts: [], rules: [CLEANUP_RULE] });
+  await t.planner.handleInteraction(click(first, "run", "1"));
+  await settle(() => t.store.getPlan(first.id)!.status === "succeeded");
+  const old = t.store.listRules(GUILD)[0]!;
+  t.store.db.prepare("UPDATE rules SET rule_json = json_set(rule_json, '$.summary', ?) WHERE id = ?").run("前の説明です。", old.id);
+
+  const plan = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, trigger: { event: "VOICE_STATE_UPDATE" } }] });
+  const text = dialogText(renderDialog(plan, { status: "pending_approval" }));
+  assert.match(text, /変更前: 前の説明です。/);
+  assert.match(text, /変更後: 説明です。/);
+  assert.match(text, /変わる設定: きっかけ/);
+});
+
+test("propose_plan refuses steps and code together, and points out rule code passed as plan code", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => [] } as never;
+  const proposed: unknown[] = [];
+  const tool = readTools(fakeReader, { images: false, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [], runs: () => null } })
+    .find((t) => t.name === "propose_plan")!;
+  await assert.rejects(tool.execute("t", { steps: [{ op: "POST /guilds/{guild}/channels", body: { name: "x" } }], code: "return plan([])" }), /同時に使えません/);
+  await assert.rejects(tool.execute("t", { code: "return event.channel_id" }), /rules\[\]\.code/);
+  assert.equal(proposed.length, 0);
+});
+
+test("with a coding model, the agent describes code and the coder writes and fixes it", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const { extractCode, syntaxError } = await import("../src/agent/coder.ts");
+  const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => [{ id: "7", name: "general" }] } as never;
+  // Hands out its answers in order, recording what it was asked and the errors it was shown.
+  const asked: Array<{ kind: string; task: string; errors: string[] }> = [];
+  const coderOf = (answers: Record<string, string[]>) => ({
+    label: "fake",
+    async write(kind: "read" | "plan" | "rule", task: string, { check }: { check: (code: string) => Promise<string | null> }) {
+      const entry = { kind, task, errors: [] as string[] };
+      asked.push(entry);
+      const list = answers[kind]!;
+      for (const [i, code] of list.entries()) {
+        const problem = await check(code);
+        if (problem === null) return { code, attempts: i + 1 };
+        entry.errors.push(problem);
+      }
+      const { CodeFailed } = await import("../src/agent/coder.ts");
+      throw new CodeFailed("直せませんでした", list.at(-1)!);
+    },
+  });
+  const proposed: unknown[][] = [];
+  const tools = (coder: ReturnType<typeof coderOf>) =>
+    readTools(fakeReader, { images: false, coder, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [], runs: () => null } });
+
+  // run_code takes a task; the coder's first try throws and its second is run.
+  const coder = coderOf({
+    read: ["return nope.length", "return discord.get(`/guilds/${guild}/channels`).length"],
+    plan: ["return plan([call('POST /guilds/{guild}/channels', { body: { name: 'vc作成', type: 2 } })])"],
+    rule: ["if (!event.channel_id) return null; return plan([])"],
+  });
+  const run = tools(coder).find((t) => t.name === "run_code")!;
+  assert.ok("task" in (run.parameters as { properties: object }).properties);
+  const out = await run.execute("t", { task: "チャンネルの数を返す" });
+  assert.match((out.content[0] as { text: string }).text, /結果:\n1/);
+  assert.equal(asked[0]!.errors.length, 1);
+
+  const propose = tools(coder).find((t) => t.name === "propose_plan")!;
+  const props = (propose.parameters as { properties: Record<string, unknown> }).properties;
+  assert.ok("code_task" in props && !("code" in props));
+  await propose.execute("t", {
+    code_task: "vc作成 というボイスチャンネルを作る",
+    rules: [{ name: "通話部屋", trigger_event: "VOICE_STATE_UPDATE", allow: [{ op: "POST /guilds/{guild}/channels" }], code_task: "vc作成 に入った人の部屋を作る", params: { lobby: "1" } }],
+  });
+  const [drafts, code, rules] = proposed[0] as [Array<{ op: string }>, string, Array<{ code: string; name: string }>];
+  assert.equal(drafts[0]!.op, "POST /guilds/{guild}/channels");
+  assert.match(code, /vc作成/);
+  assert.equal(rules[0]!.code, "if (!event.channel_id) return null; return plan([])");
+  // The rule's task carries its trigger, params and allow, since the coder sees nothing else.
+  const ruleAsk = asked.find((a) => a.kind === "rule")!;
+  assert.match(ruleAsk.task, /VOICE_STATE_UPDATE/);
+  assert.match(ruleAsk.task, /"lobby":"1"/);
+
+  // When the coder gives up, the agent sees why and the last code.
+  const stuck = tools(coderOf({ read: ["return nope", "return nope"], plan: [], rule: [] })).find((t) => t.name === "run_code")!;
+  await assert.rejects(stuck.execute("t", { task: "x" }), /直せませんでした[\s\S]*return nope[\s\S]*task/);
+
+  assert.equal(extractCode("説明\n```js\nreturn 1\n```\n```javascript\nreturn 2\n```"), "return 2");
+  assert.equal(extractCode("return 3"), "return 3");
+  assert.equal(await syntaxError("return event.x"), null);
+  assert.match((await syntaxError("return ("))!, /SyntaxError/);
 });

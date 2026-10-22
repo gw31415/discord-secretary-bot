@@ -14,6 +14,11 @@ export const COMMANDS: RESTPutAPIApplicationGuildCommandsJSONBody = [
     description: "あなたのAPIキーと、応答・宛先判定に使うモデルを設定します",
     type: ApplicationCommandType.ChatInput,
   },
+  {
+    name: "rules",
+    description: "イベントルールの管理パネルを開きます(ルールは会話でBotに頼むと作れます)",
+    type: ApplicationCommandType.ChatInput,
+  },
 ];
 
 export async function registerCommands(api: API, store: Store, applicationId: string, guildId: string): Promise<boolean> {

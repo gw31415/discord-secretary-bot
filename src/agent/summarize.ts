@@ -51,15 +51,20 @@ export interface SummarizeInput {
   model: Model<Api>;
   apiKey: string;
   code: string;
+  /** "rule": the code runs on every event of `trigger`, reading it as `event`. */
+  subject?: { kind: "plan" } | { kind: "rule"; trigger: string };
   signal?: AbortSignal;
 }
+
+const RULE_NOTE = (trigger: string) =>
+  `このコードはイベントルールで、${trigger} が起きるたびに動きます。event は発火したイベントのペイロード、params はルールと一緒に登録された値(チャンネルのIDなど)です。どんなイベントのときに何を変更するか(何もしないのはどんなときか)を書いてください。`;
 
 export async function summarizeCode(input: SummarizeInput): Promise<string | null> {
   const reasoning = lightestThinking(input.model);
   const res = await llm.completeSimple(
     input.model,
     {
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: input.subject?.kind === "rule" ? `${SYSTEM_PROMPT}\n\n${RULE_NOTE(input.subject.trigger)}` : SYSTEM_PROMPT,
       messages: [{ role: "user", content: `<code>\n${stripComments(input.code)}\n</code>`, timestamp: Date.now() }],
     },
     { apiKey: input.apiKey, signal: input.signal ?? AbortSignal.timeout(30_000), ...(reasoning ? { maxTokens: 3000, reasoning } : { maxTokens: 600 }) },

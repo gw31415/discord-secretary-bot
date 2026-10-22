@@ -19,12 +19,15 @@ export type { ModelRole };
 // Both models are required and never chosen automatically.
 
 
+/** The code model's option for leaving code to the response model. */
+const CODE_UNSET = "none";
+
 export const CUSTOM_ID = {
   keyButton: (p: KeyProviderId) => `llm:key:${p}`,
   deleteButton: (p: KeyProviderId) => `llm:delkey:${p}`,
   keyModal: (p: KeyProviderId) => `llm:keymodal:${p}`,
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
-  modelSelect: (role: ModelRole, p: ProviderId, page: number) => `llm:model:${role}:${p}:${page}`,
+  modelSelect: (role: ModelRole, p: ProviderId | "all", page: number) => `llm:model:${role}:${p}:${page}`,
   webSelect: "llm:web:tool",
 } as const;
 
@@ -115,6 +118,7 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
         : [{ type: ComponentType.TextDisplay, content: "-# 応答に使えるモデルがありません。Claude APIのキーを登録してください。" } satisfies APIComponentInContainer]),
       { type: ComponentType.TextDisplay, content: "**宛先判定に使うモデル**(必須)\nあなたが起こした会話で、発言がBot宛てかを判定するときに使います。軽いモデルか、判定専用のJev(TypeSafe)がおすすめです。" },
       ...judge,
+      ...codeSection(store, userId),
     );
   } else {
     body.push({ type: ComponentType.TextDisplay, content: "**モデル**\n先にAPIキーを登録すると、モデルを選べるようになります。" });
@@ -137,6 +141,41 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
     flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
     components: [{ type: ComponentType.Container, components: body }],
   };
+}
+
+// Optional: without it the response model writes the code itself.
+function codeSection(store: Store, userId: string): APIComponentInContainer[] {
+  const current = store.getSettings(userId).code;
+  const text = current
+    ? `**コードを書くモデル**(任意)\n調べもの・変更案・ルールのコードを ${current.model} が書きます。`
+    : "**コードを書くモデル**(任意)\n未設定なので、応答に使うモデルがコードも書きます。選ぶと、調べもの・変更案・ルールのコードをそのモデルが書きます。";
+  // Optional, so every provider shares one select (the panel is near Discord's 40-component limit),
+  // led by the option that leaves code to the response model.
+  const providers = store.listKeys(userId).map((k) => k.provider).filter(isProviderId);
+  const options = [
+    { label: "応答に使うモデルに任せる", value: CODE_UNSET, description: "コード用のモデルを使いません", default: !current },
+    ...providers.flatMap((provider) =>
+      selectableModels(provider, "code").map((model) => ({
+        label: model.name.slice(0, 100),
+        value: `${provider}/${model.id}`,
+        description: `${PROVIDERS[provider].label} · ${model.id}`.slice(0, 100),
+        default: current?.provider === provider && current.model === model.id,
+      })),
+    ),
+  ];
+  const pages = Math.ceil(options.length / SELECT_LIMIT);
+  return [
+    { type: ComponentType.TextDisplay, content: text },
+    ...Array.from({ length: pages }, (_, page) => ({
+      type: ComponentType.ActionRow,
+      components: [{
+        type: ComponentType.StringSelect,
+        custom_id: CUSTOM_ID.modelSelect("code", "all", page),
+        placeholder: `コードを書くモデル${pages > 1 ? ` (${page + 1}/${pages})` : ""}`,
+        options: options.slice(page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT),
+      }],
+    }) satisfies APIActionRowComponent<APIStringSelectComponent>),
+  ];
 }
 
 // Not required for setup: the bot answers without the web when none works.
@@ -194,6 +233,7 @@ export type PanelAction =
   | { kind: "deleteKey"; provider: KeyProviderId }
   | { kind: "submitKey"; provider: KeyProviderId }
   | { kind: "selectModel"; role: ModelRole; provider: ProviderId; model: string }
+  | { kind: "clearCodeModel" }
   | { kind: "selectWeb"; tool: WebTool };
 
 /** Parses a custom_id (and select value) into an action. Unknown ids return null. */
@@ -207,8 +247,9 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
     const tool = values[0] ?? "";
     return isWebTool(tool) ? { kind: "selectWeb", tool } : null;
   }
-  if (kind === "model" && (arg === "response" || arg === "judge")) {
+  if (kind === "model" && (arg === "response" || arg === "judge" || arg === "code")) {
     const value = values[0] ?? "";
+    if (arg === "code" && value === CODE_UNSET) return { kind: "clearCodeModel" };
     const slash = value.indexOf("/");
     const provider = value.slice(0, slash);
     const model = value.slice(slash + 1);

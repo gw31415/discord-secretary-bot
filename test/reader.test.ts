@@ -104,3 +104,86 @@ test("a thread from another server is refused even if its parent id looks sharea
   });
   await assert.rejects(makeReader(rest, "10", "3").get("/channels/78/messages"), /この場所では扱えません/);
 });
+
+test("voice states come from the Gateway, narrowed to channels this reply may show", async () => {
+  const { rest, calls } = fakeRest({});
+  const reader = makeReader(rest, "10", "3");
+  reader.cache.setVoice("3", "10");
+  reader.cache.setVoice("2", "11"); // staff: hidden from regular members
+  assert.equal(reader.cache.setVoice("2", "11"), "11");
+  assert.deepEqual(await reader.get(`/guilds/${GUILD}/voice-states`), [{ user_id: "3", channel_id: "10" }]);
+  assert.deepEqual(await reader.get(`/guilds/${GUILD}/voice-states`, { channel_id: "11" }), []);
+  assert.equal(reader.cache.setVoice("3", null), "10");
+  assert.deepEqual(await reader.get(`/guilds/${GUILD}/voice-states`), []);
+  assert.equal(calls.length, 0);
+});
+
+test("channels and roles come from the Gateway cache once it is loaded, and repeated reads are fetched once", async () => {
+  const { rest, calls } = fakeRest({ [`/guilds/${GUILD}/members/3`]: { user: { id: "3" } } });
+  const cache = new GuildCache(GUILD);
+  cache.loadGuild({
+    id: GUILD, owner_id: "1", members: [], threads: [], voice_states: [],
+    roles: [{ id: GUILD, name: "@everyone", permissions: String(1024 | 65536 | 2048), position: 0 }],
+    channels: [{ id: "10", type: 0, name: "general", permission_overwrites: [] }, { id: "11", type: 0, name: "staff", permission_overwrites: [{ id: GUILD, type: 0, allow: "0", deny: "1024" }] }],
+  } as never);
+  cache.upsertMember({ roles: [], user: { id: "3" } });
+  cache.upsertMember({ roles: [], user: { id: SELF, bot: true } });
+  cache.upsertChannel({ id: "12", type: 2, name: "📞", guild_id: GUILD, permission_overwrites: [] } as never);
+  const reader = new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "3" }, { maxMessages: 150 });
+  const channels = (await reader.get(`/guilds/${GUILD}/channels`)) as Array<{ id: string }>;
+  assert.deepEqual(channels.map((c) => c.id).sort(), ["10", "12"]); // staff is hidden
+  assert.equal(((await reader.get(`/channels/12`)) as { name: string }).name, "📞");
+  assert.equal(((await reader.get(`/guilds/${GUILD}/roles`)) as unknown[]).length, 1);
+  await reader.get(`/guilds/${GUILD}/members/3`);
+  await reader.get(`/guilds/${GUILD}/members/3`);
+  assert.deepEqual(calls.map((c) => c.path), [`/guilds/${GUILD}/members/3`]);
+});
+
+test("the bot's own writes reach the cache before their Gateway events do", async () => {
+  const cache = new GuildCache(GUILD);
+  cache.loadGuild({ id: GUILD, owner_id: "1", members: [], threads: [], voice_states: [], roles: [], channels: [] } as never);
+  cache.applyWrite("POST /guilds/{guild}/channels", { guild: GUILD }, { id: "70", type: 2, name: "📞", guild_id: GUILD, permission_overwrites: [] });
+  assert.equal(cache.raw!.channels.get("70")!.name, "📞");
+  assert.equal(cache.guild!.channels.get("70")!.name, "📞");
+  cache.applyWrite("DELETE /channels/{channel}", { channel: "70" }, undefined);
+  assert.equal(cache.raw!.channels.has("70"), false);
+  assert.equal(cache.guild!.channels.has("70"), false);
+});
+
+test("hostile routes never reach Discord, and Discord is only ever asked to GET allowlisted shapes", async () => {
+  // A REST client with only `get`: any other method would throw.
+  const calls: string[] = [];
+  const rest = { get: async (path: string) => (calls.push(path), []) } as unknown as REST;
+  const reader = makeReader(rest, "10", "2");
+  const hostile = [
+    `/guilds/${GUILD}/webhooks`, `/guilds/${GUILD}/roles/../webhooks`, `/guilds/${GUILD}/roles/`, `/guilds/${GUILD}/roles?x=1/../../webhooks`,
+    `/guilds/${GUILD}/roles%2F..%2Fwebhooks`, `/guilds/${GUILD}//roles`, `//evil.example/guilds/${GUILD}/roles`, `https://evil.example/guilds/${GUILD}/roles`,
+    ` /guilds/${GUILD}/roles`, `/guilds/${GUILD}/roles\n/x`, `/guilds/${GUILD}/roles\n`, `/guilds/${GUILD}/roles#/webhooks`, `/Guilds/${GUILD}/roles`,
+    `/guilds/１２３/roles`, `/guilds/${GUILD}/roles\u0000`, `/users/@me`, `/users/@me/guilds`, `/applications/1/commands`, `/gateway/bot`,
+    `/channels/10/webhooks`, `/channels/10/invites`, `/channels/10/messages/1/reactions/x`, `/guilds/999/roles`, `/guilds/${GUILD}/members/2/../../bans`,
+    `POST /guilds/${GUILD}/roles`, `DELETE /channels/10`, `/channels/11/messages`, `/channels/10/messages/../../11/messages`, "", "/",
+  ];
+  for (const route of hostile) await assert.rejects(reader.get(route), Error, `not refused: ${JSON.stringify(route)}`);
+  // Queries cannot change the path or method either.
+  await reader.get(`/guilds/${GUILD}/members`, { "../webhooks": "1", limit: "1&x=/../webhooks" } as never);
+  const SHAPES = [/^\/guilds\/\d+\/members$/];
+  for (const path of calls) assert.ok(SHAPES.some((p) => p.test(path)), `unexpected call ${path}`);
+  assert.equal(calls.length, 1);
+});
+
+test("sandboxed code has no way out besides discord.get", async () => {
+  const { runSandboxed, AGENT_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const routes: string[] = [];
+  const bindings = { guildId: GUILD, actor: { kind: "user" as const, userId: "2" }, get: async (route: string) => (routes.push(route), null) };
+  const probe = await runSandboxed(
+    `return ["fetch","require","process","std","os","XMLHttpRequest","WebSocket","setTimeout","Deno","Bun","module","global"].filter((n) => typeof globalThis[n] !== "undefined")`,
+    bindings, AGENT_SANDBOX_LIMITS,
+  );
+  assert.deepEqual(probe.value, []);
+  for (const code of [`return import("os")`, `return new Function("return this")().process.exit()`, `return (function(){ return this })().require("fs")`]) {
+    const r = await runSandboxed(code, bindings, AGENT_SANDBOX_LIMITS);
+    // Either it fails, or it yields nothing from the host.
+    assert.ok(!r.ok || r.value === undefined || JSON.stringify(r.value) === "{}", `escaped: ${code} → ${JSON.stringify(r)}`);
+  }
+  assert.deepEqual(routes, []);
+});

@@ -3,7 +3,7 @@ import { ChannelType, PermissionFlagsBits } from "discord-api-types/v10";
 import type { APIChannel, APIMessage, RESTGetAPIGuildMessagesSearchResult } from "discord-api-types/v10";
 import type { GuildCache } from "./cache.ts";
 import { toChannel } from "./cache.ts";
-import { audienceHasGuildPermission, shareableChannels } from "./permissions.ts";
+import { audienceHasGuildPermission, basePermissions, has, readableChannels, shareableChannels } from "./permissions.ts";
 import type { GuildState, MemberState } from "./permissions.ts";
 
 // Every read the agent or sandbox makes goes through here. The bot token can
@@ -16,6 +16,11 @@ export interface ReadScope {
   guildId: string;
   channelId: string;
   speakerId: string;
+  /**
+   * "channel" (default): what everyone who can see the channel may read, for a reply posted there.
+   * "owner": what the speaker alone may read, for a rule that runs with its owner's permissions.
+   */
+  audience?: "channel" | "owner";
 }
 
 export interface ReaderLimits {
@@ -48,7 +53,7 @@ const GUILD_PERMISSION_ROUTES: Array<[RegExp, bigint]> = [
 
 const RULES: RouteRule[] = [
   { pattern: /^\/guilds\/(\d+)$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}`, {}) },
-  { pattern: /^\/guilds\/(\d+)\/roles$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}/roles`, {}) },
+  { pattern: /^\/guilds\/(\d+)\/roles$/, handle: (r, [g]) => r.roles(g!) },
   { pattern: /^\/guilds\/(\d+)\/members$/, handle: (r, [g], q) => r.guildRoute(g!, `/guilds/${g}/members`, q) },
   { pattern: /^\/guilds\/(\d+)\/members\/search$/, handle: (r, [g], q) => r.guildRoute(g!, `/guilds/${g}/members/search`, q) },
   { pattern: /^\/guilds\/(\d+)\/members\/(\d+)$/, handle: (r, [g, u]) => r.guildRoute(g!, `/guilds/${g}/members/${u}`, {}) },
@@ -56,9 +61,10 @@ const RULES: RouteRule[] = [
   { pattern: /^\/guilds\/(\d+)\/stickers$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}/stickers`, {}) },
   { pattern: /^\/guilds\/(\d+)\/scheduled-events$/, handle: (r, [g], q) => r.guildRoute(g!, `/guilds/${g}/scheduled-events`, q) },
   { pattern: /^\/guilds\/(\d+)\/channels$/, handle: (r, [g]) => r.listChannels(g!) },
+  { pattern: /^\/guilds\/(\d+)\/voice-states$/, handle: async (r, [g], q) => r.voiceStates(g!, q) },
   { pattern: /^\/guilds\/(\d+)\/threads\/active$/, handle: (r, [g]) => r.activeThreads(g!) },
   { pattern: /^\/guilds\/(\d+)\/messages\/search$/, handle: (r, [g], q) => r.searchMessages(g!, q) },
-  { pattern: /^\/channels\/(\d+)$/, handle: (r, [c]) => r.channelRoute(c!, `/channels/${c}`, {}) },
+  { pattern: /^\/channels\/(\d+)$/, handle: (r, [c]) => r.channel(c!) },
   { pattern: /^\/channels\/(\d+)\/messages$/, handle: (r, [c], q) => r.messages(c!, q) },
   { pattern: /^\/channels\/(\d+)\/messages\/(\d+)$/, handle: (r, [c, m]) => r.channelRoute(c!, `/channels/${c}/messages/${m}`, {}) },
   { pattern: /^\/channels\/(\d+)\/messages\/pins$/, handle: (r, [c], q) => r.channelRoute(c!, `/channels/${c}/messages/pins`, q) },
@@ -73,6 +79,7 @@ export class Reader {
   readonly limits: ReaderLimits;
   messagesRead = 0;
   #shareable: Set<string> | null = null;
+  readonly #fetched = new Map<string, Promise<unknown>>();
 
   constructor(rest: REST, cache: GuildCache, selfId: string, scope: ReadScope, limits: ReaderLimits) {
     this.rest = rest;
@@ -94,7 +101,10 @@ export class Reader {
 
   /** Channels whose contents may appear in this reply. Computed once per reply. */
   shareable(): Set<string> {
-    this.#shareable ??= shareableChannels(this.guild, this.scope.channelId, this.speaker, this.selfId);
+    this.#shareable ??=
+      this.scope.audience === "owner"
+        ? readableChannels(this.guild, this.speaker, this.selfId)
+        : shareableChannels(this.guild, this.scope.channelId, this.speaker, this.selfId);
     return this.#shareable;
   }
 
@@ -128,12 +138,19 @@ export class Reader {
 
   /** Generic GET used by the sandbox. Only allowlisted routes are served. */
   async get(route: string, query: Query = {}): Promise<unknown> {
-    const path = route.replace(/^GET\s+/, "").split("?")[0]!;
+    const path = route.replace(/^GET /, "");
+    // Strict: the query goes in its own argument, so the route is only ever a bare path.
+    if (path.includes("?")) throw new ReadDenied("クエリは discord.get(route, { query: { ... } }) の query に渡してください");
     for (const [pattern, bits] of GUILD_PERMISSION_ROUTES) {
       const m = pattern.exec(path);
       if (!m) continue;
       this.#assertGuild(m[1]!);
-      if (!audienceHasGuildPermission(this.guild, this.scope.channelId, this.speaker, this.selfId, bits)) {
+      if (this.scope.audience === "owner") {
+        const bot = this.guild.members.get(this.selfId);
+        if (!bot || !has(basePermissions(this.guild, this.speaker), bits) || !has(basePermissions(this.guild, bot), bits)) {
+          throw new ReadDenied("必要な権限がないため読めません");
+        }
+      } else if (!audienceHasGuildPermission(this.guild, this.scope.channelId, this.speaker, this.selfId, bits)) {
         throw new ReadDenied("話し手とこのチャンネルを見られる全員が必要な権限を持っていないため読めません");
       }
       return this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
@@ -145,21 +162,60 @@ export class Reader {
     throw new ReadDenied(`読み取りが許可されていない経路です: ${path}`);
   }
 
+  /** REST GET, remembered for the life of this reader (one reply or one rule run): code often asks twice. */
+  #fetch(path: string, query: Query): Promise<unknown> {
+    const key = `${path}?${toSearchParams(query).toString()}`;
+    let pending = this.#fetched.get(key);
+    if (!pending) {
+      pending = this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
+      this.#fetched.set(key, pending);
+      pending.catch(() => this.#fetched.delete(key));
+    }
+    return pending;
+  }
+
   async guildRoute(guildId: string, path: string, query: Query): Promise<unknown> {
     this.#assertGuild(guildId);
-    return this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
+    return this.#fetch(path, query);
   }
 
   async channelRoute(channelId: string, path: string, query: Query): Promise<unknown> {
     await this.assertChannel(channelId);
-    return this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
+    return this.#fetch(path, query);
+  }
+
+  /** Roles from the Gateway cache when it has them. */
+  async roles(guildId: string): Promise<unknown> {
+    this.#assertGuild(guildId);
+    const raw = this.cache.raw;
+    if (!raw) return this.#fetch(`/guilds/${guildId}/roles`, {});
+    return [...raw.roles.values()];
+  }
+
+  async channel(channelId: string): Promise<unknown> {
+    await this.assertChannel(channelId);
+    return this.cache.raw?.channels.get(channelId) ?? this.#fetch(`/channels/${channelId}`, {});
   }
 
   async listChannels(guildId: string): Promise<APIChannel[]> {
     this.#assertGuild(guildId);
-    const all = (await this.rest.get(`/guilds/${guildId}/channels`)) as APIChannel[];
+    const raw = this.cache.raw;
+    const all = raw ? [...raw.channels.values()] : ((await this.#fetch(`/guilds/${guildId}/channels`, {})) as APIChannel[]);
     const allowed = this.shareable();
     return all.filter((c) => allowed.has(c.id));
+  }
+
+  /**
+   * Who is in which voice channel, from the Gateway (Discord has no REST route
+   * for the whole server). Only channels this reply may show are included.
+   */
+  voiceStates(guildId: string, query: Query): Array<{ user_id: string; channel_id: string }> {
+    this.#assertGuild(guildId);
+    const allowed = this.shareable();
+    const only = query.channel_id === undefined ? null : String(query.channel_id);
+    return [...this.cache.voice]
+      .filter(([, channelId]) => allowed.has(channelId) && (only === null || channelId === only))
+      .map(([userId, channelId]) => ({ user_id: userId, channel_id: channelId }));
   }
 
   async activeThreads(guildId: string): Promise<unknown> {
