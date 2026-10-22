@@ -53,7 +53,7 @@ const GUILD_PERMISSION_ROUTES: Array<[RegExp, bigint]> = [
 
 const RULES: RouteRule[] = [
   { pattern: /^\/guilds\/(\d+)$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}`, {}) },
-  { pattern: /^\/guilds\/(\d+)\/roles$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}/roles`, {}) },
+  { pattern: /^\/guilds\/(\d+)\/roles$/, handle: (r, [g]) => r.roles(g!) },
   { pattern: /^\/guilds\/(\d+)\/members$/, handle: (r, [g], q) => r.guildRoute(g!, `/guilds/${g}/members`, q) },
   { pattern: /^\/guilds\/(\d+)\/members\/search$/, handle: (r, [g], q) => r.guildRoute(g!, `/guilds/${g}/members/search`, q) },
   { pattern: /^\/guilds\/(\d+)\/members\/(\d+)$/, handle: (r, [g, u]) => r.guildRoute(g!, `/guilds/${g}/members/${u}`, {}) },
@@ -64,7 +64,7 @@ const RULES: RouteRule[] = [
   { pattern: /^\/guilds\/(\d+)\/voice-states$/, handle: async (r, [g], q) => r.voiceStates(g!, q) },
   { pattern: /^\/guilds\/(\d+)\/threads\/active$/, handle: (r, [g]) => r.activeThreads(g!) },
   { pattern: /^\/guilds\/(\d+)\/messages\/search$/, handle: (r, [g], q) => r.searchMessages(g!, q) },
-  { pattern: /^\/channels\/(\d+)$/, handle: (r, [c]) => r.channelRoute(c!, `/channels/${c}`, {}) },
+  { pattern: /^\/channels\/(\d+)$/, handle: (r, [c]) => r.channel(c!) },
   { pattern: /^\/channels\/(\d+)\/messages$/, handle: (r, [c], q) => r.messages(c!, q) },
   { pattern: /^\/channels\/(\d+)\/messages\/(\d+)$/, handle: (r, [c, m]) => r.channelRoute(c!, `/channels/${c}/messages/${m}`, {}) },
   { pattern: /^\/channels\/(\d+)\/messages\/pins$/, handle: (r, [c], q) => r.channelRoute(c!, `/channels/${c}/messages/pins`, q) },
@@ -79,6 +79,7 @@ export class Reader {
   readonly limits: ReaderLimits;
   messagesRead = 0;
   #shareable: Set<string> | null = null;
+  readonly #fetched = new Map<string, Promise<unknown>>();
 
   constructor(rest: REST, cache: GuildCache, selfId: string, scope: ReadScope, limits: ReaderLimits) {
     this.rest = rest;
@@ -159,19 +160,45 @@ export class Reader {
     throw new ReadDenied(`読み取りが許可されていない経路です: ${path}`);
   }
 
+  /** REST GET, remembered for the life of this reader (one reply or one rule run): code often asks twice. */
+  #fetch(path: string, query: Query): Promise<unknown> {
+    const key = `${path}?${toSearchParams(query).toString()}`;
+    let pending = this.#fetched.get(key);
+    if (!pending) {
+      pending = this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
+      this.#fetched.set(key, pending);
+      pending.catch(() => this.#fetched.delete(key));
+    }
+    return pending;
+  }
+
   async guildRoute(guildId: string, path: string, query: Query): Promise<unknown> {
     this.#assertGuild(guildId);
-    return this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
+    return this.#fetch(path, query);
   }
 
   async channelRoute(channelId: string, path: string, query: Query): Promise<unknown> {
     await this.assertChannel(channelId);
-    return this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
+    return this.#fetch(path, query);
+  }
+
+  /** Roles from the Gateway cache when it has them. */
+  async roles(guildId: string): Promise<unknown> {
+    this.#assertGuild(guildId);
+    const raw = this.cache.raw;
+    if (!raw) return this.#fetch(`/guilds/${guildId}/roles`, {});
+    return [...raw.roles.values()];
+  }
+
+  async channel(channelId: string): Promise<unknown> {
+    await this.assertChannel(channelId);
+    return this.cache.raw?.channels.get(channelId) ?? this.#fetch(`/channels/${channelId}`, {});
   }
 
   async listChannels(guildId: string): Promise<APIChannel[]> {
     this.#assertGuild(guildId);
-    const all = (await this.rest.get(`/guilds/${guildId}/channels`)) as APIChannel[];
+    const raw = this.cache.raw;
+    const all = raw ? [...raw.channels.values()] : ((await this.#fetch(`/guilds/${guildId}/channels`, {})) as APIChannel[]);
     const allowed = this.shareable();
     return all.filter((c) => allowed.has(c.id));
   }

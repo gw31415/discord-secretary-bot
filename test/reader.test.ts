@@ -117,3 +117,24 @@ test("voice states come from the Gateway, narrowed to channels this reply may sh
   assert.deepEqual(await reader.get(`/guilds/${GUILD}/voice-states`), []);
   assert.equal(calls.length, 0);
 });
+
+test("channels and roles come from the Gateway cache once it is loaded, and repeated reads are fetched once", async () => {
+  const { rest, calls } = fakeRest({ [`/guilds/${GUILD}/members/3`]: { user: { id: "3" } } });
+  const cache = new GuildCache(GUILD);
+  cache.loadGuild({
+    id: GUILD, owner_id: "1", members: [], threads: [], voice_states: [],
+    roles: [{ id: GUILD, name: "@everyone", permissions: String(1024 | 65536 | 2048), position: 0 }],
+    channels: [{ id: "10", type: 0, name: "general", permission_overwrites: [] }, { id: "11", type: 0, name: "staff", permission_overwrites: [{ id: GUILD, type: 0, allow: "0", deny: "1024" }] }],
+  } as never);
+  cache.upsertMember({ roles: [], user: { id: "3" } });
+  cache.upsertMember({ roles: [], user: { id: SELF, bot: true } });
+  cache.upsertChannel({ id: "12", type: 2, name: "📞", guild_id: GUILD, permission_overwrites: [] } as never);
+  const reader = new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "3" }, { maxMessages: 150 });
+  const channels = (await reader.get(`/guilds/${GUILD}/channels`)) as Array<{ id: string }>;
+  assert.deepEqual(channels.map((c) => c.id).sort(), ["10", "12"]); // staff is hidden
+  assert.equal(((await reader.get(`/channels/12`)) as { name: string }).name, "📞");
+  assert.equal(((await reader.get(`/guilds/${GUILD}/roles`)) as unknown[]).length, 1);
+  await reader.get(`/guilds/${GUILD}/members/3`);
+  await reader.get(`/guilds/${GUILD}/members/3`);
+  assert.deepEqual(calls.map((c) => c.path), [`/guilds/${GUILD}/members/3`]);
+});

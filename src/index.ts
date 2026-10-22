@@ -196,7 +196,11 @@ client.on(GatewayDispatchEvents.GuildDelete, ({ data }) => {
   if (!data.unavailable) log(`サーバー ${data.id} から退出しました`);
 });
 
-client.on(GatewayDispatchEvents.GuildUpdate, ({ data }) => caches.get(data.id)?.setOwner(data.owner_id));
+client.on(GatewayDispatchEvents.GuildUpdate, ({ data }) => {
+  const cache = caches.get(data.id);
+  cache?.setOwner(data.owner_id);
+  for (const role of data.roles) cache?.upsertRole(role);
+});
 client.on(GatewayDispatchEvents.GuildRoleCreate, ({ data }) => caches.get(data.guild_id)?.upsertRole(data.role));
 client.on(GatewayDispatchEvents.GuildRoleUpdate, ({ data }) => caches.get(data.guild_id)?.upsertRole(data.role));
 client.on(GatewayDispatchEvents.GuildRoleDelete, ({ data }) => caches.get(data.guild_id)?.deleteRole(data.role_id));
