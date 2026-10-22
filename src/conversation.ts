@@ -277,11 +277,11 @@ export class Conversations {
     this.deps.onAwake?.();
   }
 
-  /** The speaker's reaction model, or for a reaction without one, their judge model (or language model). */
-  #reactionModel(userId: string, kind: ChooseInput["kind"]): { model: JudgeModel; apiKey: string; label: string } | null {
+  /** The speaker's reaction model, or without one their judge model (or language model). */
+  #reactionModel(userId: string): { model: JudgeModel; apiKey: string; label: string } | null {
     const { store } = this.deps;
     const settings = store.getSettings(userId);
-    const ref = settings.reaction ?? (kind === "reaction" ? judgeRef(settings) : null);
+    const ref = settings.reaction ?? judgeRef(settings);
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(userId, ref.provider);
     return model && apiKey ? { model, apiKey, label: `${ref.provider}/${ref.model}` } : null;
@@ -291,7 +291,7 @@ export class Conversations {
   async #reactInstead(message: GuildMessage, context: ChannelContext): Promise<boolean> {
     const { deps } = this;
     if (!deps.react || !deps.chooseReaction) return false;
-    const chooser = this.#reactionModel(message.author.id, "message");
+    const chooser = this.#reactionModel(message.author.id);
     if (!chooser) return false;
     const choice = await deps.chooseReaction({ model: chooser.model, apiKey: chooser.apiKey, botName: deps.botName(), transcript: context.transcript, message: formatMessage(message), kind: "message" });
     if (choice.action !== "react" || !choice.emoji) return false;
@@ -336,7 +336,7 @@ export class Conversations {
     if (!guildId || !deps.chooseReaction || !deps.fetchMessage) return;
     // Unregistered people get no DM for a reaction; only a mention invites them.
     if (!setupStatus(store, data.user_id).complete) return;
-    const chooser = this.#reactionModel(data.user_id, "reaction");
+    const chooser = this.#reactionModel(data.user_id);
     if (!chooser) return;
     const reacted = await deps.fetchMessage(data.channel_id, data.message_id);
     const before = await deps.fetchBefore(data.channel_id, data.message_id, CONTEXT_MESSAGES);

@@ -65,7 +65,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
       case "clearModel": {
         store.setModel(userId, action.role, null);
         store.audit(actor, "llm.model.set", { role: action.role, provider: null, model: null });
-        const notice = { judge: "判定は言語モデルがするようにしました", code: "コードは言語モデルが書くようにしました", reaction: "リアクションは言語モデルが選ぶようにしました" }[action.role];
+        const notice = { judge: "判定は言語モデルがするようにしました", code: "コードは言語モデルが書くようにしました", reaction: "リアクションは判定モデルが選ぶようにしました" }[action.role];
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, "models"));
         return;
       }
@@ -78,7 +78,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`, "home"),
+          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`, "models"),
         );
         return;
       }

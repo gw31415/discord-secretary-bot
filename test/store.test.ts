@@ -65,8 +65,8 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
   store.setWebTool("u1", "anthropic");
   store.setModel("u1", "code", { provider: "anthropic", model: selectableModels("anthropic", "code")[0]!.id });
-  assert.match(JSON.stringify(renderPanel(store, "u1")), /応答モデルがClaudeではない/);
   const panel = renderPanel(store, "u1", undefined, "models");
+  assert.match(JSON.stringify(panel), /応答モデルがClaudeではない/);
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
   const walk = (node: unknown): void => {
@@ -211,6 +211,8 @@ test("the settings panel moves between its pages with buttons, each well within 
   assert.match(home, /llm:page:keys/);
   assert.match(home, /llm:page:models/);
   assert.match(home, /判定モデル\*\*: 言語モデルを使う/);
+  assert.match(home, /llm:read:scope/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "models")), /llm:web:tool/);
   assert.doesNotMatch(home, /llm:model:/);
   const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
   assert.match(keys, /llm:key:set/);

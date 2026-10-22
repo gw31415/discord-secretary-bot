@@ -249,12 +249,12 @@ test("with a reaction model, a message that only needs a reaction gets one inste
   assert.deepEqual(t.replies, []);
   assert.deepEqual(asked, ["ts-key-for-1"]);
   assert.equal(t.responded.length, 0);
-  // Words when the model says so; and someone without a reaction model is never asked.
+  // Words when the model says so; without a reaction model, the judge model chooses.
   choice = { action: "reply" };
   await t.conv.handle(message("2", "1", "今のロール一覧は?", { mentions: [mention] }));
   await t.conv.handle(message("3", "2", "それと人数も", { mentions: [mention] }));
   assert.deepEqual(t.replies, ["answer", "answer"]);
-  assert.equal(asked.length, 2);
+  assert.equal(asked.length, 3);
 });
 
 test("an answer that is only a reaction posts no text", async () => {

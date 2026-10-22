@@ -151,9 +151,14 @@ function homePage(store: Store, userId: string): APIComponentInContainer[] {
         `**言語モデル**: ${language ?? "未設定"}`,
         `**判定モデル**: ${modelName(settings.judge) ?? (language ? "言語モデルを使う" : "未設定")}`,
         ...(overrides.length > 0 ? [`**用途別**: ${overrides.join("、")}`] : []),
+        `**Webツール**: ${WEB_TOOLS[settings.web].label}`,
       ].join("\n"),
     },
-    ...webSection(store, userId),
+    { type: ComponentType.Separator },
+    {
+      type: ComponentType.TextDisplay,
+      content: "**読み取りを広げるとき**\nBotはふつう、そのチャンネルを見られる全員が見られる情報だけを使います。あなたへの返答でそれ以上が要るとき、あなたが見られる範囲まで広げてよいかを選べます。",
+    },
     readScopeSelect(store, userId),
   ];
 }
@@ -220,10 +225,11 @@ function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
     },
     ...roleSelects(store, userId, "judge", "判定モデル", { label: "言語モデルを使う", description: "判定にも言語モデルを使います" }),
     { type: ComponentType.Separator },
-    { type: ComponentType.TextDisplay, content: "### 用途別のモデル(任意)\n選ばなければ上のモデルが使われます。" },
+    { type: ComponentType.TextDisplay, content: "### 用途別のモデル(任意)\n選ばなければ、コードは言語モデルが書き、リアクションは判定モデルが選びます。" },
     ...codeSection(store, userId),
     ...reactionSection(store, userId),
     ...typedModelSelect(store, userId),
+    ...webSection(store, userId),
   );
   return body;
 }
@@ -245,10 +251,10 @@ function reactionSection(store: Store, userId: string): APIComponentInContainer[
   const current = store.getSettings(userId).reaction;
   const text = current
     ? `**リアクションを選ぶモデル**\nBotがあなたに答える前に ${current.model} が、文章で返すかリアクションだけで返すかと、どの絵文字にするかを選びます。Botの発言にあなたが付けたリアクションへの応じ方も選びます。`
-    : "**リアクションを選ぶモデル**\n未設定なので、言語モデルが必要に応じてリアクションで返します(Botの発言へのリアクションには判定モデルが応じます)。選ぶと、文章かリアクションかをそのモデルが先に決めます。判定専用のモデルが向いています。";
+    : "**リアクションを選ぶモデル**\n未設定なので、判定モデルが、文章で返すかリアクションだけで返すかとどの絵文字にするかを選びます。Botの発言にあなたが付けたリアクションへの応じ方も選びます。判定専用のモデルが向いています。";
   return [
     { type: ComponentType.TextDisplay, content: text },
-    ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", { label: "言語モデルに任せる", description: "リアクション用のモデルを使いません" }),
+    ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", { label: "判定モデルに任せる", description: "リアクションも判定モデルが選びます" }),
   ];
 }
 
@@ -262,9 +268,8 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
     {
       type: ComponentType.TextDisplay,
       content: [
-        "**Webツールと読み取り**",
-        "Webツールは、BotがWebを検索したりページを読んだりするときに使います。",
-        "Botはふつう、そのチャンネルを見られる全員が見られる情報だけを使います。あなたへの返答でそれ以上が要るとき、あなたが見られる範囲まで広げてよいかを下で選べます。",
+        "**Webツール**",
+        "BotがWebを検索したりページを読んだりするときに使うものです。",
         ...(warning ? [`-# ⚠️ ${warning}`] : []),
       ].join("\n"),
     },
