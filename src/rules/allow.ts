@@ -67,15 +67,53 @@ export function allowShapeProblems(allow: AllowEntry[]): string[] {
  */
 export type Targets = Map<string, Record<string, unknown> | null>;
 
-/** Whether a step fits an entry. Values still waiting on an earlier step pass until they are known. */
-export function fits(step: Step, entry: AllowEntry, targets?: Targets): boolean {
+/**
+ * A field whose schema is { madeInRun: true } must take its value from an earlier
+ * step of the same run (a $ref), such as moving someone into the room the run
+ * just made. Its real value is unknown when the rule is approved, so nothing
+ * else can pin it.
+ */
+export function isMadeInRun(schema: unknown): boolean {
+  return !!schema && typeof schema === "object" && (schema as { madeInRun?: unknown }).madeInRun === true;
+}
+
+/** The body schema without its madeInRun fields, which are checked on their own. */
+function withoutMadeInRun(schema: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+  if (fields.length === 0) return schema;
+  const props = { ...(schema.properties as Record<string, unknown>) };
+  for (const f of fields) delete props[f];
+  const required = Array.isArray(schema.required) ? (schema.required as string[]).filter((r) => !fields.includes(r)) : undefined;
+  return { ...schema, properties: props, ...(required ? { required } : {}) };
+}
+
+/**
+ * Whether a step fits an entry. Values still waiting on an earlier step pass until they are known.
+ * `original` is the step before its refs were filled in, for madeInRun fields.
+ */
+export function fits(step: Step, entry: AllowEntry, targets?: Targets, original: Step = step): boolean {
   if (step.op !== entry.op) return false;
   for (const [name, schema] of Object.entries(entry.path ?? {})) {
+    if (isMadeInRun(schema)) {
+      if (!isRef(original.pathParams[name])) return false;
+      continue;
+    }
     const value = step.pathParams[name];
     if (isRef(value)) continue;
     if (!Value.Check(schema as never, value)) return false;
   }
-  if (entry.body !== undefined && !Value.Check(entry.body as never, containsRef(step.body) ? withoutRefs(step.body) : step.body ?? {})) return false;
+  if (entry.body !== undefined) {
+    const schema = entry.body as Record<string, unknown>;
+    const props = (schema.properties ?? {}) as Record<string, unknown>;
+    const made = Object.keys(props).filter((f) => isMadeInRun(props[f]));
+    const originalBody = (original.body ?? {}) as Record<string, unknown>;
+    // A madeInRun field may be left out unless required; when present it must be a ref.
+    for (const f of made) {
+      if (Object.hasOwn(originalBody, f) ? !isRef(originalBody[f]) : (schema.required as string[] | undefined)?.includes(f)) return false;
+    }
+    let body = (step.body ?? {}) as Record<string, unknown>;
+    if (made.length > 0) body = Object.fromEntries(Object.entries(body).filter(([k]) => !made.includes(k)));
+    if (!Value.Check(withoutMadeInRun(schema, made) as never, containsRef(body) ? withoutRefs(body) : body)) return false;
+  }
   if (entry.target !== undefined && targets?.has(step.id)) {
     const target = targets.get(step.id);
     if (!target || !Value.Check(entry.target as never, target)) return false;
@@ -102,11 +140,11 @@ function withoutRefs(body: unknown): unknown {
 }
 
 /** Steps outside the allow list, and entries used more often than they permit. */
-export function allowProblems(steps: Step[], allow: AllowEntry[], targets?: Targets): string[] {
+export function allowProblems(steps: Step[], allow: AllowEntry[], targets?: Targets, originals?: Step[]): string[] {
   const problems: string[] = [];
   const used = new Map<number, number>();
-  for (const step of steps) {
-    const index = allow.findIndex((entry) => fits(step, entry, targets));
+  for (const [i, step] of steps.entries()) {
+    const index = allow.findIndex((entry) => fits(step, entry, targets, originals?.[i]));
     const label = CATALOG.get(step.op)?.label ?? step.op;
     if (index < 0) {
       problems.push(`${step.id}(${label}): 許可された操作の範囲外です`);
@@ -198,7 +236,8 @@ export function allowLines(allow: AllowEntry[], label: (id: string) => string = 
     for (const [name, schema] of Object.entries(entry.path ?? {})) {
       const s = schema as { enum?: unknown[]; const?: unknown };
       const values = s.enum ?? (s.const !== undefined ? [s.const] : null);
-      parts.push(values ? `${name}: ${values.map((v) => valueText(v, label)).join("、")} のみ` : `${name}: ${compact(schema)}`);
+      if (isMadeInRun(schema)) parts.push(`${name}: このルールが同じ回に作ったもののみ`);
+      else parts.push(values ? `${name}: ${values.map((v) => valueText(v, label)).join("、")} のみ` : `${name}: ${compact(schema)}`);
     }
     if (spec?.channel && !entry.path?.[spec.channel]) parts.push(`${spec.channel}: どこでも`);
     if (entry.body !== undefined) parts.push(`本文: ${compact(entry.body)}`);

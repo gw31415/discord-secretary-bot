@@ -736,7 +736,7 @@ export class Planner {
           const stepProblems = [
             ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
             // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
-            ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined) : []),
+            ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step]) : []),
           ];
           if (stepProblems.length > 0) throw new Error(stepProblems.join(" / "));
           if (key) store.saveSnapshot(plan.id, step.id, key, before);
