@@ -157,7 +157,14 @@ export interface UserSettings {
   reaction: ModelRef | null;
   /** The web service the agent uses. Unset means the response model's own. */
   web: WebTool;
+  /**
+   * Reading beyond what everyone in the channel can see, up to the person's own
+   * permissions: "ask" puts a button in front of them each time, "always" allows it.
+   */
+  readScope: ReadScopeSetting;
 }
+
+export type ReadScopeSetting = "ask" | "always";
 
 export interface KeySummary {
   provider: KeyProviderId;
@@ -246,6 +253,16 @@ export class Store {
     this.db.pragma("foreign_keys = ON");
     this.#masterKey = masterKey;
     this.#migrate();
+    this.#ensureColumn("user_settings", "read_scope", "TEXT");
+  }
+
+  /**
+   * Columns added outside the numbered migrations, so branches that each add
+   * migrations do not have to agree on their order. Safe to run every start.
+   */
+  #ensureColumn(table: string, column: string, type: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
 
   #migrate(): void {
@@ -312,7 +329,7 @@ export class Store {
 
   getSettings(userId: string): UserSettings {
     const row = this.db.prepare("SELECT * FROM user_settings WHERE user_id = ?").get(userId) as
-      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; code_provider: string | null; code_model: string | null; reaction_provider: string | null; reaction_model: string | null; web_tool: string | null }
+      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; code_provider: string | null; code_model: string | null; reaction_provider: string | null; reaction_model: string | null; web_tool: string | null; read_scope: string | null }
       | undefined;
     const ref = (provider: string | null | undefined, model: string | null | undefined): ModelRef | null =>
       provider && model && isProviderId(provider) ? { provider, model } : null;
@@ -322,7 +339,13 @@ export class Store {
       code: ref(row?.code_provider, row?.code_model),
       reaction: ref(row?.reaction_provider, row?.reaction_model),
       web: row?.web_tool && isWebTool(row.web_tool) ? row.web_tool : "auto",
+      readScope: row?.read_scope === "always" ? "always" : "ask",
     };
+  }
+
+  setReadScope(userId: string, scope: ReadScopeSetting): void {
+    this.db.prepare("INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING").run(userId);
+    this.db.prepare("UPDATE user_settings SET read_scope = ? WHERE user_id = ?").run(scope, userId);
   }
 
   setWebTool(userId: string, tool: WebTool): void {

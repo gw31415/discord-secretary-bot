@@ -98,6 +98,7 @@ export class Reader {
   readonly limits: ReaderLimits;
   messagesRead = 0;
   #shareable: Set<string> | null = null;
+  #wide = false;
   readonly #fetched = new Map<string, Promise<unknown>>();
 
   constructor(rest: REST, cache: GuildCache, selfId: string, scope: ReadScope, limits: ReaderLimits) {
@@ -118,10 +119,29 @@ export class Reader {
     return member;
   }
 
-  /** Channels whose contents may appear in this reply. Computed once per reply. */
+  /**
+   * True once the speaker let this reply read whatever they themselves can,
+   * not only what everyone in the channel can see.
+   */
+  get wide(): boolean {
+    return this.#wide;
+  }
+
+  /** Reads up to the speaker's own permissions for the rest of this reply. Only the speaker may allow it. */
+  widen(): void {
+    this.#wide = true;
+    this.#shareable = null;
+  }
+
+  /** True while reads stop at what everyone in the channel can see, and the speaker could widen them. */
+  get narrowed(): boolean {
+    return this.scope.audience !== "owner" && !this.#wide;
+  }
+
+  /** Channels whose contents may appear in this reply. Computed once per reply (and again after widen). */
   shareable(): Set<string> {
     this.#shareable ??=
-      this.scope.audience === "owner"
+      !this.narrowed
         ? readableChannels(this.guild, this.speaker, this.selfId)
         : shareableChannels(this.guild, this.scope.channelId, this.speaker, this.selfId);
     return this.#shareable;
@@ -140,8 +160,12 @@ export class Reader {
       }
     }
     if (!this.shareable().has(channelId)) {
-      throw new ReadDenied(`チャンネル ${channelId} の内容はこの場所では扱えません(閲覧権限または公開範囲の制約)`);
+      throw new ReadDenied(`チャンネル ${channelId} の内容はこの場所では扱えません(閲覧権限または公開範囲の制約)${this.#widenHint()}`);
     }
+  }
+
+  #widenHint(): string {
+    return this.narrowed ? "。話し手自身が読めるものなら、widen_read で話し手に許可を求められます" : "";
   }
 
   #assertGuild(guildId: string): void {
@@ -164,13 +188,13 @@ export class Reader {
       const m = pattern.exec(path);
       if (!m) continue;
       this.#assertGuild(m[1]!);
-      if (this.scope.audience === "owner") {
+      if (!this.narrowed) {
         const bot = this.guild.members.get(this.selfId);
         if (!bot || !has(basePermissions(this.guild, this.speaker), bits) || !has(basePermissions(this.guild, bot), bits)) {
           throw new ReadDenied("必要な権限がないため読めません");
         }
       } else if (!audienceHasGuildPermission(this.guild, this.scope.channelId, this.speaker, this.selfId, bits)) {
-        throw new ReadDenied("話し手とこのチャンネルを見られる全員が必要な権限を持っていないため読めません");
+        throw new ReadDenied(`話し手とこのチャンネルを見られる全員が必要な権限を持っていないため読めません${this.#widenHint()}`);
       }
       return this.rest.get(path as `/${string}`, { query: toSearchParams(query) });
     }

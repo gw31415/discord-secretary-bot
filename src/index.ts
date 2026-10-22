@@ -14,6 +14,7 @@ import { GuildCaches } from "./discord/cache.ts";
 import { registerCommands } from "./discord/commands.ts";
 import { Presence } from "./discord/presence.ts";
 import { Reader } from "./discord/reader.ts";
+import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
 import { findChatModel } from "./llm/models.ts";
@@ -130,6 +131,8 @@ const rules = new RuleService({
   },
 });
 
+const widenPrompts = new WidenPrompts(client.api);
+
 const conversations = new Conversations({
   store,
   selfId: () => selfId,
@@ -162,6 +165,7 @@ const conversations = new Conversations({
     list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
     runs: (guildId, ownerId, ruleId, shareable, limit) => rules.runsFor(guildId, ownerId, ruleId, shareable, limit),
   },
+  askWiden: (input) => widenPrompts.ask(input),
   onAwake: () => presence.refresh(),
   log,
 });
@@ -283,6 +287,7 @@ client.on(GatewayDispatchEvents.MessageUpdate, ({ data }) => {
 client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
   if (!caches.get(data.guild_id)) return;
   try {
+    if (await widenPrompts.handleInteraction(data)) return;
     if (await planner.handleInteraction(data)) return;
     if (await rules.handleCommand(data)) return;
     if (await rules.handleInteraction(data)) return;

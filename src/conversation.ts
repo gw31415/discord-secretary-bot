@@ -18,6 +18,7 @@ import { llmCoder } from "./agent/coder.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
+import type { WidenRequest } from "./discord/widen.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
 import type { Rule, RuleRun } from "./rules/types.ts";
@@ -63,6 +64,8 @@ export interface ConversationDeps {
     list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean; state?: unknown }>;
     runs: (guildId: string, ownerId: string, ruleId: string, shareable: Set<string>, limit: number) => RuleRun[] | null;
   };
+  /** Asks the speaker, with buttons, to let one reply read up to their own permissions. Absent keeps reads to the channel's audience. */
+  askWiden?: (input: WidenRequest) => Promise<boolean>;
   /** A conversation woke or was extended. */
   onAwake?: () => void;
   log: (message: string, error?: unknown) => void;
@@ -431,6 +434,20 @@ export class Conversations {
       ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p))
       : null;
     const reader = this.deps.makeReader({ guildId: input.guildId, channelId, speakerId: speaker });
+    // Asked only when the agent finds it needs more than the channel's audience may see.
+    let widened: "always" | "button" | "refused" | undefined;
+    const askWiden = this.deps.askWiden;
+    const widen = askWiden
+      ? async (reason: string) => {
+          if (store.getSettings(speaker).readScope === "always") {
+            widened = "always";
+            return true;
+          }
+          const allowed = await askWiden({ channelId, replyToId: input.replyToId, speakerId: speaker, reason });
+          widened = allowed ? "button" : "refused";
+          return allowed;
+        }
+      : undefined;
 
     await this.deps.typing(channelId).catch(() => undefined);
     const typing = setInterval(() => void this.deps.typing(channelId).catch(() => undefined), 8000);
@@ -466,6 +483,7 @@ export class Conversations {
         inbox,
         coder,
         ...(this.deps.react ? { react: (emoji: string) => this.deps.react!(channelId, input.replyToId, emoji) } : {}),
+        widen,
         onProgress: async (content) => {
           await post(content);
           await this.deps.typing(channelId).catch(() => undefined);
@@ -517,6 +535,7 @@ export class Conversations {
       if (this.#working.get(channelId)?.inbox === inbox) this.#working.delete(channelId);
     }
 
+    if (widened) detail = { ...detail, widened };
     const attached = images.forReply();
     if (attached.length > 0) detail = { ...detail, images: attached.map((a) => a.name) };
     await post(text, attached);

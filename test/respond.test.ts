@@ -297,3 +297,50 @@ test("run_code can draw an image into the reply; a run that fails leaves none be
     llm.deleteProvider(faux.provider.id);
   }
 });
+
+test("widen_read asks once it is needed, and the speaker's answer decides what the agent may read", async () => {
+  for (const allowed of [true, false]) {
+    const faux = fauxProvider();
+    llm.setProvider(faux.provider);
+    try {
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("read_messages", { channel_id: "11" })], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxToolCall("widen_read", { reason: "staff を読むため" })], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxToolCall("read_messages", { channel_id: "11" })], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxText("done")]),
+      ]);
+      const rest = {
+        get: async (path: string) => {
+          if (path === "/channels/11/messages") return [{ id: "1", channel_id: "11", content: "secret", timestamp: "2026-10-21T00:00:00Z", author: { id: "3", username: "u" }, attachments: [], embeds: [], mentions: [] }];
+          throw new Error(`unexpected ${path}`);
+        },
+      } as unknown as REST;
+      const cache = new GuildCache(GUILD);
+      cache.guild = makeGuild();
+      const reader = new Reader(rest, cache, SELF, { guildId: GUILD, channelId: "10", speakerId: "2" }, { maxMessages: 500 });
+      const reasons: string[] = [];
+      const result = await respond({
+        model: faux.getModel(), apiKey: "k", reader, botName: "bot",
+        transcript: [], target: "[1] user: staff の様子は?", web: null,
+        widen: async (reason) => (reasons.push(reason), allowed),
+      });
+      assert.deepEqual(reasons, ["staff を読むため"]);
+      assert.equal(reader.wide, allowed);
+      assert.equal(result.toolErrors?.filter((e) => e.tool === "read_messages").length, allowed ? 1 : 2);
+    } finally {
+      llm.deleteProvider(faux.provider.id);
+    }
+  }
+});
+
+test("widen_read is not offered without a way to ask", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([fauxAssistantMessage([fauxToolCall("widen_read", { reason: "x" })], { stopReason: "toolUse" }), fauxAssistantMessage([fauxText("ok")])]);
+    const result = await respond({ model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot", transcript: [], target: "[1] user: hi", web: null });
+    assert.equal(result.toolErrors?.[0]?.tool, "widen_read");
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
