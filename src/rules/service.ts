@@ -18,7 +18,7 @@ import type { RuleAdmin } from "./admin.ts";
 import { allowProblems } from "./allow.ts";
 import { attachmentsFor } from "../plan/files.ts";
 import type { RuleEngine } from "./engine.ts";
-import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
+import { auditView, DELETE_CHOICE, detailView, homeView, parseRuleCustomId, plansView, RULE_PAGES } from "./panel.ts";
 import type { RulePage } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
@@ -443,6 +443,12 @@ export class RuleService {
         case "runs":
           await update(this.#detail(guildId, userId, parsed.arg, { page: parsed.action }));
           return true;
+        case "view": {
+          const value = "values" in interaction.data ? interaction.data.values[0] : undefined;
+          if (value === DELETE_CHOICE) await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
+          else await update(this.#detail(guildId, userId, parsed.arg, { page: RULE_PAGES.includes(value as RulePage) ? (value as RulePage) : "summary" }));
+          return true;
+        }
         case "enable":
         case "disable": {
           const rule = this.deps.admin.setEnabled(guildId, userId, parsed.arg, parsed.action === "enable");
