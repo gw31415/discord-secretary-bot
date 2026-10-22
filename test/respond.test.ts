@@ -264,3 +264,26 @@ test("image tools plug into the agent and put their images in the reply's box", 
     llm.deleteProvider(faux.provider.id);
   }
 });
+
+test("run_code can draw an image into the reply; a run that fails leaves none behind", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("run_code", { code: `attachImage(createCanvas(8, 8), "broken"); throw new Error("oops");` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("run_code", { code: `const c = createCanvas(40, 20); c.getContext("2d").fillRect(0, 0, 40, 20); return attachImage(c, "bar");` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("グラフです")]),
+    ]);
+    const box = new ImageBox();
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot", transcript: [], target: "[1] user: グラフにして", web: null,
+      attachments: box,
+    });
+    assert.equal(result.text, "グラフです");
+    assert.deepEqual(Object.keys(box.all()), ["img2"]);
+    assert.deepEqual(box.forReply().map((a) => a.name), ["bar.png"]);
+    assert.equal(result.toolErrors?.length, 1);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
