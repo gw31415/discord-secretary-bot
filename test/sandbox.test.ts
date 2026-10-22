@@ -49,3 +49,10 @@ test("plan(steps, rules) carries rules, and a rule's code reads its params", asy
   const p = await runSandboxed(`return [params.lobby, event.channel_id];`, { ...bindings, params: { lobby: "7" }, event: { channel_id: "7" } }, limits);
   assert.deepEqual(p.value, ["7", "7"]);
 });
+
+test("a rule's code reads which trigger fired as eventName", async () => {
+  const { runSandboxed, RULE_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const bindings = { guildId: "1", actor: { kind: "user" as const, userId: "2" }, get: async () => null };
+  assert.equal((await runSandboxed("return eventName", { ...bindings, eventName: "CHANNEL_CREATE" }, RULE_SANDBOX_LIMITS)).value, "CHANNEL_CREATE");
+  assert.equal((await runSandboxed("return eventName", bindings, RULE_SANDBOX_LIMITS)).value, null);
+});

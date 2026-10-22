@@ -16,7 +16,7 @@ import type { Plan, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
 import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
-import { triggerSummary } from "../rules/triggers.ts";
+import { MAX_TRIGGER_EVENTS, triggerSummary } from "../rules/triggers.ts";
 import type { Rule, RuleProposal, RuleRun } from "../rules/types.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
@@ -257,6 +257,7 @@ const AllowSchema = Type.Object({
 const RULE_FIELDS = {
   name: Type.String({ minLength: 1, maxLength: 60, description: "ルールの短い名前" }),
   trigger_event: Type.String(),
+  more_trigger_events: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_TRIGGER_EVENTS - 1, description: "同じルールを動かすほかのきっかけ" })),
   include_bot_origin: Type.Optional(Type.Boolean()),
   allow: Type.Array(AllowSchema, { minItems: 1, maxItems: MAX_ALLOW_ENTRIES }),
   params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
@@ -291,7 +292,7 @@ function ruleTask(r: CodedRuleInput): string {
   return [
     r.code_task,
     "",
-    `きっかけ: ${r.trigger_event}`,
+    `きっかけ: ${[r.trigger_event, ...(r.more_trigger_events ?? [])].join("、")}${r.more_trigger_events?.length ? "(どれで動いたかは eventName で分かります)" : ""}`,
     `params: ${JSON.stringify(r.params ?? null)}`,
     `許す操作: ${JSON.stringify(r.allow)}`,
     ...(r.replaces_rule ? [`直すルール: ${r.replaces_rule}(list_rules・rule_runs で今のコードと実行履歴を見られます)`] : []),
@@ -322,7 +323,11 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
 function toProposal(r: RuleInput): RuleProposal {
   return {
     name: r.name.slice(0, 60),
-    trigger: { event: r.trigger_event, ...(r.include_bot_origin ? { includeBotOrigin: true } : {}) },
+    trigger: {
+      event: r.trigger_event,
+      ...(r.more_trigger_events?.length ? { events: r.more_trigger_events.filter((e) => e !== r.trigger_event) } : {}),
+      ...(r.include_bot_origin ? { includeBotOrigin: true } : {}),
+    },
     allow: r.allow.map((a) => ({
       op: a.op,
       ...(a.path ? { path: a.path } : {}),
@@ -352,8 +357,8 @@ function rulesFromCode(value: unknown): RuleProposal[] {
 
 const RULES_DESCRIPTION = [
   "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
-  "  各要素 { name, trigger_event, include_bot_origin?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
-  "  trigger_event: きっかけ(下の一覧から1つ)。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。",
+  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
+  "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
   "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log。実行は1回10秒・discord.get 50回まで。ネットワーク・タイマー・乱数はありません。",
   "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
@@ -433,7 +438,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
   const rulesDescription = coder
     ? RULES_DESCRIPTION.replace(
         /\n  各要素[^\n]*\n/,
-        `\n  各要素 { name, trigger_event, include_bot_origin?, allow, code_task, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
+        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, allow, code_task, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
       ).replace(/\n  code: イベントごとに[^\n]*\n    使えるもの:[^\n]*/, "")
     : RULES_DESCRIPTION;
   const sandboxBindings = bindingsOf(reader);

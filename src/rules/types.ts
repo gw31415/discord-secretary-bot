@@ -15,6 +15,8 @@ export const DEFAULT_LIMITS: RuleLimits = { perMinute: 10, maxConsecutiveFailure
 
 export interface RuleTrigger {
   event: string;
+  /** More events that fire the same rule; the code tells them apart by `eventName`. */
+  events?: string[];
   /** Also fire on events the bot itself caused. Off by default to stop loops. */
   includeBotOrigin?: boolean;
 }

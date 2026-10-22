@@ -5,7 +5,7 @@ import { RISK_LABEL } from "../plan/types.ts";
 import type { RuleDryRun } from "../plan/types.ts";
 import { allowLines, allowRisk, valueText } from "./allow.ts";
 import type { Halt } from "./engine.ts";
-import { TRIGGERS } from "./triggers.ts";
+import { TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleRun, RunOutcome } from "./types.ts";
 
 // What /rules shows: the management panel. Everything is drawn from the rule
@@ -69,8 +69,8 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 }
 
 export function triggerLabel(trigger: Rule["trigger"]): string {
-  const label = TRIGGERS[trigger.event]?.label ?? trigger.event;
-  return `${label}(\`${trigger.event}\`)${trigger.includeBotOrigin ? " ⚠️ Bot自身が起こしたイベントでも動きます" : ""}`;
+  const label = triggerEvents(trigger).map((e) => `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`).join("、または");
+  return `${label}${trigger.includeBotOrigin ? " ⚠️ Bot自身が起こしたイベントでも動きます" : ""}`;
 }
 
 export function dryRunText(dry: RuleDryRun): string {
@@ -161,7 +161,7 @@ export function homeView(input: HomeInput): Rendered {
           const last = input.lastRuns.get(r.id);
           const run = last ? ` · 最後: ${OUTCOME_LABEL[last.outcome]} <t:${unix(last.startedAt)}:R>` : "";
           const owner = r.ownerId === input.userId ? "" : ` · <@${r.ownerId}>`;
-          return `${ruleStatus(r)} **${r.name}** v${r.version} — ${TRIGGERS[r.trigger.event]?.label ?? r.trigger.event}${owner}${run}`;
+          return `${ruleStatus(r)} **${r.name}** v${r.version} — ${triggerEvents(r.trigger).map((e) => TRIGGERS[e]?.label ?? e).join("/")}${owner}${run}`;
         })
         .join("\n"),
     );
@@ -175,7 +175,7 @@ export function homeView(input: HomeInput): Rendered {
         type: ComponentType.StringSelect,
         custom_id: ruleCustomId("open"),
         placeholder: "ルールを開く",
-        options: input.rules.slice(0, 25).map((r) => ({ label: clip(r.name, 100), value: r.id, description: clip(`${r.enabled ? "有効" : "停止中"} · ${r.trigger.event}`, 100) })),
+        options: input.rules.slice(0, 25).map((r) => ({ label: clip(r.name, 100), value: r.id, description: clip(`${r.enabled ? "有効" : "停止中"} · ${triggerEvents(r.trigger).join(",")}`, 100) })),
       }],
     });
   }

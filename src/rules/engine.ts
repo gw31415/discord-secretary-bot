@@ -143,7 +143,7 @@ export class RuleEngine {
       if (bot && !rule.trigger.includeBotOrigin) continue;
       if (!this.#visible(rule, guild, event, data)) continue;
       if (!this.#allowRun(rule)) continue;
-      this.#enqueue(guildId, () => this.#run(rule.id, rule.version, eventId, data));
+      this.#enqueue(guildId, () => this.#run(rule.id, rule.version, eventId, data, event));
     }
   }
 
@@ -177,13 +177,13 @@ export class RuleEngine {
     while (this.#queues.size > 0) await Promise.all(this.#queues.values());
   }
 
-  async #run(ruleId: string, version: number, eventId: string, data: Data): Promise<void> {
+  async #run(ruleId: string, version: number, eventId: string, data: Data, eventName: string): Promise<void> {
     const { store } = this.deps;
     // The rule may have been switched off, changed or stopped while queued.
     const rule = store.getRule(ruleId);
     if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId)) return;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
-    const result = await this.evaluate(rule, data);
+    const result = await this.evaluate(rule, data, undefined, eventName);
     if (result.kind !== "steps") {
       store.finishRuleRun(runId, { outcome: result.kind === "none" ? "no_change" : "failed", error: result.kind === "error" ? result.error : null, logs: result.logs });
       this.#settle(rule, result.kind === "error", result.kind === "error" ? result.error : null);
@@ -229,7 +229,7 @@ export class RuleEngine {
    * Runs the rule's code on one event and returns the steps it asks for.
    * Used for real runs and for dry runs, which stop here.
    */
-  async evaluate(rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params">, event: unknown, reader?: Pick<Reader, "get">): Promise<Evaluation> {
+  async evaluate(rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params">, event: unknown, reader?: Pick<Reader, "get">, eventName: string | null = null): Promise<Evaluation> {
     let result: SandboxResult;
     try {
       const source = reader ?? this.ownerReader(rule.guildId, rule.ownerId);
@@ -239,6 +239,7 @@ export class RuleEngine {
           guildId: rule.guildId,
           actor: { kind: "user", userId: rule.ownerId, via: "rule" },
           event,
+          eventName,
           params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
         },

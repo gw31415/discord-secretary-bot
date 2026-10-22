@@ -61,6 +61,7 @@ function world(now = { t: 1_000_000 }) {
   const admin = new RuleAdmin({ store, caches, selfId: () => SELF, now: () => now.t });
   const runs: any[] = [];
   const notices: string[] = [];
+  const seen: any[] = [];
   let result: () => Promise<any> = async () => ({ plan: { id: "p1" }, status: "succeeded", reason: null });
   let code: () => any = () => ({ ok: true, value: { steps: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "hi" } }] }, logs: [] });
   const engine = new RuleEngine({
@@ -72,7 +73,7 @@ function world(now = { t: 1_000_000 }) {
     makeReader: () => ({ get: async () => null }) as never,
     notifyOwner: async (_u, content) => void notices.push(content),
     log: () => {},
-    run: async () => code(),
+    run: async (_code, bindings) => (seen.push(bindings), code()),
   });
   const definition: RuleDefinition = {
     name: "挨拶",
@@ -84,7 +85,7 @@ function world(now = { t: 1_000_000 }) {
     limits: DEFAULT_LIMITS,
   };
   return {
-    store, cache, admin, engine, runs, notices, now, definition,
+    store, cache, admin, engine, runs, notices, now, definition, seen,
     setResult: (f: () => Promise<any>) => (result = f),
     setCode: (f: () => any) => (code = f),
   };
@@ -252,4 +253,19 @@ test("a madeInRun field takes only a value from an earlier step of the same run"
   assert.equal(allowProblems([resolved], allow).length, 1);
   // Nor does leaving the required field out, or adding another field.
   assert.equal(allowProblems(normalizeSteps([{ op: "PATCH /guilds/{guild}/members/{user}", path: { user: "3" }, body: { nick: "x" } }], GUILD, "p"), allow).length, 1);
+});
+
+test("one rule can fire on several triggers, and its code sees which one", async () => {
+  const w = world();
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", events: ["MESSAGE_UPDATE"] } });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "901"));
+  w.engine.dispatch("MESSAGE_UPDATE", GUILD, message("10", "3", "901"));
+  w.engine.dispatch("MESSAGE_DELETE", GUILD, { id: "901", channel_id: "10", guild_id: GUILD });
+  await w.engine.idle();
+  assert.equal(w.runs.length, 2);
+  assert.deepEqual(w.seen.map((b) => b.eventName), ["MESSAGE_CREATE", "MESSAGE_UPDATE"]);
+  assert.equal(w.store.recentRuleRuns(rule.id, 5).length, 2);
+  // Unknown or too many triggers are refused.
+  assert.throws(() => w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", events: ["NOPE"] } }), /NOPE/);
+  assert.throws(() => w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", events: ["MESSAGE_UPDATE", "MESSAGE_DELETE", "CHANNEL_CREATE", "CHANNEL_UPDATE", "CHANNEL_DELETE"] } }), /5種類まで/);
 });
