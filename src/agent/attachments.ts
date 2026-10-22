@@ -26,6 +26,7 @@ export function mimeOf(name: string): string | undefined {
 export class ImageBox {
   #items = new Map<string, Attachment>();
   #taken = new Set<string>();
+  #next = 1;
 
   /** Throws once the reply has its fill, so a tool can stop before making an image. */
   checkRoom(): void {
@@ -36,7 +37,8 @@ export class ImageBox {
     this.checkRoom();
     if (!mimeOf(file.name)) throw new Error("PNG・JPEG・GIF・WebP の画像だけ添付できます");
     if (file.data.length > MAX_IMAGE_BYTES) throw new Error("画像は8MBまでです");
-    const id = `img${this.#items.size + 1}`;
+    if (this.#next > 99) throw new Error("この返答ではもう画像を作れません");
+    const id = `img${this.#next++}`;
     const dot = file.name.lastIndexOf(".");
     const base = file.name.slice(0, dot).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || id;
     const ext = file.name.slice(dot + 1).toLowerCase();
@@ -48,6 +50,11 @@ export class ImageBox {
 
   all(): Record<string, Attachment> {
     return Object.fromEntries(this.#items);
+  }
+
+  /** Drops images made by code that then failed, so they do not go out. */
+  discard(ids: Iterable<string>): void {
+    for (const id of ids) this.#items.delete(id);
   }
 
   /** Images a proposed change carries; they are not attached to the reply as well. */

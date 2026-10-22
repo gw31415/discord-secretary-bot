@@ -162,7 +162,7 @@ function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web
     `- 人が連投するように、返答を複数の投稿に分けても構いません。分けるところに ${MESSAGE_BREAK} だけの行を入れます。分けるのは話題や区切りが変わるときだけにしてください。`,
     "- 話し手と同じ言語で答えます。",
     ...(react ? REACT : []),
-    ...(attaches ? ["- 画像を用意するツールで作った画像は、返答に添付されます。propose_plan の投稿に付けるときは、その画像のIDを body の files に入れます。画像を付けたら、本文で同じものを繰り返さないでください。"] : []),
+    ...(attaches ? ["- グラフ・表・図など、見せたほうが伝わるものは run_code で画像に描けます。用意した画像は返答に添付されます。propose_plan の投稿に付けるときは、その画像のIDを body の files に入れます。画像を付けたら、本文で同じものを繰り返さないでください。"] : []),
     "- ツールを使うときは、使う前に何をするかを一言(「〜を調べます」など1文)書いてください。その文は途中経過としてすぐ投稿されます。最後の返答で同じことを繰り返さないでください。",
     "- 作業中に届いた [追いコメント] や [編集] は、話し手が依頼を足したり直したりしたものです。次の手順から反映し、依頼と関係なければ無視します。",
     seesImages
@@ -264,10 +264,10 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   const imageTools = input.attachments && input.imageTools ? input.imageTools(input.attachments, seesImages) : [];
   const agent = new Agent({
     initialState: {
-      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.react, imageTools.length > 0),
+      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.react, !!input.attachments),
       model,
       tools: [
-        ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder }),
+        ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder, ...(input.attachments ? { attachments: input.attachments } : {}) }),
         ...(web ? webTools(web, input.fetch) : []),
         ...(input.react ? [reactTool(input.react, reactions)] : []),
         ...imageTools,
