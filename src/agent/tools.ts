@@ -5,10 +5,13 @@ import { Value } from "typebox/value";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
 import { ChannelType, ComponentType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";
-import { downloadImages, imageRefs, MAX_IMAGES } from "./images.ts";
+import { downloadImages, fetchImage, imageRefs, MAX_IMAGES } from "./images.ts";
 import { CodeFailed, syntaxError } from "./coder.ts";
 import type { CodeEnv, Coder, CodeKind } from "./coder.ts";
+import { mimeOf } from "./attachments.ts";
 import type { ImageBox } from "./attachments.ts";
+import { ConvertOptionsSchema, convertImage, forModel, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
+import type { ConvertOptions, MathOptions } from "../media.ts";
 import { AGENT_SANDBOX_LIMITS, RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { SandboxBindings } from "../sandbox.ts";
 import { catalogSummary } from "../plan/catalog.ts";
@@ -30,6 +33,15 @@ function text(value: string) {
   const body = value.length > MAX_TOOL_OUTPUT ? `${value.slice(0, MAX_TOOL_OUTPUT)}\n…(長いため省略)` : value;
   return { content: [{ type: "text" as const, text: body }], details: {} };
 }
+
+const ImageSourceSchema = Type.Union([
+  Type.String({ description: "この返答で用意した画像のID(img1 など)" }),
+  Type.Object({
+    message_id: Type.String(),
+    channel_id: Type.Optional(Type.String({ description: "省略時は今のチャンネル" })),
+    index: Type.Optional(Type.Integer({ minimum: 0, description: "何枚目の画像か(0から、既定 0)" })),
+  }),
+]);
 
 /** Text of Components V2 messages (the bot's own dialogs), which have no content. */
 function componentText(components: unknown[] | undefined): string[] {
@@ -187,25 +199,83 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
 
   const sandboxBindings = bindingsOf(reader);
   const box = options.attachments;
-  /** Runs code whose drawings go into the reply's box; a failed run leaves none behind. */
+
+  /** An image the reply may use: one already in the box, or one on a message this channel may show. */
+  const loadImage = async (source: unknown): Promise<Buffer> => {
+    if (typeof source === "string") {
+      const file = box?.get(source);
+      if (!file) throw new Error(`画像 ${source} はありません。この返答で用意した画像のIDを指定してください`);
+      return file.data;
+    }
+    if (!Value.Check(ImageSourceSchema, source) || typeof source !== "object") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
+    const { message_id, channel_id, index } = source as { message_id: string; channel_id?: string; index?: number };
+    // Goes through the reader, so only messages that may be shown here are opened.
+    const message = (await reader.get(`/channels/${channel_id ?? reader.scope.channelId}/messages/${message_id}`)) as APIMessage;
+    const ref = imageRefs(message).at(index ?? 0);
+    if (!ref) throw new Error(`メッセージ ${message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
+    const image = await fetchImage(ref, options.fetch);
+    if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
+    return image.data;
+  };
+  const makeMath = async (tex: string, opts: MathOptions, name: string | undefined): Promise<string> => {
+    box!.checkRoom();
+    return box!.add({ data: await renderMath(tex, opts), name: `${name || "math"}.png` });
+  };
+  const makeConverted = async (source: unknown, opts: ConvertOptions, name: string | undefined): Promise<string> => {
+    box!.checkRoom();
+    const { data, format } = await convertImage(await loadImage(source), opts);
+    return box!.add({ data, name: `${name || "image"}.${format === "jpeg" ? "jpg" : format}` });
+  };
+
+  /** Bindings for one run whose images go into the reply's box; `made` collects their ids. */
+  const drawingBindings = (made: string[]): SandboxBindings => {
+    if (!box) return sandboxBindings;
+    const keep = (id: string) => (made.push(id), id);
+    return {
+      ...sandboxBindings,
+      attach: (png, name) => keep(box.add({ data: png, name: `${name || "image"}.png` })),
+      media: {
+        math: async (tex, raw, name) => keep(await makeMath(tex, parseOptions(MathOptionsSchema, raw), name)),
+        convert: async (source, raw, name) => keep(await makeConverted(source, parseOptions(ConvertOptionsSchema, raw), name)),
+      },
+    };
+  };
+  /** Runs code whose images go into the reply's box; a failed run leaves none behind. */
   const runDrawing = async (code: string) => {
     const made: string[] = [];
-    const result = await runSandboxed(code, box ? { ...sandboxBindings, attach: (png, name) => (made.push(box.add({ data: png, name: `${name || "image"}.png` })), made.at(-1)!) } : sandboxBindings, AGENT_SANDBOX_LIMITS);
+    const result = await runSandboxed(code, drawingBindings(made), AGENT_SANDBOX_LIMITS);
     if (!result.ok) box?.discard(made);
     return { result, made: result.ok ? made : [] };
   };
-  /** The coder's trial runs draw too, but nothing is kept. */
-  const trialBindings: SandboxBindings = box ? { ...sandboxBindings, attach: () => "img0" } : sandboxBindings;
-  const drawn = (ids: string[]) => {
+  /** The coder's trial runs draw too, but nothing is kept; formulas are still checked so TeX mistakes show. */
+  const trialBindings: SandboxBindings = box
+    ? {
+        ...sandboxBindings,
+        attach: () => "img0",
+        media: {
+          math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), "img0"),
+          convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), "img0"),
+        },
+      }
+    : sandboxBindings;
+  /** The images as the model sees them: shrunk, and only when it can see images. */
+  const drawn = async (ids: string[]) => {
     if (!box || ids.length === 0) return [];
-    const all = box.all();
+    const shown = options.images
+      ? await Promise.all(ids.map(async (id) => {
+          const file = box.get(id)!;
+          const small = await forModel(file.data, mimeOf(file.name) ?? "image/png");
+          return { type: "image" as const, data: small.data.toString("base64"), mimeType: small.mimeType };
+        }))
+      : [];
     return [
       { type: "text" as const, text: `\n画像 ${ids.join(", ")} を用意しました。返答に添付されます。propose_plan の投稿に付けるときは body の files にIDを入れます。` },
-      ...(options.images ? ids.map((id) => ({ type: "image" as const, data: all[id]!.data, mimeType: "image/png" })) : []),
+      ...shown,
     ];
   };
   const CANVAS_LINE = box
-    ? "画像も描けます: const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します(画像のIDが返ります。1回4枚、縦横2048pxまで)。"
+    ? "画像も描けます: const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します(画像のIDが返ります。1回4枚、縦横2048pxまで)。" +
+      "数式は renderMath(\"TeX\", { size, color, background, display }, \"name\") で、画像の変換(大きさ・切り抜き・回転・形式)は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, crop, rotate, format, quality, background, grayscale, trim }, \"name\") で作れます。どちらも新しい画像のIDを返し、作れるのは canvas と合わせて1回4枚までです。"
     : "";
 
   const runCode = tool({
@@ -222,7 +292,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       const { result, made } = await runDrawing(params.code);
       const logs = result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : "";
       if (!result.ok) throw new Error(`${result.error}${logs}`);
-      return { content: [{ type: "text" as const, text: `${JSON.stringify(result.value, null, 1)}${logs}` }, ...drawn(made)], details: {} };
+      return { content: [{ type: "text" as const, text: `${JSON.stringify(result.value, null, 1)}${logs}` }, ...(await drawn(made))], details: {} };
     },
   });
 
@@ -236,7 +306,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       "読み取り専用のJavaScriptで調べ、結果をJSONで返します。複数のAPIを組み合わせる集計に使います。",
       "コードはコード用のモデルが書きます。task には、何を調べて何を返すコードかを具体的に書きます。コード用のモデルは会話を見ていないので、使うID・名前・条件・返してほしい形を task に全部書いてください。",
       "コードは Discord REST API の GET を読めます(結果は今のチャンネルで扱える範囲に絞られます)。返ってきたコードと結果を確かめて使ってください。",
-      ...(box ? ["画像(グラフや表など)を描いて添付することもできます。そのときは task に、何をどう描くかと画像の名前を書きます。"] : []),
+      ...(box ? ["画像(グラフや表など。数式や、画像の変換も)を作って添付することもできます。そのときは task に、何をどう描くかと画像の名前を書きます。"] : []),
     ].join("\n"),
     parameters: Type.Object({ task: Type.String({ description: "何を調べて何を返すコードか" }) }),
     execute: async (_id, params) => {
@@ -252,7 +322,39 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
         ...(box ? { canvas: true } : {}),
       });
       const logs = result!.logs.length > 0 ? `\nlog:\n${result!.logs.join("\n")}` : "";
-      return { content: [{ type: "text" as const, text: `コード:\n${code}\n\n結果:\n${JSON.stringify(result!.value, null, 1)}${logs}` }, ...drawn(made)], details: {} };
+      return { content: [{ type: "text" as const, text: `コード:\n${code}\n\n結果:\n${JSON.stringify(result!.value, null, 1)}${logs}` }, ...(await drawn(made))], details: {} };
+    },
+  });
+
+  const renderMathTool = tool({
+    name: "render_math",
+    label: "数式を描く",
+    description: "TeX の数式を MathJax で画像にして添付します(ams・mhchem の \\ce・color・cancel・boldsymbol が使えます)。文中に式を並べるより読みやすいときに使います。いくつもの式は aligned などで1枚にまとめられます。",
+    parameters: Type.Object({
+      tex: Type.String({ maxLength: 2000, description: "TeX($ や \\[ \\] で囲まない)" }),
+      name: Type.Optional(Type.String({ maxLength: 40, description: "ファイル名(拡張子なし)" })),
+      ...MathOptionsSchema.properties,
+    }),
+    execute: async (_id, params) => {
+      const { tex, name, ...opts } = params;
+      const id = await makeMath(tex, opts, name);
+      return { content: await drawn([id]), details: { id } };
+    },
+  });
+
+  const convertImageTool = tool({
+    name: "convert_image",
+    label: "画像を変換する",
+    description: "画像の大きさ・切り抜き・回転・反転・白黒・余白の削除・背景色・形式(PNG・JPEG・WebP)を変えた画像を作って添付します。元にできるのは、この返答で用意した画像(img1 など)か、メッセージに添付された画像です。",
+    parameters: Type.Object({
+      source: ImageSourceSchema,
+      name: Type.Optional(Type.String({ maxLength: 40, description: "ファイル名(拡張子なし)" })),
+      ...ConvertOptionsSchema.properties,
+    }),
+    execute: async (_id, params) => {
+      const { source, name, ...opts } = params;
+      const id = await makeConverted(source, opts, name);
+      return { content: await drawn([id]), details: { id } };
     },
   });
 
@@ -276,6 +378,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
 
   const tools = [readMessages, searchMessages, listChannels, findMembers, coder ? runCodeTask : runCode];
   if (options.images) tools.push(viewImages);
+  if (box) tools.push(renderMathTool, convertImageTool);
   if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools));
   if (options.rules) tools.push(...ruleReadTools(options.rules));
   if (options.widen && reader.narrowed) tools.push(widenRead(reader, options.widen));

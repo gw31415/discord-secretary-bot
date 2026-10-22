@@ -24,7 +24,18 @@ export interface SandboxBindings {
   get: (route: string, query: Record<string, unknown>) => Promise<unknown>;
   /** Enables createCanvas()/attachImage(); takes the drawn PNG and returns the image's id. */
   attach?: (png: Buffer, name: string) => string;
+  /** Enables renderMath()/convertImage(); each returns the new image's id. Options arrive unchecked. */
+  media?: {
+    math: (tex: string, options: unknown, name: string) => Promise<string>;
+    convert: (source: unknown, options: unknown, name: string) => Promise<string>;
+  };
 }
+
+/** renderMath(tex, options, name) and convertImage(source, options, name) inside the sandbox. */
+const MEDIA_PRELUDE = [
+  "function renderMath(tex, options, name) { return __math(String(tex), JSON.stringify(options === undefined ? {} : options), name === undefined ? \"\" : String(name)); }",
+  "function convertImage(source, options, name) { return __convert(JSON.stringify(source === undefined ? null : source), JSON.stringify(options === undefined ? {} : options), name === undefined ? \"\" : String(name)); }",
+].join("\n");
 
 export interface SandboxLimits {
   wallTimeMs: number;
@@ -99,6 +110,20 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
       }).consume((fn) => vm.setProp(vm.global, "__attach", fn));
       vm.newFunction("__measure", (font, text) => toHandle(vm, measureText(vm.getString(font), vm.getString(text)))).consume((fn) => vm.setProp(vm.global, "__measure", fn));
     }
+    if (bindings.media) {
+      const media = bindings.media;
+      const count = (what: string) => {
+        if (++attached > MAX_IMAGES_PER_RUN) throw new Error(`画像を作れるのは1回の実行で${MAX_IMAGES_PER_RUN}枚までです(${what})`);
+      };
+      vm.newAsyncifiedFunction("__math", async (tex, options, name) => {
+        count("renderMath");
+        return vm.newString(await media.math(vm.getString(tex), JSON.parse(vm.getString(options)), vm.getString(name)));
+      }).consume((fn) => vm.setProp(vm.global, "__math", fn));
+      vm.newAsyncifiedFunction("__convert", async (source, options, name) => {
+        count("convertImage");
+        return vm.newString(await media.convert(JSON.parse(vm.getString(source)), JSON.parse(vm.getString(options)), vm.getString(name)));
+      }).consume((fn) => vm.setProp(vm.global, "__convert", fn));
+    }
 
     vm.newFunction("log", (...args) => {
       logs.push(args.map((a) => JSON.stringify(vm.dump(a))).join(" ").slice(0, 2000));
@@ -107,7 +132,7 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     // Wrapped so the code can `return` its answer; JSON keeps host and guest values apart.
     // call()/rule()/plan() only build plain objects: a returned plan is a proposal, not a write.
     // setState keeps a JSON copy, so later changes to the object do not leak into what is saved.
-    const prelude = bindings.attach ? `${PRELUDE}\n${CANVAS_PRELUDE}` : PRELUDE;
+    const prelude = [PRELUDE, ...(bindings.attach ? [CANVAS_PRELUDE] : []), ...(bindings.media ? [MEDIA_PRELUDE] : [])].join("\n");
     const wrapped = stateful
       ? `${prelude}\nvar __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`
       : `${prelude}\nJSON.stringify((function () {\n${code}\n})())`;

@@ -298,6 +298,30 @@ test("run_code can draw an image into the reply; a run that fails leaves none be
   }
 });
 
+test("render_math and convert_image add images to the reply, and code can do the same", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("render_math", { tex: String.raw`\int_0^1 x\,dx = \tfrac12`, name: "integral", size: 24 })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("convert_image", { source: "img1", format: "jpeg", width: 50, background: "#fff", name: "small" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("render_math", { tex: String.raw`\frac{1}{` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("run_code", { code: `return convertImage(renderMath("a^2+b^2=c^2", {}, "pythagoras"), { format: "webp" }, "p");` })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("式です")]),
+    ]);
+    const box = new ImageBox();
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot", transcript: [], target: "[1] user: 式にして", web: null,
+      attachments: box,
+    });
+    assert.equal(result.text, "式です");
+    assert.deepEqual(box.forReply().map((a) => a.name), ["integral.png", "small.jpg", "pythagoras.png", "p.webp"]);
+    assert.equal(result.toolErrors?.length, 1);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
 test("widen_read asks once it is needed, and the speaker's answer decides what the agent may read", async () => {
   for (const allowed of [true, false]) {
     const faux = fauxProvider();

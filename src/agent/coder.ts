@@ -84,7 +84,7 @@ const RULE = [
   "使える操作:",
 ];
 
-const CANVAS = "\n\n画像を頼まれたら、const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します。attachImage は画像のIDを返すので、結果に含めて返します。1回4枚、縦横2048pxまでです。背景は透明なので、必要なら最初に塗ります。";
+const CANVAS = "\n\n画像を頼まれたら、const c = createCanvas(幅, 高さ); const ctx = c.getContext(\"2d\"); でブラウザの Canvas 2D と同じように描き(fillRect・fillText・arc・measureText など。画像の読み込みはできません)、attachImage(c, \"name\") で添付します。attachImage は画像のIDを返すので、結果に含めて返します。1回4枚、縦横2048pxまでです。背景は透明なので、必要なら最初に塗ります。\n数式は renderMath(\"TeX\", { size, color, background, display }, \"name\") で MathJax の画像に、画像の変換は convertImage(\"img1\" か { message_id, channel_id, index }, { width, height, fit, crop, rotate, flip, flop, grayscale, trim, background, format, quality }, \"name\") でできます(format は png・jpeg・webp)。どちらも新しい画像のIDを返し、canvas と合わせて1回4枚までです。";
 
 const RULE_DEBUG = "\n\n既存のルールを直すときや、ルールが動かない理由を調べるときは、list_rules で今のコードを、rule_runs で実行履歴(結果・エラー・log)を確かめてから書きます。";
 
