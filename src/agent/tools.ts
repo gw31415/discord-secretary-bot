@@ -306,10 +306,11 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean): Agen
       "書き込み操作の変更案を出し、チャンネルに承認ダイアログを投稿します。依頼者が「実行」を押したときだけ実行されます。",
       "steps か code のどちらかを渡します。基本は steps です。code は対象が多いときや、条件で対象を選ぶとき(「30日発言していない人全員」など)だけ使います。",
       "steps: [{ id?, op, path, body? }]。op は下の一覧のどれか、path はパスパラメータ(guild は省略可)。前のステップの結果は { \"$ref\": \"steps.<id>.result.id\" } で参照できます。",
-      `code: 読み取り専用のJavaScript。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`,
+      `code: 今すぐ行う変更を作る読み取り専用のJavaScript(steps と同時には使えません)。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`,
       ...(withRules
         ? [
-            "1つの依頼に必要な変更とルールは、まとめて1つの変更案にします(承認は1回で済みます)。例: チャンネルを作るステップと、そのチャンネルを params や allow で $ref 参照するルール。",
+            "1つの依頼に必要な変更とルールは、まとめて1つの変更案にします(承認は1回で済みます)。例: チャンネルを作るステップと、そのチャンネルを params や allow で $ref 参照するルール。依頼で名前が出たチャンネルなどがまだなければ、作るステップを入れます(list_channels で確かめる)。",
+            "ルールのコード(イベントごとに動き event を読む)は rules[].code に書きます。propose_plan の code に入れないでください。",
             RULES_DESCRIPTION,
           ]
         : []),
@@ -323,6 +324,8 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean): Agen
     }),
     execute: async (_id, params) => {
       if (params.rules?.length && !withRules) throw new Error("ルールはここでは作れません");
+      // Both at once used to drop the steps silently, leaving refs to them dangling.
+      if (params.code && params.steps?.length) throw new Error("steps と code は同時に使えません。今すぐ行う変更はどちらか一方にまとめてください(ルールのコードは rules[].code に書きます)");
       let drafts: StepDraft[];
       let rules: RuleProposal[] = (params.rules ?? []).map(toProposal);
       if (params.code) {
@@ -335,7 +338,11 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean): Agen
           },
           AGENT_SANDBOX_LIMITS,
         );
-        if (!result.ok) throw new Error(result.error);
+        if (!result.ok) {
+          // A common mix-up: the rule's code (which reads `event`) passed as the plan's code.
+          const hint = /\bevent\b/.test(params.code) ? "\ncode は今すぐ行う変更を作るコードで、event はありません(null)。イベントごとに動くコードは rules[].code に書いてください。" : "";
+          throw new Error(`${result.error}${hint}`);
+        }
         const value = result.value as { steps?: unknown; rules?: unknown } | undefined;
         if (!value || !Array.isArray(value.steps)) throw new Error("code は plan([...]) を return してください");
         drafts = value.steps as StepDraft[];

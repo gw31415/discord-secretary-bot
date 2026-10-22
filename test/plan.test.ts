@@ -684,3 +684,14 @@ test("rules are checked at proposal: refs must point to the plan's steps, and a 
   assert.equal(t.store.listRules(GUILD).length, 1);
   assert.equal(t.calls.length, 0);
 });
+
+test("propose_plan refuses steps and code together, and points out rule code passed as plan code", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => [] } as never;
+  const proposed: unknown[] = [];
+  const tool = readTools(fakeReader, { images: false, propose: async (...a) => (proposed.push(a), ({ id: "p", steps: [], risk: "write" }) as never), rules: { list: () => [] } })
+    .find((t) => t.name === "propose_plan")!;
+  await assert.rejects(tool.execute("t", { steps: [{ op: "POST /guilds/{guild}/channels", body: { name: "x" } }], code: "return plan([])" }), /同時に使えません/);
+  await assert.rejects(tool.execute("t", { code: "return event.channel_id" }), /rules\[\]\.code/);
+  assert.equal(proposed.length, 0);
+});
