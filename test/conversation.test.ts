@@ -143,7 +143,7 @@ test("judgements parse defensively", () => {
 });
 
 test("the setup notice points to /settings", () => {
-  assert.match(SETUP_NOTICE, /\/llm/);
+  assert.match(SETUP_NOTICE, /\/settings/);
 });
 
 test("the model's <next> lines split a reply into separate posts", () => {
