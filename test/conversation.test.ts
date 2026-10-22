@@ -142,7 +142,7 @@ test("judgements parse defensively", () => {
   assert.equal(parseJudgement('{"addressed": "yes"}'), null);
 });
 
-test("the setup notice points to /llm", () => {
+test("the setup notice points to /settings", () => {
   assert.match(SETUP_NOTICE, /\/llm/);
 });
 

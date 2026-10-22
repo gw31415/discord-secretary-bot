@@ -97,7 +97,7 @@ export type Decision =
   | { kind: "judge"; judgeUserId: string };
 
 export const SETUP_NOTICE =
-  "このBotと話すには、サーバーで `/llm` を実行して、APIキー・応答に使うモデル・宛先判定に使うモデルを設定してください。";
+  "このBotと話すには、サーバーで `/settings` を実行して、APIキー・応答に使うモデル・宛先判定に使うモデルを設定してください。";
 
 interface ChannelContext {
   /** Every recent message, oldest first, so the model can follow the conversation. */
@@ -371,7 +371,7 @@ export class Conversations {
     const { plan } = input;
     const speaker = plan.actor.userId;
     if (!setupStatus(this.deps.store, speaker).complete) {
-      return Promise.reject(new Error("/llm の設定が終わっていないため修正できません"));
+      return Promise.reject(new Error("/settings の設定が終わっていないため修正できません"));
     }
     const run = async () => {
       const before = await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES);

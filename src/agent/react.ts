@@ -3,7 +3,7 @@ import { EMOJI_FORMAT } from "../plan/catalog.ts";
 import { isClassifier, lightestThinking, llm } from "../llm/models.ts";
 import type { JudgeModel } from "../llm/models.ts";
 
-// The reaction model (/llm, optional): before the response model is asked,
+// The reaction model (/settings, optional): before the response model is asked,
 // it decides whether a message is answered with a reaction alone, and picks
 // the emoji. For a reaction someone put on the bot's message it decides
 // whether the bot should go on (an OK or NG to its question) or do nothing.

@@ -22,7 +22,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
   if (!userId) return;
   const actor = { kind: "user" as const, userId, via: "panel" as const };
 
-  if (interaction.type === InteractionType.ApplicationCommand && interaction.data.name === "llm") {
+  if (interaction.type === InteractionType.ApplicationCommand && interaction.data.name === "settings") {
     await api.interactions.reply(interaction.id, interaction.token, renderPanel(store, userId));
     return;
   }

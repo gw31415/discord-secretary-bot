@@ -15,7 +15,7 @@ import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 
 export type { ModelRole };
 
-// The /llm panel: an ephemeral Components V2 message for one user's keys and models.
+// The /settings panel: an ephemeral Components V2 message for one user's keys and models.
 // The response and judge models are required and never chosen automatically;
 // the code and reaction models are optional.
 
@@ -105,7 +105,7 @@ export function renderPanel(store: Store, userId: string, notice?: string): { fl
   });
 
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## LLM設定\nあなたのAPIキーとモデルです。この画面はあなたにだけ見えています。" },
+    { type: ComponentType.TextDisplay, content: "## 設定\nあなたのAPIキー・モデルなどの設定です。この画面はあなたにだけ見えています。" },
     { type: ComponentType.Separator },
     { type: ComponentType.TextDisplay, content: `**APIキー**\n${keyLines.join("\n")}` },
     ...buttonRows,
