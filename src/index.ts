@@ -2,7 +2,7 @@ import { Client, GatewayDispatchEvents, GatewayIntentBits } from "@discordjs/cor
 import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
 import { PresenceUpdateStatus } from "discord-api-types/v10";
-import { judgeAddressed } from "./agent/judge.ts";
+import { judgeAddressed, judgePublicReply } from "./agent/judge.ts";
 import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { summarizeCode } from "./agent/summarize.ts";
@@ -17,7 +17,7 @@ import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
-import { findChatModel } from "./llm/models.ts";
+import { findChatModel, findJudgeModel } from "./llm/models.ts";
 import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
 import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
@@ -144,6 +144,13 @@ const rules = new RuleService({
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
+  },
+  decideVisibility: async ({ ownerId, command, options, reply, steps }) => {
+    const ref = store.getSettings(ownerId).judge;
+    const model = ref && findJudgeModel(ref.provider, ref.model);
+    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
+    if (!model || !apiKey) return false;
+    return judgePublicReply({ model, apiKey, command, options, reply, steps, signal: AbortSignal.timeout(10_000) });
   },
 });
 

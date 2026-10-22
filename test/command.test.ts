@@ -32,6 +32,7 @@ test("a command's shape is checked and turned into what Discord registers", () =
   assert.match(commandProblems({ ...SPEC, options: [SPEC.options![1]!, SPEC.options![0]!] }).join(), /前に置いて/);
   assert.match(commandProblems({ ...SPEC, options: [{ name: "n", description: "d", type: "boolean", choices: [{ name: "a", value: "a" }] }] }).join(), /choices/);
   assert.match(commandProblems({ ...SPEC, permissions: ["Nope"] }).join(), /権限 Nope/);
+  assert.match(commandProblems({ ...SPEC, visibility: "everyone" as never }).join(), /visibility/);
 
   const json = commandJson({ ...SPEC, permissions: ["ManageChannels"] });
   assert.equal(json.type, ApplicationCommandType.ChatInput);
@@ -74,7 +75,7 @@ function interaction(options: Record<string, string>, permissions = P.SendMessag
   } as never;
 }
 
-function world() {
+function world(decideVisibility?: (input: any) => Promise<boolean>) {
   const store = new Store(":memory:", randomBytes(32));
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
@@ -100,10 +101,12 @@ function world() {
       reply: async (_id: string, _t: string, body: unknown) => void calls.push(["reply", body]),
       defer: async (_id: string, _t: string, body: unknown) => void calls.push(["defer", body]),
       editReply: async (_a: string, _t: string, body: unknown) => void calls.push(["edit", body]),
+      followUp: async (_a: string, _t: string, body: unknown) => void calls.push(["followUp", body]),
+      deleteReply: async () => void calls.push(["delete", null]),
     },
     applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]) },
   } as never;
-  const service = new RuleService({ api, store, caches, admin, engine, selfId: () => SELF, now: () => 1_000_000, log: () => {} });
+  const service = new RuleService({ api, store, caches, admin, engine, selfId: () => SELF, now: () => 1_000_000, log: () => {}, ...(decideVisibility ? { decideVisibility } : {}) });
   const definition: RuleDefinition = {
     name: "お知らせ",
     sourcePrompt: "/announce で投稿",
@@ -169,4 +172,45 @@ test("enabled command rules are registered next to the bot's own commands", asyn
   w.admin.setEnabled(GUILD, "1", rule.id, false);
   assert.equal(await registerCommands(w.api, w.store, "app", GUILD), true);
   assert.deepEqual((w.calls.at(-1)![1] as Array<{ name: string }>).map((c) => c.name).sort(), ["rules", "settings"]);
+});
+
+test("by default the owner's judge model decides who sees the reply; failures and errors stay private", async () => {
+  const asked: any[] = [];
+  let verdict: () => Promise<boolean> = async () => true;
+  const w = world(async (input) => (asked.push(input), verdict()));
+  w.admin.save(GUILD, "1", w.definition);
+  await w.service.handleCustomCommand(interaction({ text: "お知らせです" }));
+  assert.deepEqual(asked.map((a) => [a.ownerId, a.command.name, a.options.text, a.reply, a.steps]), [["1", "announce", "お知らせです", "こんにちは", 1]]);
+  // Starts private, then moves to a public follow-up.
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "followUp", "delete"]);
+  assert.ok((w.calls[0]![1] as { flags?: number }).flags);
+  assert.match((w.calls[1]![1] as { content: string }).content, /こんにちは/);
+
+  w.calls.length = 0;
+  verdict = async () => { throw new Error("down"); };
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "edit"]);
+
+  // A failed run is not judged.
+  w.calls.length = 0;
+  w.setCode((b) => (b.reply("途中まで"), { ok: false, error: "boom", logs: [] }));
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.equal(asked.length, 2);
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "edit"]);
+});
+
+test("a fixed visibility is used as is, without asking the judge", async () => {
+  const asked: any[] = [];
+  const w = world(async (input) => (asked.push(input), true));
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { ...SPEC, visibility: "public" } } });
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "edit"]);
+  assert.equal((w.calls[0]![1] as { flags?: number }).flags, undefined);
+  w.admin.remove(GUILD, "1", rule.id);
+  w.calls.length = 0;
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { ...SPEC, visibility: "private" } } });
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "edit"]);
+  assert.ok((w.calls[0]![1] as { flags?: number }).flags);
+  assert.equal(asked.length, 0);
 });

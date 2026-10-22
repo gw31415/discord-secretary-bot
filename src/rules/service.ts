@@ -21,6 +21,7 @@ import { auditView, detailView, homeView, parseRuleCustomId, plansView } from ".
 import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
 import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
+import type { CommandSpec } from "./command.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
 import type { Rule, RuleDefinition, RuleProposal, RuleRun } from "./types.ts";
 
@@ -44,6 +45,8 @@ export interface RuleServiceDeps {
   log: (message: string, error?: unknown) => void;
   /** Explains rule code from the code alone, paid for by the owner. */
   summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
+  /** Whether a command's reply should be shown to everyone, by the owner's judge model. */
+  decideVisibility?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; steps: number }) => Promise<boolean>;
 }
 
 type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
@@ -324,16 +327,39 @@ export class RuleService {
       await ephemeral(`このコマンドを使うには ${rule.trigger.command.permissions!.join(", ")} の権限が必要です`);
       return true;
     }
-    await api.interactions.defer(interaction.id, interaction.token, rule.trigger.command.public ? {} : { flags: MessageFlags.Ephemeral });
+    const spec = rule.trigger.command;
+    const visibility = spec.visibility ?? "auto";
+    // The deferred reply's visibility is fixed now, so "auto" starts private and
+    // moves to a public follow-up if the judge says so.
+    await api.interactions.defer(interaction.id, interaction.token, visibility === "public" ? {} : { flags: MessageFlags.Ephemeral });
+    const event = commandEvent(interaction);
     let report: CommandReport;
     try {
-      report = await this.deps.engine.runCommand(rule, commandEvent(interaction));
+      report = await this.deps.engine.runCommand(rule, event);
     } catch (e) {
       this.deps.log(`コマンド /${name} の実行に失敗`, e);
       report = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, steps: 0 };
     }
-    await api.interactions.editReply(interaction.application_id, interaction.token, { content: commandReplyText(rule.name, report), allowed_mentions: { parse: [] } });
+    const content = commandReplyText(rule.name, report);
+    const body = { content, allowed_mentions: { parse: [] } };
+    if (visibility === "auto" && report.reply && !commandFailed(report) && (await this.#showToAll(rule, spec, event, report))) {
+      await api.interactions.followUp(interaction.application_id, interaction.token, body);
+      await api.interactions.deleteReply(interaction.application_id, interaction.token);
+    } else {
+      await api.interactions.editReply(interaction.application_id, interaction.token, body);
+    }
     return true;
+  }
+
+  /** The owner's judge model decides; without one, or on any error, the reply stays private. */
+  async #showToAll(rule: Rule, spec: CommandSpec, event: Record<string, unknown>, report: CommandReport): Promise<boolean> {
+    if (!this.deps.decideVisibility) return false;
+    try {
+      return await this.deps.decideVisibility({ ownerId: rule.ownerId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", steps: report.steps });
+    } catch (e) {
+      this.deps.log(`コマンド /${spec.name} の公開判定に失敗`, e);
+      return false;
+    }
   }
 
   #home(guildId: string, userId: string, notice?: string): Rendered {
@@ -464,9 +490,12 @@ export class RuleService {
 }
 
 /** What whoever ran a command sees: the code's reply, or how the run went. */
+function commandFailed(report: CommandReport): boolean {
+  return report.outcome === "failed" || report.outcome === "rejected" || report.outcome === "skipped" || report.outcome === "rate_limited";
+}
+
 export function commandReplyText(ruleName: string, report: CommandReport): string {
-  const failed = report.outcome === "failed" || report.outcome === "rejected" || report.outcome === "skipped" || report.outcome === "rate_limited";
-  const status = failed
+  const status = commandFailed(report)
     ? `⚠️ 実行できませんでした: ${(report.error ?? "不明なエラー").slice(0, 500)}`
     : report.reply
       ? null

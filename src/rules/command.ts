@@ -34,9 +34,15 @@ export interface CommandSpec {
   options?: CommandOption[];
   /** Discord permission names (e.g. "ManageChannels") the person running it must have. */
   permissions?: string[];
-  /** Show the reply to everyone in the channel instead of only to whoever ran it. */
-  public?: boolean;
+  /**
+   * Who sees the reply: only whoever ran it, everyone in the channel, or (the
+   * default) whichever the owner's judge model picks for each reply.
+   */
+  visibility?: CommandVisibility;
 }
+
+export const VISIBILITIES = ["auto", "private", "public"] as const;
+export type CommandVisibility = (typeof VISIBILITIES)[number];
 
 /** The bot's own commands; custom ones cannot take these names. */
 export const RESERVED_COMMANDS = new Set(["settings", "rules"]);
@@ -83,6 +89,7 @@ export function commandProblems(spec: CommandSpec | undefined, taken: Set<string
       }
     }
   }
+  if (spec.visibility !== undefined && !VISIBILITIES.includes(spec.visibility)) problems.push(`visibility は ${VISIBILITIES.join("・")} のどれかです`);
   for (const p of spec.permissions ?? []) if (!Object.hasOwn(PERMISSIONS, p)) problems.push(`権限 ${p} はありません(例: ManageChannels・ManageRoles)`);
   return problems;
 }

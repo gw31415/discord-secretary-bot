@@ -9,6 +9,8 @@ import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
+const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
+
 // What /rules shows: the management panel. Everything is drawn from the rule
 // definition and the database; the model's own words appear only as the
 // summary, which another model wrote from the code alone. All of it is
@@ -72,7 +74,7 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 export function triggerLabel(trigger: Rule["trigger"]): string {
   const label = triggerEvents(trigger)
     .map((e) => {
-      if (e === "COMMAND" && trigger.command) return `\`/${trigger.command.name}\` が実行されたとき${trigger.command.public ? "(返事は全員に見えます)" : ""}`;
+      if (e === "COMMAND" && trigger.command) return `\`/${trigger.command.name}\` が実行されたとき${VISIBILITY_LABEL[trigger.command.visibility ?? "auto"]}`;
       const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
       return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
     })
