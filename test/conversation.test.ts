@@ -229,3 +229,34 @@ test("the store reports how long any channel stays awake", () => {
   assert.equal(store.awakeUntil(100), 300);
   assert.equal(store.awakeUntil(300), undefined);
 });
+
+test("widening asks the speaker with a button unless they always allow it, and is audited", async () => {
+  const answers: boolean[] = [];
+  const t = setup({
+    respond: async (input) => {
+      answers.push(await input.widen!("staff の履歴を読むため"));
+      return { text: "answer", progress: 0, turns: 1, toolCalls: [] };
+    },
+  });
+  const asked: Array<{ speakerId: string; replyToId: string; reason: string }> = [];
+  t.conv.deps.askWiden = async (input) => {
+    asked.push(input);
+    return false;
+  };
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(asked, [{ channelId: "10", replyToId: "1", speakerId: "1", reason: "staff の履歴を読むため" }]);
+  t.store.setReadScope("1", "always");
+  assert.equal(t.store.getSettings("1").readScope, "always");
+  await t.conv.handle(message("2", "1", "<@999> again", { mentions: [mention] }));
+  assert.equal(asked.length, 1);
+  assert.deepEqual(answers, [false, true]);
+  const audits = t.store.db.prepare("SELECT detail_json FROM audit_log WHERE action = 'conversation.reply' ORDER BY id").all() as Array<{ detail_json: string }>;
+  assert.deepEqual(audits.map((a) => JSON.parse(a.detail_json).widened), ["refused", "always"]);
+});
+
+test("without a way to ask, the agent gets no widen hook", async () => {
+  const seen: unknown[] = [];
+  const t = setup({ respond: async (input) => (seen.push(input.widen), { text: "answer", progress: 0, turns: 1, toolCalls: [] }) });
+  await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
+  assert.deepEqual(seen, [undefined]);
+});

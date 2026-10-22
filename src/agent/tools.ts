@@ -84,6 +84,8 @@ export interface ToolOptions {
   rules?: RuleTools;
   /** The speaker's coding model. When set, the agent describes code and this writes it. */
   coder?: Coder;
+  /** Asks the speaker to let this reply read up to their own permissions; true when allowed. */
+  widen?: (reason: string) => Promise<boolean>;
 }
 
 export type Propose = (drafts: StepDraft[], code?: string, rules?: RuleProposal[]) => Promise<Plan>;
@@ -243,7 +245,30 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   if (options.images) tools.push(viewImages);
   if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools));
   if (options.rules) tools.push(...ruleReadTools(options.rules));
+  if (options.widen && reader.narrowed) tools.push(widenRead(reader, options.widen));
   return tools;
+}
+
+function widenRead(reader: Reader, widen: (reason: string) => Promise<boolean>): AgentTool<any> {
+  return tool({
+    name: "widen_read",
+    label: "読み取りを広げる",
+    description:
+      "読み取りは、このチャンネルを見られる全員が見られる範囲に限られています。頼まれたことに答えるのにそれでは足りないとき(ツールが公開範囲や権限で拒否したときなど)だけ、話し手が見られる範囲まで広げる許可を求めます。話し手の設定によってはボタンで確認するので、答えが返るまで待ちます。",
+    parameters: Type.Object({
+      reason: Type.String({ maxLength: 300, description: "何を読むために広げたいか。話し手に見せる1文" }),
+    }),
+    execute: async (_id, params) => {
+      if (!reader.narrowed) return text("読み取りはもう話し手が見られる範囲まで広がっています");
+      if (!(await widen(params.reason))) {
+        return text("話し手は読み取りを広げることを許可しませんでした(または返事がありませんでした)。今の範囲で答え、読めなかったものは読めなかったと伝えてください。");
+      }
+      reader.widen();
+      return text(
+        "話し手が見られる範囲まで読めるようになりました(この返答のあいだだけ)。ここで読んだものは、このチャンネルの全員は見られない内容かもしれません。返答には頼まれたことに必要な分だけ書いてください。",
+      );
+    },
+  });
 }
 
 const AllowSchema = Type.Object({

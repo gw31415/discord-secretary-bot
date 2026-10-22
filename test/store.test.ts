@@ -93,6 +93,8 @@ test("every selectable model is offered, with unique custom ids, within the comp
 
 test("custom ids parse into panel actions and reject unknown models", () => {
   assert.deepEqual(parseCustomId("llm:key:anthropic"), { kind: "openKeyModal", provider: "anthropic" });
+  assert.deepEqual(parseCustomId("llm:read:scope", ["always"]), { kind: "selectReadScope", scope: "always" });
+  assert.equal(parseCustomId("llm:read:scope", ["everything"]), null);
   assert.deepEqual(parseCustomId("llm:model:judge:anthropic:0", ["anthropic/claude-haiku-4-5"]), {
     kind: "selectModel", role: "judge", provider: "anthropic", model: "claude-haiku-4-5",
   });

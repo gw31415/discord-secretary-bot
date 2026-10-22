@@ -187,3 +187,24 @@ test("sandboxed code has no way out besides discord.get", async () => {
   }
   assert.deepEqual(routes, []);
 });
+
+test("widening lets a reply read what the speaker can, and the refusal says how to ask", async () => {
+  const { rest } = fakeRest({ "/channels/11/messages": [msg("1", "11")], [`/guilds/${GUILD}/audit-logs`]: { audit_log_entries: [] } });
+  const reader = makeReader(rest, "10", "2");
+  assert.equal(reader.narrowed, true);
+  await assert.rejects(reader.get("/channels/11/messages"), /widen_read/);
+  await assert.rejects(reader.get(`/guilds/${GUILD}/audit-logs`), /widen_read/);
+  reader.widen();
+  assert.equal(reader.narrowed, false);
+  assert.equal(((await reader.get("/channels/11/messages")) as unknown[]).length, 1);
+  assert.deepEqual(await reader.get(`/guilds/${GUILD}/audit-logs`), { audit_log_entries: [] });
+  assert.ok(reader.shareable().has("11"));
+});
+
+test("widening never goes past the speaker's own permissions", async () => {
+  const { rest } = fakeRest({});
+  const reader = makeReader(rest, "10", "3");
+  reader.widen();
+  await assert.rejects(reader.get("/channels/11/messages"), (e: Error) => /この場所では扱えません/.test(e.message) && !/widen_read/.test(e.message));
+  await assert.rejects(reader.get(`/guilds/${GUILD}/audit-logs`), /必要な権限/);
+});

@@ -5,7 +5,7 @@ import type { Store } from "./db.ts";
 import { modalValue } from "./discord/modal.ts";
 import { WEB_TOOLS } from "./agent/web.ts";
 import { KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
-import { keyModal, parseCustomId, renderPanel } from "./llm/panel.ts";
+import { keyModal, parseCustomId, readScopeLabel, renderPanel } from "./llm/panel.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
 // within 3 seconds; everything here is a local DB operation, so no defer is needed.
@@ -71,6 +71,16 @@ export async function handleInteraction(api: API, store: Store, interaction: API
           interaction.id,
           interaction.token,
           panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`),
+        );
+        return;
+      }
+      case "selectReadScope": {
+        store.setReadScope(userId, action.scope);
+        store.audit(actor, "llm.read_scope.set", { scope: action.scope });
+        await api.interactions.updateMessage(
+          interaction.id,
+          interaction.token,
+          panelUpdate(store, userId, `読み取りを広げる許可を「${readScopeLabel(action.scope)}」にしました`),
         );
         return;
       }
