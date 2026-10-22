@@ -24,6 +24,15 @@ export function isRef(value: unknown): value is Ref {
   return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 1 && typeof (value as Ref).$ref === "string";
 }
 
+/** A PNG drawn with attach_image, ready to upload; `data` is base64 so it can live inside a plan. */
+export interface Attachment {
+  name: string;
+  data: string;
+}
+
+export const MAX_IMAGES_PER_REPLY = 4;
+export const FILE_ID_PATTERN = "^img[0-9]{1,2}$";
+
 /** What the agent (or sandboxed code) proposes; ids are filled in when missing. */
 export const StepDraftSchema = Type.Object(
   {
@@ -75,6 +84,8 @@ export interface Plan {
   rules?: PlanRuleDraft[];
   /** Channels the plan deletes that have never had a message, so nothing is lost for good. */
   emptyChannels?: string[];
+  /** Images the plan's posts carry, by the id their steps name in `files`. */
+  attachments?: Record<string, Attachment>;
   hash: string;
   createdAt: string;
   expiresAt: string;

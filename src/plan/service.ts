@@ -13,8 +13,9 @@ import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
 import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
+import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
 import { isRef, maxRisk } from "./types.ts";
-import type { AllowEntry, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
+import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
 import type { Reader } from "../discord/reader.ts";
 import { allowProblems, allowRisk, needsChannel, needsTarget } from "../rules/allow.ts";
 import type { Targets } from "../rules/allow.ts";
@@ -104,6 +105,8 @@ export interface ProposeInput {
   reader?: Pick<Reader, "get">;
   /** The request the plan answers, kept as each rule's source. */
   request?: string;
+  /** Images drawn for this reply that the steps' posts may name in `files`. */
+  images?: Record<string, Attachment>;
 }
 
 type Resource = Record<string, unknown> | null;
@@ -241,7 +244,9 @@ export class Planner {
     if (ruleInputs.length > 0 && !this.deps.rules) throw new PlanRejected(["ルールはここでは作れません"]);
     const steps = normalizeSteps(input.drafts, input.guildId, id, ruleInputs.length > 0);
     const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId() };
-    const problems = steps.flatMap((s) => [...permissionProblems(s, ctx), ...visibilityProblems(s, input.shareable)]);
+    const replaced = input.replaces ? this.deps.store.getPlan(input.replaces)?.plan : undefined;
+    const files = attachmentsFor(steps, [input.images, replaced?.attachments]);
+    const problems = [...steps.flatMap((s) => [...permissionProblems(s, ctx), ...visibilityProblems(s, input.shareable)]), ...files.problems];
     if (problems.length > 0) throw new PlanRejected(problems);
     const rules = ruleInputs.length > 0
       ? await this.deps.rules!.prepare({
@@ -273,6 +278,7 @@ export class Planner {
         ...(source ? { source } : {}),
         ...(rules ? { rules } : {}),
         ...(await this.#emptyChannels(steps)),
+        ...(files.attachments ? { attachments: files.attachments } : {}),
         createdAt: createdAt.toISOString(),
         expiresAt: new Date(createdAt.getTime() + APPROVAL_MS).toISOString(),
       };
@@ -286,11 +292,19 @@ export class Planner {
         this.deps.store.setPlanMessage(plan.id, oldRow.channelId, oldRow.messageId);
         this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更 \`${plan.id}\` に置き換えました` });
         this.deps.store.audit(plan.actor, "plan.replace", { by: plan.id }, oldRow.plan.id);
-        await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, this.#render(plan, { status: "pending_approval" }));
+        // The new version's images replace the old ones on the message.
+        const uploads = dialogUploads(plan);
+        await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, {
+          ...this.#render(plan, { status: "pending_approval" }),
+          attachments: uploads.map((f, i) => ({ id: i, filename: f.name })),
+          ...(uploads.length > 0 ? { files: uploads } : {}),
+        });
         return plan;
       }
+      const uploads = dialogUploads(plan);
       const message = await this.deps.api.channels.createMessage(input.channelId, {
         ...this.#render(plan, { status: "pending_approval" }),
+        ...(uploads.length > 0 ? { files: uploads } : {}),
         allowed_mentions: { parse: [] },
         ...(input.replyToId ? { message_reference: { message_id: input.replyToId, fail_if_not_exists: false } } : {}),
       });
@@ -313,7 +327,11 @@ export class Planner {
     const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
     const targets = await this.#targets(input.guildId, steps, input.rule.allow);
     const channels = await this.#channelStates(steps, input.rule.allow);
-    const problems = [...allowProblems(steps, input.rule.allow, targets, undefined, channels), ...steps.flatMap((s) => permissionProblems(s, ctx))];
+    const problems = [
+      ...allowProblems(steps, input.rule.allow, targets, undefined, channels),
+      ...steps.flatMap((s) => permissionProblems(s, ctx)),
+      ...steps.filter((s) => stepFiles(s).length > 0).map((s) => `ステップ ${s.id}: ルールの投稿には画像を付けられません`),
+    ];
     if (problems.length > 0) throw new PlanRejected(problems);
 
     const preconditions = await this.#preconditions(input.guildId, steps);
@@ -603,6 +621,7 @@ export class Planner {
             shareable: this.#shareable(plan, row.channelId), replaces: plan.id,
             ...(plan.source ? { code: plan.source.code, summary: plan.source.summary } : {}),
             ...(plan.rules ? { rules: plan.rules.map(ruleInputOf) } : {}),
+            ...(plan.attachments ? { images: plan.attachments } : {}),
           });
         } catch (e) {
           await followUp(`出し直せませんでした:\n${why(e)}`);
@@ -691,9 +710,14 @@ export class Planner {
     const { api } = this.deps;
     const spec = specOf(step);
     const body = step.body as Record<string, unknown> | undefined;
+    const uploads = uploadsFor(plan, step);
     if (spec.op === "POST /users/{user}/dm") {
       const dm = await api.users.createDM(String(step.pathParams.user));
-      return api.channels.createMessage(dm.id, { content: String(body?.content), allowed_mentions: { parse: [] } });
+      return api.channels.createMessage(dm.id, {
+        ...(typeof body?.content === "string" ? { content: body.content } : {}),
+        allowed_mentions: { parse: [] },
+        ...(uploads.length > 0 ? { files: uploads } : {}),
+      });
     }
     const reason = plan.rule
       ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更 ${plan.id})`
@@ -702,9 +726,16 @@ export class Planner {
     let payload: unknown = body;
     if (spec.op === "POST /channels/{channel}/messages") {
       // Pings only the users the approved text names; the nonce stops a retry from posting twice.
-      payload = { ...body, allowed_mentions: { parse: ["users"] }, nonce: sha256(step.idempotencyKey).slice(0, 25), enforce_nonce: true };
+      const { files: _files, ...text } = body ?? {};
+      payload = {
+        ...text,
+        allowed_mentions: { parse: ["users"] },
+        nonce: sha256(step.idempotencyKey).slice(0, 25),
+        enforce_nonce: true,
+        ...(uploads.length > 0 ? { attachments: uploads.map((f, i) => ({ id: i, filename: f.name })) } : {}),
+      };
     }
-    const options = { reason, ...(payload !== undefined ? { body: payload } : {}) };
+    const options = { reason, ...(payload !== undefined ? { body: payload } : {}), ...(uploads.length > 0 ? { files: uploads } : {}) };
     switch (method) {
       case "POST":
         return this.#rest.post(path, options);

@@ -137,9 +137,10 @@ const conversations = new Conversations({
   now: () => Date.now(),
   webSearch: process.env.WEB_SEARCH !== "off",
   fetchBefore: (channelId, beforeId, limit) => client.api.channels.getMessages(channelId, { before: beforeId, limit }),
-  sendReply: async (channelId, replyToId, content) => {
+  sendReply: async (channelId, replyToId, content, files) => {
     await client.api.channels.createMessage(channelId, {
-      content,
+      ...(content ? { content } : {}),
+      ...(files?.length ? { files } : {}),
       ...(replyToId ? { message_reference: { message_id: replyToId, fail_if_not_exists: false } } : {}),
       // Never ping anyone from model output.
       allowed_mentions: { parse: [], replied_user: false },

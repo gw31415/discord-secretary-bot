@@ -10,6 +10,8 @@ import { readTools } from "./tools.ts";
 import type { Propose, RuleTools } from "./tools.ts";
 import type { Coder } from "./coder.ts";
 import { isReactionEmoji } from "./react.ts";
+import { imageTool } from "./attachments.ts";
+import type { ImageBox } from "./attachments.ts";
 import { retryFailedCall } from "./retry.ts";
 import { ANTHROPIC_WEB_TOOLS, webTools } from "./web.ts";
 import type { WebAccess } from "./web.ts";
@@ -43,6 +45,8 @@ export interface RespondInput {
   inbox?: Inbox;
   /** Puts a reaction on the message being answered. Absent means the agent cannot react. */
   react?: (emoji: string) => Promise<void>;
+  /** Images the agent draws for the reply or a proposed post; absent means it cannot draw. */
+  attachments?: ImageBox;
 }
 
 export interface RespondResult {
@@ -139,7 +143,7 @@ const REACT = [
   "- 返事は文章の代わりにリアクションだけでも構いません。あいさつ・お礼・相づち・了解・OKやNGの返事など、ひとことで足りるときは react で絵文字を付け、最後の返答は空にします。文章で答えるときに react を添えても構いません。",
 ];
 
-function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web: boolean, rules: boolean, react: boolean): string {
+function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web: boolean, rules: boolean, react: boolean, draws = false): string {
   return [
     `あなたはDiscordサーバーの管理者Bot「${botName}」です。メンバーの質問に、サーバーの情報を調べて答えます。${writes ? "頼まれれば、承認を経てサーバーの設定を変えることもできます。" : ""}`,
     "",
@@ -157,6 +161,7 @@ function systemPrompt(botName: string, seesImages: boolean, writes: boolean, web
     `- 人が連投するように、返答を複数の投稿に分けても構いません。分けるところに ${MESSAGE_BREAK} だけの行を入れます。分けるのは話題や区切りが変わるときだけにしてください。`,
     "- 話し手と同じ言語で答えます。",
     ...(react ? REACT : []),
+    ...(draws ? ["- 数式・表・図は、文字で書くより見やすいときに attach_image で画像にして返答に添付できます。画像を付けたら、本文で同じものを繰り返さないでください。"] : []),
     "- ツールを使うときは、使う前に何をするかを一言(「〜を調べます」など1文)書いてください。その文は途中経過としてすぐ投稿されます。最後の返答で同じことを繰り返さないでください。",
     "- 作業中に届いた [追いコメント] や [編集] は、話し手が依頼を足したり直したりしたものです。次の手順から反映し、依頼と関係なければ無視します。",
     seesImages
@@ -257,12 +262,13 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   const seesImages = model.input.includes("image");
   const agent = new Agent({
     initialState: {
-      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.react),
+      systemPrompt: systemPrompt(input.botName, seesImages, !!input.propose, !!web, !!input.rules, !!input.react, !!input.attachments),
       model,
       tools: [
         ...readTools(input.reader, { images: seesImages, fetch: input.fetch, propose: input.propose, rules: input.rules, coder: input.coder }),
         ...(web ? webTools(web, input.fetch) : []),
         ...(input.react ? [reactTool(input.react, reactions)] : []),
+        ...(input.attachments ? [imageTool(input.attachments, seesImages)] : []),
       ],
       thinkingLevel: lightestThinking(model) ?? "off",
     },
