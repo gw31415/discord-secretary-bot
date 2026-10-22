@@ -186,6 +186,13 @@ export function createdKindOf(op: string): string | undefined {
   return undefined;
 }
 
+/** Every event a rule fires on: its main event, then the others, without repeats. */
+export function triggerEvents(trigger: { event: string; events?: string[] }): string[] {
+  return [...new Set([trigger.event, ...(trigger.events ?? [])])];
+}
+
+export const MAX_TRIGGER_EVENTS = 5;
+
 /** One line per trigger for the model's instructions. */
 export function triggerSummary(): string {
   return Object.entries(TRIGGERS)

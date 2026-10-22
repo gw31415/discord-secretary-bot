@@ -17,7 +17,7 @@ import { allowProblems } from "./allow.ts";
 import type { RuleEngine } from "./engine.ts";
 import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
-import { isTrigger } from "./triggers.ts";
+import { isTrigger, MAX_TRIGGER_EVENTS, triggerEvents } from "./triggers.ts";
 import { DEFAULT_LIMITS } from "./types.ts";
 import type { Rule, RuleDefinition, RuleProposal, RuleRun } from "./types.ts";
 
@@ -118,7 +118,7 @@ export class RuleService {
   async dryRun(guildId: string, ownerId: string, channelId: string, rule: DryRunInput, reader: Pick<Reader, "get">, shareable?: Set<string>): Promise<RuleDryRun> {
     const { event, source } = await this.sample(guildId, ownerId, channelId, rule, reader);
     if (event === null) return { source: null, outcome: "no_event", lines: [], problems: [], logs: [] };
-    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader);
+    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs };
     const guild = this.#guild(guildId);
@@ -159,10 +159,11 @@ export class RuleService {
       const where = `ルール「${r.name}」`;
       const own: string[] = [];
       if (!r.name.trim()) own.push("名前がありません");
-      if (!isTrigger(r.trigger.event)) own.push(`きっかけ ${r.trigger.event} には対応していません`);
+      for (const event of triggerEvents(r.trigger)) if (!isTrigger(event)) own.push(`きっかけ ${event} には対応していません`);
+      if (triggerEvents(r.trigger).length > MAX_TRIGGER_EVENTS) own.push(`きっかけは${MAX_TRIGGER_EVENTS}種類までです`);
       for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
       const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, summary: null, limits: DEFAULT_LIMITS };
-      if (isTrigger(r.trigger.event)) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
+      if (triggerEvents(r.trigger).every(isTrigger)) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
       for (const id of pinnedIds(r)) {
         if (!input.shareable.has(id)) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
       }
@@ -211,7 +212,7 @@ export class RuleService {
         allow: r.allow,
         code: r.code,
         ...(r.params ? { params: r.params } : {}),
-        summary: r.summary !== undefined ? r.summary : await this.#summarize(r.code, input.ownerId, r.trigger.event),
+        summary: r.summary !== undefined ? r.summary : await this.#summarize(r.code, input.ownerId, triggerEvents(r.trigger).join("・")),
         ...(replaces ? { replaces } : {}),
         dry,
         ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),

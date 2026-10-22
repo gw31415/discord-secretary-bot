@@ -8,6 +8,7 @@ import { isWebTool } from "./agent/web.ts";
 import type { WebTool } from "./agent/web.ts";
 import type { Actor, Plan, PlanStatus, StepState } from "./plan/types.ts";
 import type { Rule, RuleDefinition, RuleRun, RunOutcome } from "./rules/types.ts";
+import { triggerEvents } from "./rules/triggers.ts";
 
 // Each entry upgrades the schema by one version. Never edit an applied entry.
 const MIGRATIONS: string[] = [
@@ -536,7 +537,7 @@ export class Store {
   }
 
   enabledRules(guildId: string, event: string): Rule[] {
-    return this.listRules(guildId).filter((r) => r.enabled && r.trigger.event === event);
+    return this.listRules(guildId).filter((r) => r.enabled && triggerEvents(r.trigger).includes(event));
   }
 
   setRuleEnabled(id: string, enabled: boolean, reason: string | null): void {
