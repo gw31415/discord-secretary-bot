@@ -5,8 +5,9 @@ import { RISK_LABEL } from "../plan/types.ts";
 import type { RuleDryRun } from "../plan/types.ts";
 import { allowLines, allowRisk, valueText } from "./allow.ts";
 import type { Halt } from "./engine.ts";
+import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { TRIGGERS, triggerEvents } from "./triggers.ts";
-import type { Rule, RuleRun, RunOutcome } from "./types.ts";
+import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
 // What /rules shows: the management panel. Everything is drawn from the rule
 // definition and the database; the model's own words appear only as the
@@ -15,11 +16,11 @@ import type { Rule, RuleRun, RunOutcome } from "./types.ts";
 
 export type RuleAction =
   | "home" | "open" | "enable" | "disable" | "dry" | "delete" | "delete2" | "code"
-  | "plans" | "audit" | "halt" | "resume";
+  | "plans" | "audit" | "halt" | "resume" | "clearstate";
 
 const ACTIONS = new Set<RuleAction>([
   "home", "open", "enable", "disable", "dry", "delete", "delete2", "code",
-  "plans", "audit", "halt", "resume",
+  "plans", "audit", "halt", "resume", "clearstate",
 ]);
 
 export function ruleCustomId(action: RuleAction, arg = ""): string {
@@ -69,8 +70,24 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 }
 
 export function triggerLabel(trigger: Rule["trigger"]): string {
-  const label = triggerEvents(trigger).map((e) => `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`).join("、または");
-  return `${label}${trigger.includeBotOrigin ? " ⚠️ Bot自身が起こしたイベントでも動きます" : ""}`;
+  const label = triggerEvents(trigger)
+    .map((e) => {
+      const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
+      return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
+    })
+    .join("、または");
+  const origin =
+    trigger.includeBotOrigin === "other_rules"
+      ? " ⚠️ ほかのルールや会話でBotが起こしたイベントでも動きます"
+      : trigger.includeBotOrigin
+        ? " ⚠️ Bot自身が起こしたイベントでも動きます"
+        : "";
+  const debounce = trigger.debounceSeconds ? ` · イベントが${trigger.debounceSeconds}秒途切れたらまとめて1回動きます` : "";
+  return `${label}${origin}${debounce}`;
+}
+
+export function limitsLabel(limits: RuleLimits): string {
+  return `1分に${limits.perMinute}回まで · ${limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`;
 }
 
 export function dryRunText(dry: RuleDryRun): string {
@@ -94,6 +111,7 @@ export function dryRunText(dry: RuleDryRun): string {
       if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
   }
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
+  if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${clip(dry.state, 300)}\``);
   if (dry.logs.length > 0) body.push(`-# log: ${clip(dry.logs.slice(0, 5).join(" / "), 300)}`);
   return [head, ...body].join("\n");
 }
@@ -101,7 +119,7 @@ export function dryRunText(dry: RuleDryRun): string {
 function definitionTexts(d: Pick<Rule, "ownerId" | "trigger" | "allow" | "code" | "params" | "summary" | "limits">, label: (id: string) => string): string[] {
   const risk = allowRisk(d.allow);
   return [
-    `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · 1分に${d.limits.perMinute}回まで · ${d.limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`,
+    `きっかけ: ${triggerLabel(d.trigger)}\n作成者: <@${d.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[risk]} · ${limitsLabel(d.limits)}`,
     `**許す操作**(これ以外の変更は実行されません)\n${allowLines(d.allow, label).join("\n")}`,
     d.params ? `**params**(コードが読む値)\n${paramsText(d.params, label)}` : "",
     `**コードの説明**\n${d.summary ?? "説明を作れませんでした。コードを読んで確かめてください。"}`,
@@ -194,6 +212,15 @@ export interface DetailInput {
   dry?: RuleDryRun;
   notice?: string;
   confirmDelete?: boolean;
+  /** What the rule keeps between runs; null when nothing. */
+  state?: unknown;
+}
+
+const MAX_STATE_SHOWN = 600;
+
+export function stateText(state: unknown, max = MAX_STATE_SHOWN): string {
+  const json = JSON.stringify(state, null, 1);
+  return json.length > max ? `${json.slice(0, max)}…` : json;
 }
 
 function runLine(run: RuleRun): string {
@@ -210,6 +237,7 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
     `**元の依頼**\n${clip(rule.sourcePrompt, 300)}`,
     `**最近の実行**\n${input.runs.length > 0 ? input.runs.map(runLine).join("\n") : "まだありません"}`,
   ];
+  if (input.state !== undefined && input.state !== null) texts.push(`**状態**(次の実行に持ち越す値)\n${fenced("json", stateText(input.state))}`);
   if (input.dry) texts.push(dryRunText(input.dry));
   if (input.can.owner) texts.push(`-# 直すときは、会話でBotに「ルール \`${rule.id}\`(${rule.name})を〜に直して」と頼んでください。確認のあと新しい版になります。`);
   if (input.confirmDelete) texts.push("⚠️ 本当に削除しますか? 実行履歴と監査ログは残ります。");
@@ -222,6 +250,7 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   if (rule.enabled && input.can.disable) buttons.push(button(ruleCustomId("disable", rule.id), "止める", ButtonStyle.Danger));
   if (!rule.enabled && input.can.enable) buttons.push(button(ruleCustomId("enable", rule.id), "有効にする", ButtonStyle.Primary));
   if (input.can.owner) buttons.push(button(ruleCustomId("dry", rule.id), "ドライラン"));
+  if (input.can.owner && input.state !== undefined && input.state !== null) buttons.push(button(ruleCustomId("clearstate", rule.id), "状態を消す"));
   buttons.push(button(ruleCustomId("code", rule.id), "コードをファイルで"));
   const second: APIButtonComponent[] = [button(ruleCustomId("home"), "戻る")];
   if (input.can.remove) second.push(button(ruleCustomId("delete", rule.id), "削除", ButtonStyle.Danger));

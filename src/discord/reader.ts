@@ -1,5 +1,6 @@
 import type { REST } from "@discordjs/rest";
 import { ChannelType, PermissionFlagsBits } from "discord-api-types/v10";
+import { EMOJI_FORMAT } from "../plan/catalog.ts";
 import type { APIChannel, APIMessage, RESTGetAPIGuildMessagesSearchResult } from "discord-api-types/v10";
 import type { GuildCache } from "./cache.ts";
 import { toChannel } from "./cache.ts";
@@ -43,6 +44,14 @@ function toSearchParams(query: Query): URLSearchParams {
   return params;
 }
 
+function safeDecode(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
 const GUILD_PERMISSION_ROUTES: Array<[RegExp, bigint]> = [
   [/^\/guilds\/(\d+)\/audit-logs$/, PermissionFlagsBits.ViewAuditLog],
   [/^\/guilds\/(\d+)\/bans$/, PermissionFlagsBits.BanMembers],
@@ -67,6 +76,16 @@ const RULES: RouteRule[] = [
   { pattern: /^\/channels\/(\d+)$/, handle: (r, [c]) => r.channel(c!) },
   { pattern: /^\/channels\/(\d+)\/messages$/, handle: (r, [c], q) => r.messages(c!, q) },
   { pattern: /^\/channels\/(\d+)\/messages\/(\d+)$/, handle: (r, [c, m]) => r.channelRoute(c!, `/channels/${c}/messages/${m}`, {}) },
+  // Who reacted with one emoji; the emoji may come encoded or not.
+  {
+    pattern: /^\/channels\/(\d+)\/messages\/(\d+)\/reactions\/([^/]+)$/,
+    handle: (r, [c, m, e], q) => {
+      const emoji = safeDecode(e!);
+      // "." and ".." would be read as path segments.
+      if (!EMOJI_FORMAT.pattern.test(emoji)) throw new ReadDenied(`絵文字 ${emoji} は読めません`);
+      return r.channelRoute(c!, `/channels/${c}/messages/${m}/reactions/${encodeURIComponent(emoji)}`, q);
+    },
+  },
   { pattern: /^\/channels\/(\d+)\/messages\/pins$/, handle: (r, [c], q) => r.channelRoute(c!, `/channels/${c}/messages/pins`, q) },
   { pattern: /^\/channels\/(\d+)\/threads\/archived\/public$/, handle: (r, [c], q) => r.channelRoute(c!, `/channels/${c}/threads/archived/public`, q) },
 ];

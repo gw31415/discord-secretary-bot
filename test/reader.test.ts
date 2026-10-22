@@ -160,15 +160,18 @@ test("hostile routes never reach Discord, and Discord is only ever asked to GET 
     `/guilds/${GUILD}/roles%2F..%2Fwebhooks`, `/guilds/${GUILD}//roles`, `//evil.example/guilds/${GUILD}/roles`, `https://evil.example/guilds/${GUILD}/roles`,
     ` /guilds/${GUILD}/roles`, `/guilds/${GUILD}/roles\n/x`, `/guilds/${GUILD}/roles\n`, `/guilds/${GUILD}/roles#/webhooks`, `/Guilds/${GUILD}/roles`,
     `/guilds/１２３/roles`, `/guilds/${GUILD}/roles\u0000`, `/users/@me`, `/users/@me/guilds`, `/applications/1/commands`, `/gateway/bot`,
-    `/channels/10/webhooks`, `/channels/10/invites`, `/channels/10/messages/1/reactions/x`, `/guilds/999/roles`, `/guilds/${GUILD}/members/2/../../bans`,
+    `/channels/10/webhooks`, `/channels/10/invites`, `/channels/10/messages/1/reactions/..`, `/channels/10/messages/1/reactions/%2E%2E`, `/channels/11/messages/1/reactions/x`, `/guilds/999/roles`, `/guilds/${GUILD}/members/2/../../bans`,
     `POST /guilds/${GUILD}/roles`, `DELETE /channels/10`, `/channels/11/messages`, `/channels/10/messages/../../11/messages`, "", "/",
   ];
   for (const route of hostile) await assert.rejects(reader.get(route), Error, `not refused: ${JSON.stringify(route)}`);
   // Queries cannot change the path or method either.
   await reader.get(`/guilds/${GUILD}/members`, { "../webhooks": "1", limit: "1&x=/../webhooks" } as never);
-  const SHAPES = [/^\/guilds\/\d+\/members$/];
+  // Reactions: the emoji is one encoded path segment however it is written.
+  await reader.get(`/channels/10/messages/1/reactions/👍`);
+  await reader.get(`/channels/10/messages/1/reactions/%F0%9F%91%8D`);
+  const SHAPES = [/^\/guilds\/\d+\/members$/, /^\/channels\/10\/messages\/1\/reactions\/%F0%9F%91%8D$/];
   for (const path of calls) assert.ok(SHAPES.some((p) => p.test(path)), `unexpected call ${path}`);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2); // the two spellings of 👍 are one fetch
 });
 
 test("sandboxed code has no way out besides discord.get", async () => {

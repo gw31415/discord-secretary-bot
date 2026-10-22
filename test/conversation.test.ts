@@ -229,3 +229,66 @@ test("the store reports how long any channel stays awake", () => {
   assert.equal(store.awakeUntil(100), 300);
   assert.equal(store.awakeUntil(300), undefined);
 });
+
+test("with a reaction model, a message that only needs a reaction gets one instead of words", async () => {
+  const t = setup();
+  t.store.setApiKey("1", "typesafe", "ts-key-for-1");
+  t.store.setModel("1", "reaction", { provider: "typesafe", model: "jev-latest" });
+  const reacted: string[] = [];
+  const deps = t.conv.deps as ConversationDeps;
+  deps.react = async (_c, messageId, emoji) => void reacted.push(`${messageId}:${emoji}`);
+  let choice: any = { action: "react", emoji: "👍" };
+  const asked: string[] = [];
+  deps.chooseReaction = async (input) => (asked.push(input.apiKey), choice);
+  await t.conv.handle(message("1", "1", "ありがとう", { mentions: [mention] }));
+  assert.deepEqual(reacted, ["1:👍"]);
+  assert.deepEqual(t.replies, []);
+  assert.deepEqual(asked, ["ts-key-for-1"]);
+  assert.equal(t.responded.length, 0);
+  // Words when the model says so; and someone without a reaction model is never asked.
+  choice = { action: "reply" };
+  await t.conv.handle(message("2", "1", "今のロール一覧は?", { mentions: [mention] }));
+  await t.conv.handle(message("3", "2", "それと人数も", { mentions: [mention] }));
+  assert.deepEqual(t.replies, ["answer", "answer"]);
+  assert.equal(asked.length, 2);
+});
+
+test("an answer that is only a reaction posts no text", async () => {
+  const t = setup({ respond: async (input) => (await input.react!("✅"), { text: "", progress: 0, turns: 1, toolCalls: ["react"], reactions: ["✅"] }) });
+  const reacted: string[] = [];
+  (t.conv.deps as ConversationDeps).react = async (_c, messageId, emoji) => void reacted.push(`${messageId}:${emoji}`);
+  await t.conv.handle(message("1", "1", "了解です", { mentions: [mention] }));
+  assert.deepEqual(reacted, ["1:✅"]);
+  assert.deepEqual(t.replies, []);
+});
+
+test("a reaction on the bot's message is taken as an answer only when the model says so", async () => {
+  const t = setup();
+  const deps = t.conv.deps as ConversationDeps;
+  const botMessage = message("50", SELF, "このチャンネルを消してよいですか?");
+  deps.fetchMessage = async () => botMessage;
+  let choice: any = { action: "none" };
+  const kinds: string[] = [];
+  deps.chooseReaction = async (input) => (kinds.push(`${input.kind}:${input.apiKey}`), choice);
+  const reaction = (user: string, extra: object = {}) => ({ user_id: user, channel_id: "10", message_id: "50", guild_id: "100", message_author_id: SELF, emoji: { name: "✅" }, ...extra });
+  await t.conv.reacted(reaction("1"));
+  assert.equal(t.responded.length, 0);
+  // Without a reaction model, the judge model decides.
+  assert.deepEqual(kinds, ["reaction:sk-ant-key-for-1"]);
+  choice = { action: "reply" };
+  await t.conv.reacted(reaction("1"));
+  assert.equal(t.responded.length, 1);
+  assert.match(t.responded[0]!.target, /✅ を付けました/);
+  assert.deepEqual(t.replies, ["answer"]);
+  // Not on the bot's message, by the bot, or by someone unregistered: nothing is asked.
+  await t.conv.reacted(reaction("1", { message_author_id: "2" }));
+  await t.conv.reacted(reaction(SELF));
+  await t.conv.reacted(reaction("7"));
+  assert.equal(kinds.length, 2);
+});
+
+test("reactions show in the transcript", async () => {
+  const { formatMessage } = await import("../src/agent/tools.ts");
+  const line = formatMessage(message("1", "1", "どう?", { reactions: [{ emoji: { id: null, name: "👍" }, count: 2, me: true } as never] }));
+  assert.match(line, /\[リアクション: 👍2\(Botも\)\]/);
+});
