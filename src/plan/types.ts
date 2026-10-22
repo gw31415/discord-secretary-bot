@@ -169,6 +169,8 @@ export interface RuleDryRun {
   state?: string;
   /** What a command's code would say back with reply(). */
   reply?: string;
+  /** How many images that reply would carry. */
+  images?: number;
 }
 
 export interface PlanSource {

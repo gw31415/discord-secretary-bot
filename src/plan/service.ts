@@ -75,6 +75,8 @@ export interface RuleRunInput {
   ownerId: string;
   rule: PlanRule;
   drafts: StepDraft[];
+  /** Images the rule's code made, which its posts may name in `files`. */
+  images?: Record<string, Attachment>;
 }
 
 export interface ReviseInput {
@@ -327,11 +329,8 @@ export class Planner {
     const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
     const targets = await this.#targets(input.guildId, steps, input.rule.allow);
     const channels = await this.#channelStates(steps, input.rule.allow);
-    const problems = [
-      ...allowProblems(steps, input.rule.allow, targets, undefined, channels),
-      ...steps.flatMap((s) => permissionProblems(s, ctx)),
-      ...steps.filter((s) => stepFiles(s).length > 0).map((s) => `ステップ ${s.id}: ルールの投稿には画像を付けられません`),
-    ];
+    const files = attachmentsFor(steps, [input.images]);
+    const problems = [...allowProblems(steps, input.rule.allow, targets, undefined, channels), ...steps.flatMap((s) => permissionProblems(s, ctx)), ...files.problems];
     if (problems.length > 0) throw new PlanRejected(problems);
 
     const preconditions = await this.#preconditions(input.guildId, steps);
@@ -346,6 +345,7 @@ export class Planner {
       labels,
       risk: planRisk(steps),
       rule: input.rule,
+      ...(files.attachments ? { attachments: files.attachments } : {}),
       createdAt,
       expiresAt: createdAt,
     };

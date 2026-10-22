@@ -46,8 +46,8 @@ export interface SandboxLimits {
 }
 
 export const AGENT_SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 30_000, memoryBytes: 64 * 1024 * 1024, maxGets: 200 };
-/** A rule runs on every matching event, so it gets less. The wall time includes waiting on discord.get. */
-export const RULE_SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 10_000, memoryBytes: 64 * 1024 * 1024, maxGets: 50 };
+/** Rules get as much as the agent's code; their run limits (per minute, failures in a row) keep them in check. The wall time includes waiting on discord.get. */
+export const RULE_SANDBOX_LIMITS: SandboxLimits = AGENT_SANDBOX_LIMITS;
 
 const PRELUDE = [
   "function call(op, args) { args = args || {}; return { id: args.id, op: op, path: args.path, query: args.query, body: args.body }; }",

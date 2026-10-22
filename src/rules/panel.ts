@@ -114,7 +114,7 @@ export function dryRunText(dry: RuleDryRun): string {
       if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
   }
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
-  if (dry.reply !== undefined) body.push(`返事: ${clip(dry.reply, 300)}`);
+  if (dry.reply !== undefined || dry.images) body.push(`返事: ${clip(dry.reply ?? "", 300)}${dry.images ? `(画像${dry.images}枚)` : ""}`);
   if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${clip(dry.state, 300)}\``);
   if (dry.logs.length > 0) body.push(`-# log: ${clip(dry.logs.slice(0, 5).join(" / "), 300)}`);
   return [head, ...body].join("\n");

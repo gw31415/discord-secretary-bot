@@ -145,12 +145,12 @@ const rules = new RuleService({
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
   },
-  decideVisibility: async ({ ownerId, command, options, reply, steps }) => {
+  decideVisibility: async ({ ownerId, command, options, reply, images, steps }) => {
     const ref = store.getSettings(ownerId).judge;
     const model = ref && findJudgeModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
     if (!model || !apiKey) return false;
-    return judgePublicReply({ model, apiKey, command, options, reply, steps, signal: AbortSignal.timeout(10_000) });
+    return judgePublicReply({ model, apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
   },
 });
 

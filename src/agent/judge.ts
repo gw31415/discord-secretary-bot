@@ -108,6 +108,8 @@ interface VisibilityInput {
   command: { name: string; description: string };
   options: Record<string, unknown>;
   reply: string;
+  /** Images attached to the reply. */
+  images: number;
   /** Changes the run made. */
   steps: number;
   signal?: AbortSignal;
@@ -123,6 +125,7 @@ export async function judgePublicReply(input: VisibilityInput): Promise<boolean>
     options: JSON.stringify(input.options).slice(0, 1000),
     changes_made: input.steps,
     reply: input.reply.slice(0, 2000),
+    images_attached: input.images,
   };
   if (isClassifier(model)) {
     const res = await llm.classify(

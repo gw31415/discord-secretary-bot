@@ -16,6 +16,7 @@ import { badRefs, normalizeSteps, permissionProblems, PlanRejected, planRisk, vi
 import { AdminDenied } from "./admin.ts";
 import type { RuleAdmin } from "./admin.ts";
 import { allowProblems } from "./allow.ts";
+import { attachmentsFor } from "../plan/files.ts";
 import type { RuleEngine } from "./engine.ts";
 import { auditView, detailView, homeView, parseRuleCustomId, plansView } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
@@ -46,7 +47,7 @@ export interface RuleServiceDeps {
   /** Explains rule code from the code alone, paid for by the owner. */
   summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
   /** Whether a command's reply should be shown to everyone, by the owner's judge model. */
-  decideVisibility?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; steps: number }) => Promise<boolean>;
+  decideVisibility?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<boolean>;
 }
 
 type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
@@ -136,7 +137,7 @@ export class RuleService {
     const state = saved && this.deps.store.getRule(saved)?.ownerId === ownerId ? this.deps.store.getRuleState(saved) : null;
     const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
-    const kept = { ...(result.state ? { state: JSON.stringify(result.state.value) } : {}), ...(result.reply !== undefined ? { reply: result.reply } : {}) };
+    const kept = { ...(result.state ? { state: JSON.stringify(result.state.value) } : {}), ...(result.reply !== undefined ? { reply: result.reply } : {}), ...(result.images?.length ? { images: result.images.length } : {}) };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs, ...kept };
     const guild = this.#guild(guildId);
     let steps;
@@ -150,6 +151,7 @@ export class RuleService {
       ...allowProblems(steps, rule.allow),
       ...steps.flatMap((s) => permissionProblems(s, ctx)),
       ...(shareable ? steps.flatMap((s) => visibilityProblems(s, shareable)) : []),
+      ...attachmentsFor(steps, [Object.fromEntries((result.images ?? []).map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }]))]).problems,
     ];
     const label = cacheLabel(guild);
     const labels: Record<string, string> = {};
@@ -338,11 +340,12 @@ export class RuleService {
       report = await this.deps.engine.runCommand(rule, event);
     } catch (e) {
       this.deps.log(`コマンド /${name} の実行に失敗`, e);
-      report = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, steps: 0 };
+      report = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, images: [], steps: 0 };
     }
     const content = commandReplyText(rule.name, report);
-    const body = { content, allowed_mentions: { parse: [] } };
-    if (visibility === "auto" && report.reply && !commandFailed(report) && (await this.#showToAll(rule, spec, event, report))) {
+    const files = commandFailed(report) ? [] : report.images.map((i) => ({ name: i.name, data: i.data }));
+    const body = { content, allowed_mentions: { parse: [] }, ...(files.length ? { files } : {}) };
+    if (visibility === "auto" && (report.reply || files.length) && !commandFailed(report) && (await this.#showToAll(rule, spec, event, report))) {
       await api.interactions.followUp(interaction.application_id, interaction.token, body);
       await api.interactions.deleteReply(interaction.application_id, interaction.token);
     } else {
@@ -355,7 +358,7 @@ export class RuleService {
   async #showToAll(rule: Rule, spec: CommandSpec, event: Record<string, unknown>, report: CommandReport): Promise<boolean> {
     if (!this.deps.decideVisibility) return false;
     try {
-      return await this.deps.decideVisibility({ ownerId: rule.ownerId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", steps: report.steps });
+      return await this.deps.decideVisibility({ ownerId: rule.ownerId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", images: report.images.length, steps: report.steps });
     } catch (e) {
       this.deps.log(`コマンド /${spec.name} の公開判定に失敗`, e);
       return false;
@@ -497,7 +500,7 @@ function commandFailed(report: CommandReport): boolean {
 export function commandReplyText(ruleName: string, report: CommandReport): string {
   const status = commandFailed(report)
     ? `⚠️ 実行できませんでした: ${(report.error ?? "不明なエラー").slice(0, 500)}`
-    : report.reply
+    : report.reply || report.images.length
       ? null
       : report.outcome === "executed"
         ? `「${ruleName}」を実行しました(${report.steps}件の変更)`

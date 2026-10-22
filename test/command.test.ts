@@ -214,3 +214,20 @@ test("a fixed visibility is used as is, without asking the judge", async () => {
   assert.ok((w.calls[0]![1] as { flags?: number }).flags);
   assert.equal(asked.length, 0);
 });
+
+test("a command's code can make images for its reply and its posts", async () => {
+  const w = world();
+  w.setCode(async (b) => {
+    const id = await b.media.math("x^2", {}, "eq");
+    b.reply(`式: ${id}`);
+    return { ok: true, value: { steps: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { files: [id] } }] }, logs: [] };
+  });
+  w.admin.save(GUILD, "1", w.definition);
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  const edit = w.calls.at(-1)![1] as { content: string; files?: Array<{ name: string; data: Buffer }> };
+  assert.match(edit.content, /式: img1/);
+  assert.deepEqual(edit.files!.map((f) => f.name), ["eq.png"]);
+  assert.ok(edit.files![0]!.data.length > 100);
+  assert.deepEqual(Object.keys(w.runs[0].images), ["img1"]);
+  assert.equal(w.runs[0].images.img1.name, "eq.png");
+});

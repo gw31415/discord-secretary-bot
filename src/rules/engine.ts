@@ -15,6 +15,9 @@ import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
 import { createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
+import { fetchImage, imageRefs } from "../agent/images.ts";
+import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
+import type { APIMessage } from "discord-api-types/v10";
 import type { Rule, RunOutcome } from "./types.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
@@ -72,7 +75,15 @@ export interface CommandReport {
   error: string | null;
   /** What the code passed to reply(). */
   reply: string | null;
+  /** Images the code made for the reply. */
+  images: CommandImage[];
   steps: number;
+}
+
+/** An image a command's code drew, rendered or converted for its reply. */
+export interface CommandImage {
+  name: string;
+  data: Buffer;
 }
 
 export function haltKey(guildId: string): string {
@@ -319,6 +330,7 @@ export class RuleEngine {
     const last = batch.at(-1)!;
     const result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND");
     const reply = result.reply ?? null;
+    const images = result.images ?? [];
     // Kept only when the run went through, so a failed run is retried from the same state.
     const keepState = () => {
       if (result.state) store.setRuleState(rule.id, result.state.value);
@@ -329,7 +341,7 @@ export class RuleEngine {
       const error = result.kind === "error" ? result.error : null;
       store.finishRuleRun(runId, { outcome, error, logs: result.logs });
       this.#settle(rule, result.kind === "error", error);
-      return { outcome, error, reply, steps: 0 };
+      return { outcome, error, reply, images, steps: 0 };
     }
     let outcome: RunOutcome;
     let planId: string | null = null;
@@ -340,6 +352,7 @@ export class RuleEngine {
         ownerId: rule.ownerId,
         rule: { id: rule.id, version: rule.version, name: rule.name, eventId, allow: rule.allow },
         drafts: result.drafts,
+        ...(images.length ? { images: Object.fromEntries(images.map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }])) } : {}),
       });
       planId = done.plan.id;
       outcome = done.status === "succeeded" ? "executed" : "failed";
@@ -352,7 +365,7 @@ export class RuleEngine {
     store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
     store.audit({ kind: "user", userId: rule.ownerId, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     this.#settle(rule, outcome === "failed" || outcome === "rejected", error);
-    return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, steps: result.drafts.length };
+    return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length };
   }
 
   /**
@@ -361,7 +374,7 @@ export class RuleEngine {
    * channel (and the owner) may see, since the reply goes back there.
    */
   async runCommand(rule: Rule, event: Data): Promise<CommandReport> {
-    const skipped = (error: string): CommandReport => ({ outcome: "skipped", error, reply: null, steps: 0 });
+    const skipped = (error: string): CommandReport => ({ outcome: "skipped", error, reply: null, images: [], steps: 0 });
     if (!rule.enabled) return skipped("このコマンドのルールは止まっています");
     if (this.halted(rule.guildId)) return skipped("このサーバーの全ルールが止められています");
     const guild = this.deps.caches.get(rule.guildId)?.guild;
@@ -411,8 +424,29 @@ export class RuleEngine {
   ): Promise<Evaluation> {
     let result: SandboxResult;
     let replied: string | null = null;
+    const images: CommandImage[] = [];
     try {
       const source = reader ?? this.ownerReader(rule.guildId, rule.ownerId);
+      // Images for a command's reply or the run's posts (`files: ["img1"]`):
+      // drawn, formulas, or converted from this run's images or a message's
+      // attachments the reader may open.
+      const keep = (data: Buffer, name: string) => (images.push({ data, name }), `img${images.length}`);
+      const load = async (raw: unknown): Promise<Buffer> => {
+        if (typeof raw === "string") {
+          const found = /^img(\d+)$/.exec(raw) && images[Number(raw.slice(3)) - 1];
+          if (!found) throw new Error(`画像 ${raw} はありません。この実行で作った画像のIDを指定してください`);
+          return found.data;
+        }
+        const ref = raw as { message_id?: unknown; channel_id?: unknown; index?: unknown } | null;
+        if (typeof ref?.message_id !== "string" || typeof ref.channel_id !== "string") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
+        const message = (await source.get(`/channels/${ref.channel_id}/messages/${ref.message_id}`, {})) as APIMessage | null;
+        const index = typeof ref.index === "number" ? ref.index : 0;
+        const found = message && imageRefs(message).at(index);
+        if (!found) throw new Error(`メッセージ ${ref.message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
+        const image = await fetchImage(found);
+        if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
+        return image.data;
+      };
       result = await (this.deps.run ?? runSandboxed)(
         rule.code,
         {
@@ -425,6 +459,14 @@ export class RuleEngine {
           params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
           ...(command ? { reply: (text: string) => void (replied = (replied ? `${replied}\n${text}` : text).slice(0, MAX_REPLY)) } : {}),
+          attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
+          media: {
+            math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.png`),
+            convert: async (source: unknown, raw: unknown, name: string) => {
+              const { data, format } = await convertImage(await load(source), parseOptions(ConvertOptionsSchema, raw));
+              return keep(data, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+            },
+          },
         },
         RULE_SANDBOX_LIMITS,
       );
@@ -435,7 +477,7 @@ export class RuleEngine {
     if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {
       return { kind: "error", error: `setState の値はJSONで${MAX_STATE_JSON}文字までです`, logs: result.logs };
     }
-    const saved = { ...(result.state ? { state: result.state } : {}), ...(replied !== null ? { reply: replied } : {}) };
+    const saved = { ...(result.state ? { state: result.state } : {}), ...(replied !== null ? { reply: replied } : {}), ...(images.length ? { images } : {}) };
     const value = result.value as { steps?: unknown; rules?: unknown[] } | null | undefined;
     if (value === undefined || value === null) return { kind: "none", logs: result.logs, ...saved };
     if (Array.isArray(value.rules) && value.rules.length > 0) return { kind: "error", error: "ルールの中からルールは作れません", logs: result.logs };
@@ -487,9 +529,9 @@ function defaultClearTimer(handle: unknown): void {
 
 /** `state` is set when the code called setState: what to keep if the run goes through. `reply` is what a command's code passed to reply(). */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string }
-  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string }
-  | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string };
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; images?: CommandImage[] }
+  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; images?: CommandImage[] }
+  | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; images?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {

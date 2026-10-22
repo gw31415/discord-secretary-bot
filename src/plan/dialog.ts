@@ -286,7 +286,8 @@ function codeBody(plan: Plan, room: number): string[] {
 }
 
 function replyLine(r: PlanRuleDraft): string {
-  return r.dry.reply ? `\n　返事: ${r.dry.reply.slice(0, 200)}` : "";
+  const images = r.dry.images ? `(画像${r.dry.images}枚)` : "";
+  return r.dry.reply || images ? `\n　返事: ${(r.dry.reply ?? "").slice(0, 200)}${images}` : "";
 }
 
 function dryLine(r: PlanRuleDraft): string {

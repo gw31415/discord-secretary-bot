@@ -838,10 +838,14 @@ test("a revised plan may keep the images of the plan it replaces, and the dialog
   assert.equal(edit.files.length, 1);
 });
 
-test("a rule's post cannot carry images", async () => {
-  const { planner } = setup();
-  await assert.rejects(
-    planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x", files: ["img1"] } }] }),
-    /ルールの投稿には画像を付けられません/,
-  );
+test("a rule's post carries the images its code made, and only those", async () => {
+  const { planner, calls } = setup();
+  const rule = { ...RULE, allow: [{ op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } }, body: { type: "object", properties: { content: { type: "string" }, files: { type: "array", maxItems: 4 } }, additionalProperties: false } }] };
+  const drafts = [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x", files: ["img1"] } }];
+  await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "1", rule, drafts }), /画像 img1 がありません/);
+  const done = await planner.runForRule({ guildId: GUILD, ownerId: "1", rule, drafts, images: { img1: PNG } });
+  assert.equal(done.status, "succeeded");
+  assert.equal((calls.at(-1)!.options as { files?: unknown[] }).files!.length, 1);
+  // The allow list still decides: a body without files in it refuses them.
+  await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts, images: { img1: PNG } }), /範囲外/);
 });
