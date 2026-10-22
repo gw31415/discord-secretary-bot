@@ -10,6 +10,7 @@ import { readTools } from "./tools.ts";
 import type { Propose, RuleTools } from "./tools.ts";
 import type { Coder } from "./coder.ts";
 import { isReactionEmoji } from "./react.ts";
+import { retryFailedCall } from "./retry.ts";
 import { ANTHROPIC_WEB_TOOLS, webTools } from "./web.ts";
 import type { WebAccess } from "./web.ts";
 
@@ -55,6 +56,21 @@ export interface RespondResult {
   toolErrors?: { tool: string; error: string }[];
   /** Reactions put on the message being answered. */
   reactions?: string[];
+  /** Model calls that failed for a passing reason and were made again. */
+  retries?: number;
+}
+
+/** The reply failed; carries how far it got, for the audit log. */
+export class ReplyFailed extends Error {
+  readonly turns: number;
+  readonly toolCalls: string[];
+  readonly retries: number;
+  constructor(message: string, progress: { turns: number; toolCalls: string[]; retries: number }) {
+    super(message);
+    this.turns = progress.turns;
+    this.toolCalls = progress.toolCalls;
+    this.retries = progress.retries;
+  }
 }
 
 /**
@@ -271,6 +287,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
 
   let turns = 0;
   let progress = 0;
+  let retries = 0;
   const toolCalls: string[] = [];
   const toolErrors: { tool: string; error: string }[] = [];
   agent.subscribe(async (event) => {
@@ -294,19 +311,28 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   try {
     const images = seesImages && input.images?.length ? await downloadImages(input.images, input.fetch) : [];
     input.inbox?.open(steer);
+    const canRetry = () => turns < MAX_TURNS && !input.signal?.aborted;
     await agent.prompt(userPrompt(input), images.length > 0 ? images : undefined);
+    retries += await retryFailedCall(agent, canRetry);
     // A message that came in as the agent finished still gets read.
     while (agent.hasQueuedMessages() && turns < MAX_TURNS) {
       const queued = agent.peekQueuedMessages();
       agent.clearAllQueues();
       await agent.prompt(queued);
+      retries += await retryFailedCall(agent, canRetry);
     }
   } finally {
     input.inbox?.close();
   }
-  const text = lastAssistantText(agent.state.messages);
-  if (!text && turns >= MAX_TURNS) {
-    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors, reactions };
+  let text: string;
+  try {
+    text = lastAssistantText(agent.state.messages);
+  } catch (e) {
+    throw new ReplyFailed(e instanceof Error ? e.message : String(e), { turns, toolCalls, retries });
   }
-  return { text, progress, turns, toolCalls, toolErrors, reactions };
+  const extra = retries > 0 ? { retries } : {};
+  if (!text && turns >= MAX_TURNS) {
+    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors, reactions, ...extra };
+  }
+  return { text, progress, turns, toolCalls, toolErrors, reactions, ...extra };
 }
