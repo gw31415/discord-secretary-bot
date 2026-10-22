@@ -257,7 +257,7 @@ async function callMcpTool(
   await rpc(target.url, apiKey, {
     id: 1,
     method: "initialize",
-    params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "discord-admin-bot", version: "0.1.0" } },
+    params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "discord-secretary-bot", version: "0.1.0" } },
   }, session, fetchImpl, signal);
   await rpc(target.url, apiKey, { method: "notifications/initialized" }, session, fetchImpl, signal);
 

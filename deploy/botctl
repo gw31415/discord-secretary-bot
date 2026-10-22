@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# Production and development on one host: each has its own clone, .env, database
+# and systemd unit (discord-secretary-bot@prod / discord-secretary-bot@dev).
+#
+#   botctl status              what each environment runs
+#   botctl dev [branch]        move dev to the branch's latest commit (default: main), test, restart
+#   botctl promote [commit]    put what dev runs into production
+#   botctl rollback            put production back on the commit it ran before
+#   botctl logs prod|dev [n]   recent log lines
+#   botctl install             one-time setup of the layout and the units
+#
+# Production only runs a commit that dev is running. Before every production
+# change the database is copied to prod/data/backups; if the new commit does not
+# start, production goes back to the old commit and that copy by itself.
+set -euo pipefail
+
+ROOT="${BOT_ROOT:-$HOME/discord-secretary-bot}"
+REPO="${BOT_REPO:-https://github.com/gw31415/discord-secretary-bot.git}"
+NODE="${BOT_NODE:-$HOME/.local/share/mise/installs/node/26.8.2/bin/node}"
+UNIT="discord-secretary-bot"
+STATE="$ROOT/state"
+PATH="$(dirname "$NODE"):$PATH"
+export PATH
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'エラー: %s\n' "$*" >&2; exit 1; }
+
+unit() { printf '%s@%s' "$UNIT" "$1"; }
+head_of() { git -C "$ROOT/$1" rev-parse HEAD; }
+short() { git -C "$ROOT/prod" rev-parse --short "$1"; }
+describe() { git -C "$ROOT/$1" log -1 --format='%h %s'; }
+
+# Up to 60 s for the bot to log in; fails as soon as the unit is not running.
+healthy() {
+  local env="$1" since="$2"
+  for _ in $(seq 60); do
+    sleep 1
+    systemctl is-active --quiet "$(unit "$env")" || return 1
+    if journalctl -u "$(unit "$env")" --since "$since" --no-pager -o cat 2>/dev/null | grep -q 'としてログインしました'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+start() {
+  local env="$1" since
+  since="$(date '+%Y-%m-%d %H:%M:%S')"
+  sudo systemctl restart "$(unit "$env")"
+  healthy "$env" "$since"
+}
+
+# npm ci only when the lockfile changed since the last install in that clone.
+deps() {
+  local dir="$ROOT/$1" hash
+  hash="$(sha256sum "$dir/package-lock.json" | cut -d' ' -f1)"
+  if [[ ! -f "$dir/node_modules/.lock-hash" || "$(cat "$dir/node_modules/.lock-hash")" != "$hash" ]]; then
+    (cd "$dir" && npm ci --no-audit --no-fund --loglevel=error)
+    printf '%s' "$hash" >"$dir/node_modules/.lock-hash"
+  fi
+}
+
+tests() {
+  local out
+  if out="$(cd "$ROOT/$1" && npm test 2>&1)"; then
+    grep -E '^. (pass|fail) ' <<<"$out" || true
+  else
+    tail -n 40 <<<"$out" >&2
+    return 1
+  fi
+}
+
+# The unit is stopped, so copying the main file gives a consistent database.
+backup() {
+  local dir="$ROOT/prod/data/backups" name
+  mkdir -p "$dir"
+  name="$dir/$(date '+%Y%m%d-%H%M%S')-$(short "$1").db"
+  cp "$ROOT/prod/data/bot.db" "$name"
+  chmod 600 "$name"
+  printf '%s' "$name"
+}
+
+record() { printf '%s %s %s\n' "$(date -Is)" "$1" "$2" >>"$STATE/prod-history"; }
+
+cmd_status() {
+  local env dir branch
+  for env in prod dev; do
+    dir="$ROOT/$env"
+    if [[ ! -d "$dir/.git" ]]; then
+      say "$env: 未設置"
+      continue
+    fi
+    branch="$(git -C "$dir" symbolic-ref --short -q HEAD || echo 'コミット固定')"
+    say "$env: $(systemctl is-active "$(unit "$env")" 2>/dev/null || true) · $branch · $(describe "$env")"
+  done
+  if [[ -f "$STATE/prod-history" ]]; then
+    say "本番の履歴(新しい順):"
+    tail -n 5 "$STATE/prod-history" | tac
+  fi
+}
+
+cmd_dev() {
+  local branch="${1:-main}" dir="$ROOT/dev"
+  git -C "$dir" fetch -q origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+  git -C "$dir" checkout -q -B "$branch" "origin/$branch"
+  deps dev
+  tests dev || die "dev のテストが失敗したので、dev は再起動していません"
+  start dev || die "dev が起動しませんでした(botctl logs dev)"
+  say "dev を $branch の $(describe dev) にしました"
+}
+
+cmd_promote() {
+  local sha
+  sha="$(head_of dev)"
+  if [[ $# -gt 0 && "$(git -C "$ROOT/dev" rev-parse --verify -q "$1^{commit}" || true)" != "$sha" ]]; then
+    die "本番に上げられるのは dev で動いているコミットだけです(dev: $(describe dev))"
+  fi
+  systemctl is-active --quiet "$(unit dev)" || die "dev が止まっています。dev で動くことを確かめてから上げてください"
+  switch_prod "$sha" promote
+}
+
+cmd_rollback() {
+  [[ -f "$STATE/prod-history" ]] || die "本番の履歴がありません"
+  local current previous
+  current="$(head_of prod)"
+  # The last commit production ran other than the current one.
+  previous="$(awk -v cur="$current" '$2 != cur { sha = $2 } END { print sha }' "$STATE/prod-history")"
+  [[ -n "$previous" ]] || die "戻せる以前のコミットがありません"
+  switch_prod "$previous" rollback
+}
+
+switch_prod() {
+  local sha="$1" why="$2" dir="$ROOT/prod" previous saved
+  previous="$(head_of prod)"
+  if [[ "$sha" == "$previous" ]]; then
+    say "本番はすでに $(describe prod) です"
+    return 0
+  fi
+  git -C "$dir" fetch -q origin
+  git -C "$dir" cat-file -e "$sha^{commit}" 2>/dev/null || die "コミット $sha が GitHub にありません(push してください)"
+
+  sudo systemctl stop "$(unit prod)"
+  saved="$(backup "$previous")"
+  git -C "$dir" checkout -q --detach "$sha"
+  if deps prod && tests prod && start prod; then
+    record "$sha" "$why"
+    say "本番を $(describe prod) にしました(更新前のデータベース: $saved)"
+    return 0
+  fi
+
+  say "本番の更新に失敗したので $(short "$previous") に戻します" >&2
+  sudo systemctl stop "$(unit prod)" || true
+  git -C "$dir" checkout -q --detach "$previous"
+  cp "$saved" "$dir/data/bot.db"
+  rm -f "$dir/data/bot.db-wal" "$dir/data/bot.db-shm"
+  deps prod
+  start prod || die "元のコミットでも起動しませんでした(botctl logs prod)"
+  die "本番は $(describe prod) のままです(データベースも更新前に戻しました)"
+}
+
+cmd_logs() {
+  journalctl -u "$(unit "${1:-prod}")" -n "${2:-50}" --no-pager -o cat
+}
+
+cmd_install() {
+  local env
+  mkdir -p "$STATE"
+  for env in prod dev; do
+    [[ -d "$ROOT/$env/.git" ]] || git clone -q "$REPO" "$ROOT/$env"
+    mkdir -p "$ROOT/$env/data"
+    chmod 700 "$ROOT" "$ROOT/$env" "$ROOT/$env/data"
+  done
+  sed -e "s#@ROOT@#$ROOT#g" -e "s#@NODE@#$NODE#g" -e "s#@USER@#$(id -un)#g" \
+    "$ROOT/dev/deploy/$UNIT@.service" | sudo tee "/etc/systemd/system/$UNIT@.service" >/dev/null
+  sudo systemctl daemon-reload
+  # A copy, so checking out another branch in dev never changes the tool itself.
+  sudo install -m 755 "$ROOT/dev/deploy/botctl" /usr/local/bin/botctl
+  say "設置しました。prod/.env と dev/.env を用意してから: sudo systemctl enable --now $UNIT@prod $UNIT@dev"
+}
+
+case "${1:-status}" in
+  status) cmd_status ;;
+  dev) shift; cmd_dev "$@" ;;
+  promote) shift; cmd_promote "$@" ;;
+  rollback) cmd_rollback ;;
+  logs) shift; cmd_logs "$@" ;;
+  install) cmd_install ;;
+  *) die "使い方: botctl status | dev [branch] | promote [commit] | rollback | logs prod|dev [n] | install" ;;
+esac
