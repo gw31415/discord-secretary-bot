@@ -252,3 +252,27 @@ test("the owner changes who sees a command's replies from /rules, keeping the ve
   assert.match(view, /返事を全員に見せる」にしました/);
   assert.throws(() => w.admin.setVisibility(GUILD, "1", rule.id, "everyone" as never), /選べない/);
 });
+
+test("a rule's panel opens on a short summary; allow, code and runs are pages behind buttons", async () => {
+  const w = world();
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  const press = (action: string) => ({
+    id: "i3", token: "tok", application_id: "app", type: InteractionType.MessageComponent, guild_id: GUILD,
+    member: { user: { id: "1" }, roles: [], permissions: "0" },
+    data: { custom_id: `rule:${action}:${rule.id}`, component_type: 2 },
+  }) as never;
+  await w.service.handleInteraction(press("open"));
+  const summary = JSON.stringify(w.calls.at(-1)![1]);
+  assert.match(summary, /きっかけ/);
+  assert.doesNotMatch(summary, /```js/);
+  assert.doesNotMatch(summary, /許す操作\*\*/);
+  for (const page of ["allow", "source", "runs"]) assert.match(summary, new RegExp(`rule:${page}:${rule.id}`));
+  await w.service.handleInteraction(press("source"));
+  const source = JSON.stringify(w.calls.at(-1)![1]);
+  assert.match(source, /```js/);
+  assert.match(source, /rule:code:/);
+  await w.service.handleInteraction(press("allow"));
+  assert.match(JSON.stringify(w.calls.at(-1)![1]), /許す操作\*\*/);
+  await w.service.handleInteraction(press("runs"));
+  assert.match(JSON.stringify(w.calls.at(-1)![1]), /最近の実行/);
+});
