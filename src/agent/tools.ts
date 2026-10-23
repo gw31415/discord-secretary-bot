@@ -519,6 +519,7 @@ const RULE_FIELDS = {
   schedule: Type.Optional(Type.String({ maxLength: 100, description: "SCHEDULE の cron(分 時 日 月 曜日)" })),
   timezone: Type.Optional(Type.String({ maxLength: 64 })),
   debounce_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_DEBOUNCE_SECONDS })),
+  serial_by: Type.Optional(Type.String({ maxLength: 64, description: "\"rule\" か、イベントの項目のパス(user_id など)" })),
   limits: Type.Optional(
     Type.Object({
       per_minute: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.perMinute })),
@@ -635,6 +636,7 @@ function toProposal(r: RuleInput): RuleProposal {
       ...(r.schedule !== undefined ? { schedule: r.schedule } : {}),
       ...(r.timezone !== undefined ? { timezone: r.timezone } : {}),
       ...(r.debounce_seconds ? { debounceSeconds: r.debounce_seconds } : {}),
+      ...(r.serial_by ? { serialBy: r.serial_by } : {}),
       ...(r.command ? { command: r.command as CommandSpec } : {}),
     },
     ...(r.limits
@@ -670,10 +672,11 @@ function rulesFromCode(value: unknown): RuleProposal[] {
 
 const RULES_DESCRIPTION = [
   "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
-  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code か wasm, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
+  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code か wasm, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
   "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。true はBotの変更すべてで動き、\"other_rules\" はほかのルールや会話からの変更では動くがこのルール自身の変更では動きません(Botの投稿・リアクションでは動きません)。ほかのルールの結果に合わせて直すルール(例: 並べ替えのあとに一覧を作り直す)は \"other_rules\" にします。",
   "  時刻で動かすときは trigger_event(または more_trigger_events)に SCHEDULE を入れ、schedule に cron(分 時 日 月 曜日。例: 毎朝4時は \"0 4 * * *\"、10分おきは \"*/10 * * * *\")を、必要なら timezone(既定 Asia/Tokyo)を書きます。イベントのきっかけと一緒に使えます(例: チャンネルの作成・変更と毎日4時の作り直し)。BOT_READY はBotの起動・再接続のたびに動くので、止まっていた間の変化を取り込めます。",
   "  debounce_seconds: 短い間にイベントがまとめて来るとき(並べ替えでチャンネルの変更が何件も届くなど)に付けると、最後のイベントからその秒数待って1回だけ動きます。コードはその間のイベントを batch(古い順の [{ eventName, event }]。最大" + MAX_BATCH + "件)で読めます。batch はいつもあり、まとめないときは1件です。",
+  "  serial_by: 同じルールの実行は既定で並行に動きます(debounce_seconds があるルールと state を書くルールは自動で1回ずつ)。前の実行の結果を前提にするときに付けます。\"rule\" はこのルールの実行をすべて順番に、イベントの項目のパス(例: \"user_id\")はその値が同じイベントだけ順番にします(例: 同じ人の入室と退室で部屋の作成と削除が入れ替わらないように)。",
   "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
   "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
@@ -836,7 +839,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
   const rulesDescription = coder
     ? RULES_DESCRIPTION.replace(
         /\n  各要素[^\n]*\n/,
-        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code_task か wasm, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
+        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code_task か wasm, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
       ).replace(/\n  code: イベントごとに[^\n]*\n    使えるもの:[^\n]*/, "")
     : RULES_DESCRIPTION;
   const sandboxBindings = bindingsOf(reader, decide);

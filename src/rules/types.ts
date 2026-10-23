@@ -46,6 +46,13 @@ export interface RuleTrigger {
    * the code reads every event of it as `batch`.
    */
   debounceSeconds?: number;
+  /**
+   * Which runs wait for each other. By default runs go side by side, except a
+   * debounced rule or one that keeps state, which runs one at a time. "rule"
+   * makes every run wait for the last; a path into the event (e.g. "user_id")
+   * makes only runs with the same value there wait for each other.
+   */
+  serialBy?: string;
   /** The slash command that starts a COMMAND rule. */
   command?: CommandSpec;
 }

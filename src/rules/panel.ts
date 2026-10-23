@@ -102,7 +102,8 @@ export function triggerLabel(trigger: Rule["trigger"]): string {
         ? " ⚠️ Bot自身が起こしたイベントでも動きます"
         : "";
   const debounce = trigger.debounceSeconds ? ` · イベントが${trigger.debounceSeconds}秒途切れたらまとめて1回動きます` : "";
-  return `${label}${origin}${debounce}`;
+  const serial = !trigger.serialBy ? "" : trigger.serialBy === "rule" ? " · 1回ずつ順番に動きます" : ` · ${trigger.serialBy} が同じイベントは順番に動きます`;
+  return `${label}${origin}${debounce}${serial}`;
 }
 
 export function limitsLabel(limits: RuleLimits): string {

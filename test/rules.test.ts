@@ -163,6 +163,11 @@ test("runs are rate limited, and failures in a row switch the rule off and tell 
   await w.engine.idle();
   assert.equal(w.runs.length, 2);
   assert.equal(w.store.recentRuleRuns(rule.id, 10).filter((r) => r.outcome === "rate_limited").length, 1);
+  // The events past the limit are not dropped: they run once, together, when the limit allows.
+  w.engine.flushDebounced();
+  await w.engine.idle();
+  assert.equal(w.runs.length, 3);
+  assert.deepEqual(w.seen.at(-1).batch.map((b: any) => b.event.id), ["802", "803"]);
 
   w.now.t += 61_000;
   w.setCode(() => ({ ok: false, error: "TypeError: boom", logs: [] }));
@@ -414,4 +419,43 @@ test("a rule carries its state to the next run, but only from runs that went thr
   assert.deepEqual(w.store.getRuleState(rule.id), { count: 1 });
   w.store.setRuleState(rule.id, null);
   assert.equal(w.store.getRuleState(rule.id), null);
+});
+
+test("runs go side by side unless they must wait: serial_by, debounce or state", async () => {
+  const { serialKey } = await import("../src/rules/engine.ts");
+  const js = (code: string, trigger: object = {}) => ({ id: "r", trigger: { event: "MESSAGE_CREATE", ...trigger }, program: { kind: "js" as const, code } });
+  const event = { author: { id: "3" }, user_id: "4" };
+  assert.equal(serialKey(js("return null"), event), null);
+  assert.equal(serialKey(js("setState(1); return null"), event), "r");
+  assert.equal(serialKey({ ...js(""), program: { kind: "wasm", sha256: "x" } }, event), "r");
+  assert.equal(serialKey(js("return null", { debounceSeconds: 5 }), event), "r");
+  assert.equal(serialKey(js("return null", { serialBy: "rule" }), event), "r");
+  assert.equal(serialKey(js("return null", { serialBy: "author.id" }), event), "r\u00003");
+  assert.equal(serialKey(js("return null", { serialBy: "missing" }), event), "r");
+  const { triggerProblems } = await import("../src/rules/triggers.ts");
+  assert.deepEqual(triggerProblems({ event: "MESSAGE_CREATE", serialBy: "member.user.id" }), []);
+  assert.match(triggerProblems({ event: "MESSAGE_CREATE", serialBy: "a b" }).join(), /serial_by/);
+
+  // Runs with the same key wait for each other; the rest do not.
+  const w = world();
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", serialBy: "author.id" } });
+  const gates: Array<() => void> = [];
+  const started: string[] = [];
+  w.setResult(async () => {
+    started.push("run");
+    await new Promise<void>((r) => gates.push(r));
+    return { plan: { id: "p" }, status: "succeeded", reason: null };
+  });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "701"));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "702"));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "4", "703"));
+  await new Promise((r) => setTimeout(r, 50));
+  // Author 3's second message waits for the first; author 4's runs at once.
+  assert.equal(started.length, 2);
+  while (gates.length) gates.shift()!();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(started.length, 3);
+  while (gates.length) gates.shift()!();
+  await w.engine.idle();
+  assert.equal(w.store.recentRuleRuns(rule.id, 5).length, 3);
 });
