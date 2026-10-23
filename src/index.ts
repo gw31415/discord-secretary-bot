@@ -317,7 +317,6 @@ client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
   try {
     if (await widenPrompts.handleInteraction(data)) return;
     if (await planner.handleInteraction(data)) return;
-    if (await rules.handleCommand(data)) return;
     if (await rules.handleCustomCommand(data)) return;
     if (await rules.handleInteraction(data)) return;
     await handleInteraction(api, store, data);

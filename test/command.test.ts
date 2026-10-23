@@ -27,7 +27,7 @@ const SPEC: CommandSpec = {
 test("a command's shape is checked and turned into what Discord registers", () => {
   assert.deepEqual(commandProblems(SPEC), []);
   assert.match(commandProblems({ ...SPEC, name: "Announce" }).join(), /小文字/);
-  assert.match(commandProblems({ ...SPEC, name: "rules" }).join(), /Botが使っています/);
+  assert.match(commandProblems({ ...SPEC, name: "settings" }).join(), /Botが使っています/);
   assert.match(commandProblems(SPEC, new Set(["announce"])).join(), /別のルール/);
   assert.match(commandProblems({ ...SPEC, options: [SPEC.options![1]!, SPEC.options![0]!] }).join(), /前に置いて/);
   assert.match(commandProblems({ ...SPEC, options: [{ name: "n", description: "d", type: "boolean", choices: [{ name: "a", value: "a" }] }] }).join(), /choices/);
@@ -150,7 +150,7 @@ test("a command needs its permissions, an enabled rule, and a name nobody else u
   assert.equal(w.runs.length, 1);
   assert.match((w.calls.at(-1)![1] as { content: string }).content, /今は使えません/);
   // Reserved names are left to the bot's own handlers.
-  assert.equal(await w.service.handleCustomCommand({ ...(interaction({}) as object), data: { type: ApplicationCommandType.ChatInput, name: "rules" } } as never), false);
+  assert.equal(await w.service.handleCustomCommand({ ...(interaction({}) as object), data: { type: ApplicationCommandType.ChatInput, name: "settings" } } as never), false);
 });
 
 test("a command that only replies needs no allowed operations", async () => {
@@ -163,7 +163,7 @@ test("a command that only replies needs no allowed operations", async () => {
   assert.match((w.calls.at(-1)![1] as { content: string }).content, /今日は晴れ/);
 });
 
-test("enabled command rules are the server's guild commands; /settings and /rules are global", async () => {
+test("enabled command rules are the server's guild commands; /settings is global and holds the rules", async () => {
   const w = world();
   assert.deepEqual(guildCommands(w.store, GUILD), []);
   const rule = w.admin.save(GUILD, "1", w.definition);
@@ -173,7 +173,7 @@ test("enabled command rules are the server's guild commands; /settings and /rule
   w.admin.setEnabled(GUILD, "1", rule.id, false);
   assert.equal(await registerCommands(w.api, w.store, "app", GUILD), true);
   assert.deepEqual(w.calls.at(-1)![1], []);
-  assert.deepEqual(COMMANDS.map((c) => c.name), ["settings", "rules"]);
+  assert.deepEqual(COMMANDS.map((c) => c.name), ["settings"]);
   assert.ok(COMMANDS.every((c) => JSON.stringify(c.contexts) === "[0]"), "server-only");
   assert.equal(await registerGlobalCommands(w.api, w.store, "app"), true);
   assert.equal(await registerGlobalCommands(w.api, w.store, "app"), false);

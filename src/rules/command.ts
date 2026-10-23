@@ -6,7 +6,7 @@ import type { MemberState } from "../discord/permissions.ts";
 // arrive as `event.options`, the code runs like any rule (with its owner's
 // permissions, within its allow list), and what it passes to reply() goes back
 // to whoever ran the command. Each server's custom commands are registered next
-// to /settings and /rules whenever its rules change.
+// to /settings whenever its rules change.
 
 export const OPTION_TYPES = {
   string: ApplicationCommandOptionType.String,
@@ -44,7 +44,7 @@ export interface CommandSpec {
 export const VISIBILITIES = ["auto", "private", "public"] as const;
 export type CommandVisibility = (typeof VISIBILITIES)[number];
 
-/** The choices on the confirmation dialog and the /rules panel. */
+/** The choices on the confirmation dialog and the rules panel. */
 export const VISIBILITY_CHOICES = [
   { value: "public", label: "返事を全員に見せる" },
   { value: "private", label: "返事は実行した人だけに見せる" },
@@ -52,7 +52,7 @@ export const VISIBILITY_CHOICES = [
 ] as const satisfies ReadonlyArray<{ value: CommandVisibility; label: string }>;
 
 /** The bot's own commands; custom ones cannot take these names. */
-export const RESERVED_COMMANDS = new Set(["settings", "rules"]);
+export const RESERVED_COMMANDS = new Set(["settings"]);
 /** Custom commands per server, well under Discord's 100. */
 export const MAX_CUSTOM_COMMANDS = 50;
 export const MAX_OPTIONS = 10;

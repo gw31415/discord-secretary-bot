@@ -4,7 +4,8 @@ import { randomBytes } from "node:crypto";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
 import { findChatModel, judgeRef, lightestThinking, selectableModels } from "../src/llm/models.ts";
-import { parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
+import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
+import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
 
 const master = randomBytes(32);
 
@@ -226,4 +227,9 @@ test("the settings panel moves between its pages with buttons, each well within 
   assert.match(keys, /llm:key:set/);
   assert.match(keys, /llm:page:home/);
   for (const page of ["home", "keys", "models", "advanced"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
+  // The rules are a section of the panel, and their panel leads back here.
+  assert.match(home, /rule:home:/);
+  assert.equal(SETTINGS_HOME_ID, CUSTOM_ID.page("home"));
+  const rows = (renderPanel(store, "u1", undefined, "keys").components[0] as { components: Array<{ type: number; components?: Array<{ type: number }> }> }).components.filter((c) => c.type === 1 && c.components!.every((b) => b.type === 2));
+  assert.ok(rows.every((r) => r.components!.length <= 3));
 });

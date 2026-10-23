@@ -226,7 +226,7 @@ function statusLine(plan: Plan, state: DialogState): string {
     case "executing":
       return plan.steps.length > 1 ? `実行中… ${done}/${plan.steps.length}` : "実行中…";
     case "succeeded":
-      return plan.rules?.length ? `✅ 実行し、ルール${plan.rules.length}件を登録しました。\`/rules\` で止めたり実行履歴を見たりできます。` : "✅ 実行しました";
+      return plan.rules?.length ? `✅ 実行し、ルール${plan.rules.length}件を登録しました。\`/settings\` の「ルール」で止めたり実行履歴を見たりできます。` : "✅ 実行しました";
     case "failed":
       return `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)。${state.reason ?? ""}${state.actions === false ? "" : "\n「再開」で残りを実行、「復元」で済んだ変更を戻す変更を提案、「そのまま」で終了します。"}`;
     case "cancelled":

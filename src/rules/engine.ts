@@ -408,7 +408,7 @@ export class RuleEngine {
     this.deps.onRulesChanged?.(rule.guildId);
     void this.deps.notifyOwner?.(
       rule.ownerId,
-      `ルール「${rule.name}」は${count}回続けて失敗したため止めました。最後のエラー: ${(error ?? "").slice(0, 300)}\n直したら \`/rules\` の管理パネルから有効にできます。`,
+      `ルール「${rule.name}」は${count}回続けて失敗したため止めました。最後のエラー: ${(error ?? "").slice(0, 300)}\n直したら \`/settings\` の「ルール」から有効にできます。`,
     ).catch(() => undefined);
   }
 

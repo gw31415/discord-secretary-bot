@@ -12,7 +12,7 @@ import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
 const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
 
-// What /rules shows: the management panel. Everything is drawn from the rule
+// The rules section of /settings: the management panel. Everything is drawn from the rule
 // definition and the database; the model's own words appear only as the
 // summary, which another model wrote from the code alone. All of it is
 // ephemeral. New rules are confirmed in a plan's dialog (plan/dialog.ts).
@@ -35,6 +35,9 @@ const PAGE_LABEL: Record<RulePage, string> = { summary: "概要", allow: "許す
 export const RULE_PAGES = Object.keys(PAGE_LABEL) as RulePage[];
 /** The page menu's extra entry, which asks before deleting. */
 export const DELETE_CHOICE = "delete";
+
+/** The settings panel's home (CUSTOM_ID.page("home") in llm/panel.ts); the rules are one of its sections. */
+export const SETTINGS_HOME_ID = "llm:page:home";
 
 export function ruleCustomId(action: RuleAction, arg = ""): string {
   return `rule:${action}:${arg}`;
@@ -198,7 +201,7 @@ export function homeView(input: HomeInput): Rendered {
   if (input.canHalt) {
     buttons.push(input.halted ? button(ruleCustomId("resume"), "全ルールを再開", ButtonStyle.Primary) : button(ruleCustomId("halt"), "緊急停止", ButtonStyle.Danger));
   }
-  rows.push(row(buttons));
+  rows.push(row(buttons), row([button(SETTINGS_HOME_ID, "← 設定のトップへ")]));
   return container(texts, rows);
 }
 

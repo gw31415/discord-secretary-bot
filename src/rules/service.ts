@@ -33,8 +33,8 @@ import type { Rule, RuleDefinition, RuleProposal, RuleRun, RuleTrigger } from ".
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
 // Here they are checked and dry-run at proposal (prepare) and registered after
-// the steps have run (register). /rules opens the management panel, which is
-// only visible to whoever opened it.
+// the steps have run (register). The "ルール" section of /settings is the
+// management panel, only visible to whoever opened it.
 
 /** Rules one plan may register. */
 export const MAX_RULES_PER_PLAN = 5;
@@ -328,14 +328,6 @@ export class RuleService {
   }
 
   // --- Interactions -------------------------------------------------------
-
-  async handleCommand(interaction: APIInteraction): Promise<boolean> {
-    if (interaction.type !== InteractionType.ApplicationCommand || interaction.data.name !== "rules") return false;
-    const userId = interaction.member?.user.id;
-    if (!userId || !interaction.guild_id) return true;
-    await this.deps.api.interactions.reply(interaction.id, interaction.token, this.#home(interaction.guild_id, userId));
-    return true;
-  }
 
   /** A custom slash command: runs its rule and tells whoever ran it how it went. */
   async handleCustomCommand(interaction: APIInteraction): Promise<boolean> {
