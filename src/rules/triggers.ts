@@ -261,6 +261,10 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
     if (debounce !== undefined) problems.push("きっかけ COMMAND には debounce_seconds を付けられません");
     problems.push(...commandProblems(trigger.command).map((p) => `きっかけ: ${p}`));
   } else if (trigger.command !== undefined) problems.push("きっかけの command は COMMAND と一緒に使います");
+  const serial = trigger.serialBy;
+  if (serial !== undefined && !(typeof serial === "string" && serial.length <= 64 && /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(serial))) {
+    problems.push("きっかけの serial_by は \"rule\" か、イベントの項目のパス(user_id、member.user.id など)にしてください");
+  }
   const origin = trigger.includeBotOrigin;
   if (origin !== undefined && typeof origin !== "boolean" && origin !== "other_rules") problems.push("きっかけの include_bot_origin は true・false・\"other_rules\" のどれかです");
   return problems;

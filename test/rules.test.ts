@@ -416,37 +416,41 @@ test("a rule carries its state to the next run, but only from runs that went thr
   assert.equal(w.store.getRuleState(rule.id), null);
 });
 
-test("a rule's runs go one at a time, while another rule runs alongside", async () => {
+test("runs go side by side unless they must wait: serial_by, debounce or state", async () => {
+  const { serialKey } = await import("../src/rules/engine.ts");
+  const js = (code: string, trigger: object = {}) => ({ id: "r", trigger: { event: "MESSAGE_CREATE", ...trigger }, program: { kind: "js" as const, code } });
+  const event = { author: { id: "3" }, user_id: "4" };
+  assert.equal(serialKey(js("return null"), event), null);
+  assert.equal(serialKey(js("setState(1); return null"), event), "r");
+  assert.equal(serialKey({ ...js(""), program: { kind: "wasm", sha256: "x" } }, event), "r");
+  assert.equal(serialKey(js("return null", { debounceSeconds: 5 }), event), "r");
+  assert.equal(serialKey(js("return null", { serialBy: "rule" }), event), "r");
+  assert.equal(serialKey(js("return null", { serialBy: "author.id" }), event), "r\u00003");
+  assert.equal(serialKey(js("return null", { serialBy: "missing" }), event), "r");
+  const { triggerProblems } = await import("../src/rules/triggers.ts");
+  assert.deepEqual(triggerProblems({ event: "MESSAGE_CREATE", serialBy: "member.user.id" }), []);
+  assert.match(triggerProblems({ event: "MESSAGE_CREATE", serialBy: "a b" }).join(), /serial_by/);
+
+  // Runs with the same key wait for each other; the rest do not.
   const w = world();
-  const slow = w.admin.save(GUILD, "1", { ...w.definition, name: "遅い" });
-  const fast = w.admin.save(GUILD, "1", { ...w.definition, name: "速い" });
-  const order: string[] = [];
-  let release!: () => void;
-  const gate = new Promise<void>((r) => (release = r));
-  let slowRunning = 0;
-  let overlapped = false;
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", serialBy: "author.id" } });
+  const gates: Array<() => void> = [];
+  const started: string[] = [];
   w.setResult(async () => {
-    const name = w.runs.at(-1).rule.id === slow.id ? "slow" : "fast";
-    order.push(`${name} start`);
-    if (name === "slow") {
-      if (++slowRunning > 1) overlapped = true;
-      await gate;
-      slowRunning--;
-    }
-    order.push(`${name} end`);
+    started.push("run");
+    await new Promise<void>((r) => gates.push(r));
     return { plan: { id: "p" }, status: "succeeded", reason: null };
   });
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "701"));
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "702"));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "4", "703"));
   await new Promise((r) => setTimeout(r, 50));
-  // The other rule finished both of its runs while the first one waits.
-  assert.equal(order.filter((o) => o === "fast end").length, 2);
-  // The waiting rule has started its first run only; its second waits for it.
-  assert.equal(order.filter((o) => o === "slow start").length, 1);
-  release();
+  // Author 3's second message waits for the first; author 4's runs at once.
+  assert.equal(started.length, 2);
+  while (gates.length) gates.shift()!();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(started.length, 3);
+  while (gates.length) gates.shift()!();
   await w.engine.idle();
-  assert.equal(order.filter((o) => o === "slow end").length, 2);
-  assert.equal(overlapped, false);
-  assert.equal(w.store.recentRuleRuns(slow.id, 5).length, 2);
-  assert.equal(w.store.recentRuleRuns(fast.id, 5).length, 2);
+  assert.equal(w.store.recentRuleRuns(rule.id, 5).length, 3);
 });

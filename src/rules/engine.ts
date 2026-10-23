@@ -115,8 +115,9 @@ export class RuleEngine {
   readonly #runs = new Map<string, number[]>();
   /** Rules whose rate-limit skip was already recorded this minute, so a flood leaves one row. */
   readonly #limitedNoted = new Map<string, number>();
-  /** Runs of each rule, one after another in the order events arrived. */
+  /** Runs that must not overlap, one after another in the order events arrived (see serialKey). */
   readonly #queues = new Map<string, Promise<void>>();
+  #unqueued = 0;
 
   constructor(deps: RuleEngineDeps) {
     this.deps = deps;
@@ -211,7 +212,7 @@ export class RuleEngine {
   /**
    * Called for every Gateway event a rule can use. The checks that decide
    * whether a rule runs happen now, against the state at the moment of the
-   * event; the runs themselves are queued per rule.
+   * event; the runs themselves go side by side unless serialKey says they must wait.
    */
   dispatch(event: string, guildId: string | undefined, data: Data): void {
     if (!guildId || !TRIGGERS[event]) return;
@@ -258,7 +259,7 @@ export class RuleEngine {
       return;
     }
     if (!this.#allowRun(rule)) return;
-    this.#enqueue(rule.id, () => this.#run(rule.id, rule.version, eventIdOf(event, data), [{ eventName: event, event: data }]));
+    this.#enqueue(serialKey(rule, data), () => this.#run(rule.id, rule.version, eventIdOf(event, data), [{ eventName: event, event: data }]));
   }
 
   #debounce(rule: Rule, item: BatchItem): void {
@@ -288,7 +289,7 @@ export class RuleEngine {
     const last = pending.batch.at(-1);
     if (!rule?.enabled || rule.version !== pending.version || !last) return;
     if (!this.#allowRun(rule)) return;
-    this.#enqueue(rule.id, () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), pending.batch));
+    this.#enqueue(serialKey(rule, last.event), () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), pending.batch));
   }
 
   /** Runs every debounced rule now instead of after its wait (tests and shutdown). */
@@ -316,15 +317,13 @@ export class RuleEngine {
     return true;
   }
 
-  /**
-   * Runs of one rule go one at a time, so a rule never races itself (two rooms
-   * for one join, state written over); different rules run side by side.
-   */
-  #enqueue(ruleId: string, task: () => Promise<unknown>): void {
-    const next = (this.#queues.get(ruleId) ?? Promise.resolve()).then(async () => void (await task())).catch((e) => this.deps.log("ルールの実行に失敗", e));
-    this.#queues.set(ruleId, next);
+  /** Runs with the same key go one after another; a run without one starts at once. */
+  #enqueue(key: string | null, task: () => Promise<unknown>): void {
+    const queue = key ?? `\u0000${++this.#unqueued}`;
+    const next = (this.#queues.get(queue) ?? Promise.resolve()).then(async () => void (await task())).catch((e) => this.deps.log("ルールの実行に失敗", e));
+    this.#queues.set(queue, next);
     void next.finally(() => {
-      if (this.#queues.get(ruleId) === next) this.#queues.delete(ruleId);
+      if (this.#queues.get(queue) === next) this.#queues.delete(queue);
     });
   }
 
@@ -395,7 +394,7 @@ export class RuleEngine {
     if (!this.#allowRun(rule)) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
     const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: rule.ownerId, audience: "channel" });
     return new Promise((resolve) => {
-      this.#enqueue(rule.id, async () => {
+      this.#enqueue(serialKey(rule, event), async () => {
         try {
           resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader)) ?? skipped("このコマンドのルールは止まっています"));
         } catch (e) {
@@ -537,6 +536,24 @@ export class RuleEngine {
       else this.#runs.set(key, recent);
     }
   }
+}
+
+/**
+ * The queue a run waits in, or null to start at once. A debounced rule's
+ * batches and a rule that keeps state (the JS calls setState; a module may
+ * always write it) go one at a time, so no update is lost; serial_by asks for
+ * the whole rule or for runs whose events share a value.
+ */
+export function serialKey(rule: Pick<Rule, "id" | "trigger" | "program">, event: Data): string | null {
+  const keepsState = rule.program.kind === "wasm" || /\bsetState\s*\(/.test(rule.program.code);
+  const by = rule.trigger.serialBy;
+  if (rule.trigger.debounceSeconds || keepsState || by === "rule") return rule.id;
+  if (!by) return null;
+  let value: unknown = event;
+  for (const part of by.split(".")) value = value !== null && typeof value === "object" ? (value as Record<string, unknown>)[part] : undefined;
+  // Without a value to tell runs apart, the whole rule waits.
+  if (value === undefined || value === null) return rule.id;
+  return `${rule.id}\u0000${typeof value === "object" ? JSON.stringify(value) : String(value)}`;
 }
 
 function defaultSetTimer(fn: () => void, ms: number): unknown {
