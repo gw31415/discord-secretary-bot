@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_MEMORY_PAGES, ModuleRejected, prepareModule } from "../src/wasm/module.ts";
-import { execute, runWasm } from "../src/wasm/run.ts";
+import { execute, runModule } from "../src/wasm/run.ts";
 
 // Small modules written out byte by byte, so the tests need no Wasm toolchain.
 
@@ -96,23 +96,23 @@ test("a module runs once, reaches the host only through secretary.call, and is s
 
   const spin = await prepareModule(wasm({ types: [[[], []]], memory: [1], funcs: [[0, LOOP]], exports: [["_start", 0, 0], ["memory", 2, 0]] }));
   const started = Date.now();
-  const r = await runWasm(await WebAssembly.compile(spin.bytes), { guildId: "1", actor: { kind: "user", userId: "2" }, get: async () => null }, { wallTimeMs: 300, memoryBytes: 0, maxGets: 1 });
+  const r = await runModule({ module: await WebAssembly.compile(spin.bytes) }, { guildId: "1", actor: { kind: "user", userId: "2" }, get: async () => null }, { wallTimeMs: 300, maxGets: 1 });
   assert.equal(r.ok, false);
   assert.match(r.error!, /上限/);
   assert.ok(Date.now() - started < 3000);
 });
 
 test("rule code compiles to bytecode once and runs from it", async () => {
-  const { compileJs, runSandboxed, setBytecodeCache, RULE_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const { compileJs, jsProgram, setBytecodeCache, SANDBOX_LIMITS } = await import("../src/sandbox.ts");
   await assert.rejects(compileJs("return )"), /SyntaxError/);
   const kept = new Map<string, Buffer>();
   setBytecodeCache({ get: (k) => kept.get(k), set: (k, v) => void kept.set(k, v) });
   try {
     const bindings = { guildId: "1", actor: { kind: "user" as const, userId: "2" }, get: async () => ({ n: 3 }), state: null };
     const code = "return plan([call('POST /channels/{channel}/messages', { path: { channel: '9' }, body: { content: String(discord.get('/x').n) } })])";
-    const first = await runSandboxed(code, bindings, RULE_SANDBOX_LIMITS, { cache: true });
+    const first = await runModule(await jsProgram(code), bindings, SANDBOX_LIMITS);
     assert.equal(kept.size, 1);
-    const second = await runSandboxed(code, bindings, RULE_SANDBOX_LIMITS, { cache: true });
+    const second = await runModule(await jsProgram(code), bindings, SANDBOX_LIMITS);
     assert.deepEqual(first.value, second.value);
     assert.equal((second.value as { steps: Array<{ body: { content: string } }> }).steps[0]!.body.content, "3");
   } finally {

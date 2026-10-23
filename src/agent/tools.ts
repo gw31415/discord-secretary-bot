@@ -14,7 +14,7 @@ import { ConvertOptionsSchema, convertImage, forModel, MathOptionsSchema, parseO
 import type { ConvertOptions, MathOptions } from "../media.ts";
 import { checkDecideInput, JUDGE_CODE_LINE, MAX_QUESTIONS, MAX_STATE_JSON as MAX_JUDGE_STATE_JSON } from "./decide.ts";
 import type { Decide } from "./decide.ts";
-import { AGENT_SANDBOX_LIMITS, RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
+import { runRuleCode, runSandboxed, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { SandboxBindings } from "../sandbox.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
@@ -268,7 +268,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   /** Runs code whose images go into the reply's box; a failed run leaves none behind. */
   const runDrawing = async (code: string) => {
     const made: string[] = [];
-    const result = await runSandboxed(code, drawingBindings(made), AGENT_SANDBOX_LIMITS);
+    const result = await runSandboxed(code, drawingBindings(made), SANDBOX_LIMITS);
     if (!result.ok) box?.discard(made);
     return { result, made: result.ok ? made : [] };
   };
@@ -343,7 +343,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
           ({ result, made } = await runDrawing(code));
           return result.ok ? null : `${result.error}${result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : ""}`;
         },
-        run: (code) => runSandboxed(code, trialBindings, AGENT_SANDBOX_LIMITS),
+        run: (code) => runSandboxed(code, trialBindings, SANDBOX_LIMITS),
         tools: coderTools,
         ...(box ? { canvas: true } : {}),
       });
@@ -450,7 +450,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       const stdin = params.stdin ?? wasmInput({ ...sandboxBindings, eventName: null, event: params.input ?? null, state: null });
       let run;
       try {
-        run = await execute(module, new TextEncoder().encode(stdin), hostCalls(bindings, AGENT_SANDBOX_LIMITS), AGENT_SANDBOX_LIMITS.wallTimeMs);
+        run = await execute(module, new TextEncoder().encode(stdin), hostCalls(bindings, SANDBOX_LIMITS), SANDBOX_LIMITS.wallTimeMs);
       } catch (e) {
         box?.discard(made);
         throw e;
@@ -614,7 +614,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask({ ...r, code_task: task }), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runSandboxed(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }, RULE_SANDBOX_LIMITS),
+          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
           tools,
         });
         return { ...rest, code };
@@ -882,7 +882,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       // Runs plan code; the error comes back as text so the coder can fix it.
       let planned: { drafts: StepDraft[]; rules: RuleProposal[] } | undefined;
       const runPlan = async (code: string): Promise<string | null> => {
-        const result = await runSandboxed(code, sandboxBindings, AGENT_SANDBOX_LIMITS);
+        const result = await runSandboxed(code, sandboxBindings, SANDBOX_LIMITS);
         if (!result.ok) {
           // A common mix-up: the rule's code (which reads `event`) passed as the plan's code.
           const hint = /\bevent\b/.test(code) ? `\nこのコードは今すぐ行う変更を作るコードで、event はありません(null)。イベントごとに動くコードは rules[].${codeField} に書いてください。` : "";
@@ -903,7 +903,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       let drafts: StepDraft[];
       let code = params.code;
       if (coder && params.code_task) {
-        code = (await writeCode(coder, "plan", params.code_task, { check: runPlan, run: (c) => runSandboxed(c, sandboxBindings, AGENT_SANDBOX_LIMITS), tools: coderTools })).code;
+        code = (await writeCode(coder, "plan", params.code_task, { check: runPlan, run: (c) => runSandboxed(c, sandboxBindings, SANDBOX_LIMITS), tools: coderTools })).code;
       } else if (code) {
         const problem = await runPlan(code);
         if (problem) throw new Error(problem);

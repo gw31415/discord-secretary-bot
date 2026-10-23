@@ -5,7 +5,7 @@ import { runSandboxed } from "../src/sandbox.ts";
 import type { SandboxBindings } from "../src/sandbox.ts";
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-const LIMITS = { wallTimeMs: 5_000, memoryBytes: 64 * 1024 * 1024, maxGets: 1 };
+const LIMITS = { wallTimeMs: 5_000, maxGets: 1 };
 
 function bindings(attached: Array<{ png: Buffer; name: string }>): SandboxBindings {
   return {

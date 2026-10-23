@@ -9,7 +9,7 @@ import { CATALOG } from "../plan/catalog.ts";
 import type { Planner } from "../plan/service.ts";
 import type { Plan, Step, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
-import { RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
+import { jsProgram, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
 import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
 import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
@@ -20,7 +20,8 @@ import { fetchImage, imageRefs } from "../agent/images.ts";
 import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { APIMessage } from "discord-api-types/v10";
 import type { Rule, RunOutcome } from "./types.ts";
-import { runWasm } from "../wasm/run.ts";
+import { runModule } from "../wasm/run.ts";
+import type { Program } from "../wasm/run.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
@@ -51,10 +52,9 @@ export interface RuleEngineDeps {
   /** Tells the owner their rule switched itself off. Failures are ignored. */
   notifyOwner?: (userId: string, content: string) => Promise<void>;
   log: (message: string, error?: unknown) => void;
-  run?: typeof runSandboxed;
+  run?: typeof runModule;
   /** Compiled uploaded modules, for rules that run one instead of JS. */
   wasm?: Pick<WasmRegistry, "compiled">;
-  runWasm?: typeof runWasm;
   /** The owner's judge model, for judge() and rank() in rule code. */
   decide?: (ownerId: string) => Decide | undefined;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -476,18 +476,19 @@ export class RuleEngine {
             },
           },
       };
+      let program: Program;
       if (rule.wasm) {
         if (!this.deps.wasm) throw new Error("Wasmのルールはここでは動かせません");
-        const module = await this.deps.wasm.compiled(rule.wasm);
-        // A module draws with its own libraries and hands over the image; it is re-encoded so only real images go out.
-        const image = async (data: Buffer, name: string) => {
-          const { data: out, format } = await convertImage(data, {});
-          return keep(out, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
-        };
-        result = await (this.deps.runWasm ?? runWasm)(module, { ...bindings, image }, RULE_SANDBOX_LIMITS);
+        program = { module: await this.deps.wasm.compiled(rule.wasm) };
       } else {
-        result = await (this.deps.run ?? runSandboxed)(rule.code, bindings, RULE_SANDBOX_LIMITS, { cache: true });
+        program = await jsProgram(rule.code);
       }
+      // A module draws with its own libraries and hands over the image; it is re-encoded so only real images go out.
+      const image = async (data: Buffer, name: string) => {
+        const { data: out, format } = await convertImage(data, {});
+        return keep(out, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+      };
+      result = await (this.deps.run ?? runModule)(program, { ...bindings, image }, SANDBOX_LIMITS);
     } catch (e) {
       return { kind: "error", error: (e instanceof Error ? e.message : String(e)).slice(0, MAX_ERROR), logs: [] };
     }
@@ -496,9 +497,8 @@ export class RuleEngine {
       return { kind: "error", error: `setState の値はJSONで${MAX_STATE_JSON}文字までです`, logs: result.logs };
     }
     const saved = { ...(result.state ? { state: result.state } : {}), ...(replied !== null ? { reply: replied } : {}), ...(images.length ? { images } : {}) };
-    const value = result.value as { steps?: unknown; rules?: unknown[] } | null | undefined;
+    const value = result.value as { steps?: unknown } | null | undefined;
     if (value === undefined || value === null) return { kind: "none", logs: result.logs, ...saved };
-    if (Array.isArray(value.rules) && value.rules.length > 0) return { kind: "error", error: "ルールの中からルールは作れません", logs: result.logs };
     if (!Array.isArray(value.steps)) return { kind: "error", error: "コードは plan([...]) を return してください", logs: result.logs };
     if (value.steps.length === 0) return { kind: "none", logs: result.logs, ...saved };
     return { kind: "steps", drafts: value.steps as StepDraft[], logs: result.logs, ...saved };
