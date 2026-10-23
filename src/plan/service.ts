@@ -15,7 +15,7 @@ import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
 import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
-import { batchKey, batchMax, batchOutcome, batchRequest, referencedSteps } from "./batch.ts";
+import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
 import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
 import { isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
@@ -745,22 +745,23 @@ export class Planner {
       step,
       resolved: { ...step, pathParams: resolveRefs(step.pathParams, results), ...(step.body !== undefined ? { body: resolveRefs(step.body, results) } : {}) } as Step,
     });
-    const first = resolve(remaining[i]!);
     const now = this.deps.now();
-    const key = batchKey(first.resolved, referenced, now);
-    const group = [first];
-    if (!key) return group;
-    while (group.length < batchMax(first.resolved) && i + group.length < remaining.length) {
+    const group = [resolve(remaining[i]!)];
+    const keys = [batchKey(group[0]!.resolved, referenced, now)];
+    if (keys[0] === null) return group;
+    for (let j = i + 1; j < remaining.length; j++) {
       let next: { step: Step; resolved: Step };
       try {
-        next = resolve(remaining[i + group.length]!);
+        next = resolve(remaining[j]!);
       } catch {
         break;
       }
-      if (batchKey(next.resolved, referenced, now) !== key) break;
+      const key = batchKey(next.resolved, referenced, now);
+      if (key !== keys[0]) break;
       group.push(next);
+      keys.push(key);
     }
-    return group;
+    return group.slice(0, batchRun(group.map((g) => g.resolved), keys));
   }
 
   /** A step's checks right before it is sent: permissions, a rule's allow list on the target as it is now, and the snapshot. */
@@ -789,7 +790,7 @@ export class Planner {
 
   /** Several steps in the one request Discord has for them. */
   async #sendBatch(plan: Plan, steps: Step[]): Promise<unknown> {
-    const { method, path, body } = batchRequest(steps, plan.guildId);
+    const { method, path, body } = await batchRequest(steps, plan.guildId, (path) => this.#get(path));
     const options = { reason: this.#reason(plan), body };
     return method === "PATCH" ? this.#rest.patch(path, options) : this.#rest.post(path, options);
   }

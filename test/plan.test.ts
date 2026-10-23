@@ -166,7 +166,7 @@ function fakeDiscord() {
       followUp: async (_a: string, _t: string, body: any) => void replies.push({ kind: "followUp", body }),
     },
   } as unknown as API;
-  return { api, calls, replies, channels, members, messages, failures };
+  return { api, calls, replies, channels, members, messages, roles, failures };
 }
 
 function setup(now = { t: Date.parse("2026-10-21T00:00:00Z") }) {
@@ -983,4 +983,65 @@ test("a step whose result a later step uses is never merged", () => {
   assert.notEqual(batchKey(steps[0]!, referenced, 0), null);
   assert.equal(batchKey(steps[1]!, referenced, 0), null);
   assert.equal(batchKey(steps[2]!, referenced, 0), null);
+});
+
+function addRoles(t: { roles: any[]; cache: GuildCache }, ...ids: string[]): void {
+  for (const id of ids) {
+    t.roles.push({ id, name: `r${id}`, permissions: "0", position: 1 });
+    t.cache.guild!.roles.set(id, { id, permissions: 0n, position: 1 });
+  }
+}
+
+test("several role changes of one member become one PATCH with the whole list, read right before", async () => {
+  const t = setup();
+  const { planner, calls, members } = t;
+  addRoles(t, "900", "901");
+  members["3"].roles = ["900"];
+  const rule = { ...RULE, allow: [ANY("PUT /guilds/{guild}/members/{user}/roles/{role}"), ANY("DELETE /guilds/{guild}/members/{user}/roles/{role}")] };
+  const done = await planner.runForRule({
+    guildId: GUILD, ownerId: "1", rule,
+    drafts: [
+      { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } },
+      { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: "901" } },
+      { op: "DELETE /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: "900" } },
+    ],
+  });
+  assert.equal(done.status, "succeeded");
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`PATCH /guilds/${GUILD}/members/3`]);
+  assert.deepEqual(calls[0]!.options!.body, { roles: [MOD_ROLE, "901"] });
+});
+
+test("two role changes are sent one by one: reading the list first would not save a request", async () => {
+  const t = setup();
+  const { planner, calls } = t;
+  addRoles(t, "901");
+  const rule = { ...RULE, allow: [ANY("PUT /guilds/{guild}/members/{user}/roles/{role}")] };
+  await planner.runForRule({
+    guildId: GUILD, ownerId: "1", rule,
+    drafts: [MOD_ROLE, "901"].map((role) => ({ op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role } })),
+  });
+  assert.deepEqual(calls.map((c) => c.method), ["PUT", "PUT"]);
+});
+
+test("overwrites of one channel go in one PATCH; changes to one resource are merged in order", async () => {
+  const { planner, calls, channels, members } = setup();
+  members["11"] = { roles: [], nick: null, user: { id: "11", username: "eleven" } };
+  channels["10"].permission_overwrites = [{ id: "3", type: 1, allow: "0", deny: "2048" }];
+  const rule = { ...RULE, allow: [ANY("PUT /channels/{channel}/permissions/{overwrite}"), ANY("DELETE /channels/{channel}/permissions/{overwrite}"), ANY("PATCH /channels/{channel}"), ANY("PATCH /guilds/{guild}/members/{user}")] };
+  const done = await planner.runForRule({
+    guildId: GUILD, ownerId: "1", rule,
+    drafts: [
+      { op: "PUT /channels/{channel}/permissions/{overwrite}", path: { channel: "10", overwrite: MOD_ROLE }, body: { type: 0, allow: "1024" } },
+      { op: "PUT /channels/{channel}/permissions/{overwrite}", path: { channel: "10", overwrite: GUILD }, body: { type: 0, deny: "1024" } },
+      { op: "DELETE /channels/{channel}/permissions/{overwrite}", path: { channel: "10", overwrite: "3" } },
+      { op: "PATCH /channels/{channel}", path: { channel: "11" }, body: { name: "a", topic: "x" } },
+      { op: "PATCH /channels/{channel}", path: { channel: "11" }, body: { name: "b" } },
+      // Same id as a channel above, but a member: never in the same request.
+      { op: "PATCH /guilds/{guild}/members/{user}", path: { user: "11" }, body: { nick: "n" } },
+    ],
+  });
+  assert.equal(done.status, "succeeded");
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["PATCH /channels/10", "PATCH /channels/11", `PATCH /guilds/${GUILD}/members/11`]);
+  assert.deepEqual(calls[0]!.options!.body, { permission_overwrites: [{ id: MOD_ROLE, type: 0, allow: "1024", deny: "0" }, { id: GUILD, type: 0, allow: "0", deny: "1024" }] });
+  assert.deepEqual(calls[1]!.options!.body, { name: "b", topic: "x" });
 });
