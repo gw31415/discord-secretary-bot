@@ -43,6 +43,11 @@ export interface PlannerDeps {
   revise?: (input: ReviseInput) => Promise<void>;
   /** Explains plan code from the code alone, paid for by the actor. */
   summarize?: (code: string, actorId: string) => Promise<string | null>;
+  /**
+   * A step is about to be sent. The gateway can report its event before the
+   * REST response comes back, so event rules mark the write here as well.
+   */
+  beforeWrite?: (plan: Plan, step: Step) => void;
   /** A step went through; event rules use this to tell the bot's own changes from others'. */
   onWrite?: (plan: Plan, step: Step, response: unknown) => void;
   /** Event rules proposed together with a plan. Absent means plans cannot carry rules. */
@@ -815,6 +820,7 @@ export class Planner {
             lastDm = this.deps.now();
           }
           store.markStepInFlight(plan.id, step.id, { pathParams: resolved.pathParams, body: resolved.body });
+          this.deps.beforeWrite?.(plan, resolved);
           const response = await this.#send(plan, resolved);
           const resultId = (response as { id?: string } | undefined)?.id ?? null;
           store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });

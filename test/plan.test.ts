@@ -543,6 +543,7 @@ const RULE = {
 test("a rule's plan runs without a dialog, as its owner, inside its allow list", async () => {
   const { planner, store, calls, replies } = setup();
   const written: string[] = [];
+  planner.deps.beforeWrite = (_plan, step) => void written.push(`before ${step.op} (${calls.length} sent)`);
   planner.deps.onWrite = (_plan, step) => void written.push(step.op);
   const done = await planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "ようこそ" } }] });
   assert.equal(done.status, "succeeded");
@@ -552,7 +553,8 @@ test("a rule's plan runs without a dialog, as its owner, inside its allow list",
   const row = store.getPlan(done.plan.id)!;
   assert.equal(row.plan.actor.via, "rule");
   assert.equal(row.approvedBy, "1");
-  assert.deepEqual(written, ["POST /channels/{channel}/messages"]);
+  // Marked before it is sent too, since the gateway may report it before the response arrives.
+  assert.deepEqual(written, ["before POST /channels/{channel}/messages (0 sent)", "POST /channels/{channel}/messages"]);
 });
 
 test("a rule's steps outside its allow list, or past its count, are rejected before anything runs", async () => {
