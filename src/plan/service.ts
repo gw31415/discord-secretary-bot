@@ -336,13 +336,15 @@ export class Planner {
     const id = randomBytes(6).toString("hex");
     const steps = normalizeSteps(input.drafts, input.guildId, id);
     const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
-    const targets = await this.#targets(input.guildId, steps, input.rule.allow);
-    const channels = await this.#channelStates(steps, input.rule.allow);
+    const [targets, channels, preconditions] = await Promise.all([
+      this.#targets(input.guildId, steps, input.rule.allow),
+      this.#channelStates(steps, input.rule.allow),
+      this.#preconditions(input.guildId, steps),
+    ]);
     const files = attachmentsFor(steps, [input.images]);
     const problems = [...allowProblems(steps, input.rule.allow, targets, undefined, channels), ...steps.flatMap((s) => permissionProblems(s, ctx)), ...files.problems];
     if (problems.length > 0) throw new PlanRejected(problems);
 
-    const preconditions = await this.#preconditions(input.guildId, steps);
     const labels = await this.#labels(input.guildId, guild, [], input.ownerId);
     const createdAt = new Date(this.deps.now()).toISOString();
     const draft: Omit<Plan, "hash"> = {
@@ -361,7 +363,8 @@ export class Planner {
     const plan: Plan = { ...draft, hash: planHash(draft) };
     this.deps.store.insertPlan(plan, "approved");
     this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op), event: input.rule.eventId }, plan.id, input.rule.id);
-    await this.execute(plan.id);
+    // The preconditions were read from REST a moment ago, so they are not read again.
+    await this.execute(plan.id, { fresh: true });
     const row = this.deps.store.getPlan(plan.id)!;
     return { plan, status: row.status, reason: row.reason };
   }
@@ -700,8 +703,8 @@ export class Planner {
 
   async #freshState(plan: Plan, steps: Step[]): Promise<GuildState> {
     const g = plan.guildId;
-    const guild = (await this.#rest.get(`/guilds/${g}`)) as APIGuild;
-    const channels = (await this.#rest.get(`/guilds/${g}/channels`)) as APIChannel[];
+    // Independent reads go out together: run one after another they made up most of a rule's delay.
+    const [guild, channels] = (await Promise.all([this.#rest.get(`/guilds/${g}`), this.#rest.get(`/guilds/${g}/channels`)])) as [APIGuild, APIChannel[]];
     const state: GuildState = {
       id: g,
       ownerId: guild.owner_id,
@@ -714,8 +717,7 @@ export class Planner {
       const param = specOf(step).hierarchy?.member;
       if (param && !isRef(step.pathParams[param])) memberIds.add(String(step.pathParams[param]));
     }
-    for (const id of memberIds) await this.#addMember(state, id);
-    for (const step of steps) await this.#addChannel(state, step);
+    await Promise.all([...[...memberIds].map((id) => this.#addMember(state, id)), ...steps.map((step) => this.#addChannel(state, step))]);
     return state;
   }
 
@@ -777,8 +779,11 @@ export class Planner {
     }
   }
 
-  /** Runs an approved plan. Preconditions and permissions are re-read from REST first. */
-  async execute(planId: string): Promise<void> {
+  /**
+   * Runs an approved plan. Preconditions and permissions are re-read from REST
+   * first; `fresh` skips the precondition re-read for a plan proposed just now.
+   */
+  async execute(planId: string, opts: { fresh?: boolean } = {}): Promise<void> {
     const { store } = this.deps;
     const row = store.getPlan(planId);
     if (!row || !store.transitionPlan(planId, ["approved"], "executing")) return;
@@ -792,7 +797,7 @@ export class Planner {
       let current: Step | undefined;
       try {
         const state = await this.#freshState(plan, remaining);
-        await this.#checkPreconditions(plan, remaining, results);
+        if (!opts.fresh) await this.#checkPreconditions(plan, remaining, results);
         const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }));
         if (problems.length > 0) throw new Aborted(`権限が足りなくなりました: ${problems.join(" / ")}`);
 
@@ -804,13 +809,14 @@ export class Planner {
           const spec = specOf(resolved);
           await this.#addChannel(state, resolved);
           const key = spec.target?.(resolved.pathParams, plan.guildId);
-          const before = key ? await this.resource(plan.guildId, key) : null;
+          const [before, channels] = await Promise.all([
+            key ? this.resource(plan.guildId, key) : null,
+            plan.rule ? this.#channelStates([resolved], plan.rule.allow) : undefined,
+          ]);
           const stepProblems = [
             ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
             // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
-            ...(plan.rule
-              ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], await this.#channelStates([resolved], plan.rule.allow))
-              : []),
+            ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], channels) : []),
           ];
           if (stepProblems.length > 0) throw new Error(stepProblems.join(" / "));
           if (key) store.saveSnapshot(plan.id, step.id, key, before);
