@@ -24,6 +24,7 @@ import type { WidenRequest } from "./discord/widen.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
 import type { Rule, RuleRun } from "./rules/types.ts";
+import { SETTINGS_COMMAND_ID } from "./discord/commands.ts";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -98,8 +99,11 @@ export type Decision =
   | { kind: "reply"; wake: boolean }
   | { kind: "judge"; judgeUserId: string };
 
-export const SETUP_NOTICE =
-  "このBotと話すには、サーバーで `/settings` を実行して、APIキーと言語モデルを設定してください。";
+/** The DM to someone who has not set up; with the command's id, /settings is a link that opens it. */
+export function setupNotice(settingsCommandId?: string): string {
+  const command = settingsCommandId ? `</settings:${settingsCommandId}>` : "`/settings`";
+  return `このBotと話すには、サーバーで ${command} を実行して、APIキーと言語モデルを設定してください。`;
+}
 
 interface ChannelContext {
   /** Every recent message, oldest first, so the model can follow the conversation. */
@@ -200,7 +204,7 @@ export class Conversations {
         const until = Math.max(conv?.awakeUntil ?? 0, this.deps.now() + SESSION_MS);
         this.#notified.set(`${message.channel_id}:${message.author.id}`, until);
         // A refused DM (privacy settings) is ignored by design.
-        await this.deps.sendDm(message.author.id, SETUP_NOTICE).catch(() => undefined);
+        await this.deps.sendDm(message.author.id, setupNotice(this.deps.store.getMeta(SETTINGS_COMMAND_ID))).catch(() => undefined);
         return;
       }
       case "judge": {

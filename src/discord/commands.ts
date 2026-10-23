@@ -27,14 +27,23 @@ export function guildCommands(store: Store, guildId: string): RESTPutAPIApplicat
   return store.enabledRules(guildId, "COMMAND").flatMap((r) => (r.trigger.command ? [commandJson(r.trigger.command)] : []));
 }
 
+/** Where /settings's id is kept, for messages that link to the command (</settings:id>). */
+export const SETTINGS_COMMAND_ID = "command_id:settings";
+
 /** /settings, the same in every server; rules are one of its sections. */
 export async function registerGlobalCommands(api: API, store: Store, applicationId: string): Promise<boolean> {
   const hash = createHash("sha256").update(JSON.stringify(COMMANDS)).digest("hex");
   const key = "commands_hash:global";
-  if (store.getMeta(key) === hash) return false;
-  await api.applicationCommands.bulkOverwriteGlobalCommands(applicationId, COMMANDS);
+  const unchanged = store.getMeta(key) === hash;
+  if (unchanged && store.getMeta(SETTINGS_COMMAND_ID)) return false;
+  // Reading the commands back costs no creation quota, so a missing id is fetched.
+  const registered = unchanged
+    ? await api.applicationCommands.getGlobalCommands(applicationId)
+    : await api.applicationCommands.bulkOverwriteGlobalCommands(applicationId, COMMANDS);
+  const settings = registered.find((c) => c.name === "settings");
+  if (settings) store.setMeta(SETTINGS_COMMAND_ID, settings.id);
   store.setMeta(key, hash);
-  return true;
+  return !unchanged;
 }
 
 export async function registerCommands(api: API, store: Store, applicationId: string, guildId: string): Promise<boolean> {
