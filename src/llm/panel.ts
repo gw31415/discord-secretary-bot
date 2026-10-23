@@ -12,6 +12,7 @@ import { isWebTool, WEB_TOOLS, webToolWarning } from "../agent/web.ts";
 import type { WebTool } from "../agent/web.ts";
 import { findModel, isClassifier, judgesOnly, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
+import { ruleCustomId } from "../rules/panel.ts";
 
 export type { ModelRole };
 
@@ -117,15 +118,17 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
     },
   );
   if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
-  body.push({
-    type: ComponentType.ActionRow,
-    components: [
-      ...(page === "home" ? [] : [navButton("home", "← 設定のトップへ", page)]),
-      navButton("keys", "APIキーの管理", page),
-      navButton("models", "モデルの選択", page),
-      navButton("advanced", "応用設定", page),
-    ],
-  });
+  // At most three buttons a row; the rules open their own panel in this message.
+  body.push(
+    { type: ComponentType.ActionRow, components: [navButton("keys", "APIキーの管理", page), navButton("models", "モデルの選択", page), navButton("advanced", "応用設定", page)] },
+    {
+      type: ComponentType.ActionRow,
+      components: [
+        { type: ComponentType.Button, custom_id: ruleCustomId("home"), label: "ルール", style: ButtonStyle.Primary },
+        ...(page === "home" ? [] : [navButton("home", "← 設定のトップへ", page)]),
+      ],
+    },
+  );
   return {
     flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
     components: [{ type: ComponentType.Container, components: body }],
