@@ -203,3 +203,35 @@ test("a .wasm attached to a message is pointed out to the agent", async () => {
   const line = formatMessage({ id: "1", timestamp: "2026-10-23T05:00:00Z", author: { id: "2", username: "a" }, content: "これを /hello にしたい", attachments: [{ id: "3", filename: "hello.wasm", size: 2048, url: "", proxy_url: "" }], embeds: [] } as never);
   assert.match(line, /hello\.wasm\(Wasmモジュール 2KB、register_wasm で登録できる\)/);
 });
+
+test("run_wasm runs an attached or kept module once, read-only, and points steps at propose_plan", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const step = { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "hi" } };
+  const bytes = printer(JSON.stringify({ steps: [step] }));
+  const message = { id: "5", author: { id: "9" }, attachments: [{ id: "a", filename: "post.wasm", size: bytes.length, url: "https://cdn/post.wasm" }] };
+  const reader = { guild: { id: "1" }, scope: { speakerId: "1", channelId: "10" }, get: async (route: string) => (route === "/channels/10/messages/5" ? message : null) } as never;
+  const loaded: string[] = [];
+  const tools = readTools(reader, {
+    images: false,
+    fetch: (async () => new Response(bytes)) as never,
+    rules: {
+      list: () => [],
+      runs: () => null,
+      wasm: {
+        list: () => [],
+        upload: async () => { throw new Error("not here"); },
+        load: async (ref: string) => (loaded.push(ref), { module: await WebAssembly.compile(bytes), name: "post", sha256: "ab".repeat(32) }),
+      },
+    },
+  });
+  const run = tools.find((t) => t.name === "run_wasm")!;
+  const fromAttachment = await run.execute("t", { message_id: "5" });
+  const shown = (fromAttachment.content[0] as { text: string }).text;
+  assert.match(shown, /post\.wasm.*終了コード 0/);
+  assert.match(shown, /"op":"POST \/channels\/\{channel\}\/messages"/);
+  assert.match(shown, /変更の提案が 1 件/);
+  const fromModule = await run.execute("t", { module: "post" });
+  assert.match((fromModule.content[0] as { text: string }).text, /post\(abababababab\) 終了コード 0/);
+  assert.deepEqual(loaded, ["post"]);
+  await assert.rejects(run.execute("t", {}), /message_id か module/);
+});

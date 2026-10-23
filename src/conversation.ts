@@ -70,6 +70,8 @@ export interface ConversationDeps {
     wasm?: {
       list: (ownerId: string) => WasmModule[];
       upload: (ownerId: string, name: string, bytes: Uint8Array) => Promise<{ module: WasmModule; replaced: number }>;
+      /** A module the person may run: their own by name, or one from someone in the server by sha256. */
+      load: (ownerId: string, guildId: string, ref: string) => Promise<{ module: WebAssembly.Module; name: string; sha256: string }>;
     };
   };
   /** Asks the speaker, with buttons, to let one reply read up to their own permissions. Absent keeps reads to the channel's audience. */
@@ -527,7 +529,13 @@ export class Conversations {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
               runs: (ruleId, limit) => this.deps.rules!.runs(input.guildId, speaker, ruleId, reader.shareable(), limit),
               ...(this.deps.rules.wasm
-                ? { wasm: { list: () => this.deps.rules!.wasm!.list(speaker), upload: (name: string, bytes: Uint8Array) => this.deps.rules!.wasm!.upload(speaker, name, bytes) } }
+                ? {
+                    wasm: {
+                      list: () => this.deps.rules!.wasm!.list(speaker),
+                      upload: (name: string, bytes: Uint8Array) => this.deps.rules!.wasm!.upload(speaker, name, bytes),
+                      load: (ref: string) => this.deps.rules!.wasm!.load(speaker, input.guildId, ref),
+                    },
+                  }
                 : {}),
             }
           : undefined,
