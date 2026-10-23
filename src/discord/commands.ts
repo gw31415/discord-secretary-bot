@@ -16,7 +16,7 @@ const IN_SERVERS = { contexts: [InteractionContextType.Guild], integration_types
 export const COMMANDS: RESTPutAPIApplicationCommandsJSONBody = [
   {
     name: "settings",
-    description: "あなたの設定(APIキー・使うモデル・Webツール・読み取りの許可)とルールの管理を開きます",
+    description: "あなたの設定(APIキー・使うモデル・Webツール・読み取りの許可)とルール・コマンドの管理を開きます",
     type: ApplicationCommandType.ChatInput,
     ...IN_SERVERS,
   },
@@ -46,12 +46,30 @@ export async function registerGlobalCommands(api: API, store: Store, application
   return !unchanged;
 }
 
+/** Where a server's guild command ids are kept (JSON name→id), for links in the commands list. */
+export function guildCommandIdsKey(guildId: string): string {
+  return `command_ids:${guildId}`;
+}
+
 export async function registerCommands(api: API, store: Store, applicationId: string, guildId: string): Promise<boolean> {
   const commands = guildCommands(store, guildId);
   const hash = createHash("sha256").update(JSON.stringify({ guildId, commands })).digest("hex");
   const key = `commands_hash:${guildId}`;
-  if (store.getMeta(key) === hash) return false;
-  await api.applicationCommands.bulkOverwriteGuildCommands(applicationId, guildId, commands);
+  const unchanged = store.getMeta(key) === hash;
+  if (unchanged && store.getMeta(guildCommandIdsKey(guildId))) return false;
+  const registered = unchanged
+    ? await api.applicationCommands.getGuildCommands(applicationId, guildId)
+    : await api.applicationCommands.bulkOverwriteGuildCommands(applicationId, guildId, commands);
+  store.setMeta(guildCommandIdsKey(guildId), JSON.stringify(Object.fromEntries(registered.map((c) => [c.name, c.id]))));
   store.setMeta(key, hash);
-  return true;
+  return !unchanged;
+}
+
+/** The ids registered for a server's guild commands; empty until the first registration. */
+export function guildCommandIds(store: Store, guildId: string): Record<string, string> {
+  try {
+    return JSON.parse(store.getMeta(guildCommandIdsKey(guildId)) ?? "{}") as Record<string, string>;
+  } catch {
+    return {};
+  }
 }

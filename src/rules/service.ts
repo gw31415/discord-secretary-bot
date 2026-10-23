@@ -1,11 +1,12 @@
 import { toUploadable } from "../media.ts";
 import type { API } from "@discordjs/core";
-import { InteractionType, MessageFlags } from "discord-api-types/v10";
+import { InteractionType, MessageFlags, PermissionFlagsBits } from "discord-api-types/v10";
 import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
 import type { CommandReport } from "./engine.ts";
 import type { APIInteraction, APIMessage } from "discord-api-types/v10";
 import type { Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
+import { guildCommandIds } from "../discord/commands.ts";
 import type { GuildState } from "../discord/permissions.ts";
 import type { Reader } from "../discord/reader.ts";
 import { CATALOG } from "../plan/catalog.ts";
@@ -19,7 +20,7 @@ import type { RuleAdmin } from "./admin.ts";
 import { allowProblems } from "./allow.ts";
 import { attachmentsFor } from "../plan/files.ts";
 import type { RuleEngine } from "./engine.ts";
-import { auditView, DELETE_CHOICE, detailView, homeView, parseRuleCustomId, plansView, RULE_PAGES } from "./panel.ts";
+import { auditView, commandsView, commandView, DELETE_CHOICE, detailView, homeView, parseRuleCustomId, plansView, RULE_PAGES } from "./panel.ts";
 import type { RulePage } from "./panel.ts";
 import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
@@ -408,6 +409,31 @@ export class RuleService {
     );
   }
 
+  /**
+   * The server's enabled commands the presser may run (Discord sends their
+   * permissions in this channel with the interaction), and their own commands.
+   */
+  #commands(guildId: string, userId: string, permissions: string, notice?: string): Rendered {
+    const bits = BigInt(permissions);
+    const canRun = (r: Rule) => {
+      const needed = permissionBits(r.trigger.command!.permissions);
+      return (bits & PermissionFlagsBits.Administrator) !== 0n || (bits & needed) === needed;
+    };
+    const rules = this.deps.store
+      .listRules(guildId)
+      .filter((r) => r.trigger.command && triggerEvents(r.trigger).includes("COMMAND") && (r.ownerId === userId || (r.enabled && canRun(r))))
+      .sort((a, b) => a.trigger.command!.name.localeCompare(b.trigger.command!.name));
+    return commandsView({ rules, userId, ids: guildCommandIds(this.deps.store, guildId), ...(notice ? { notice } : {}) });
+  }
+
+  /** Only the owner manages a command here; the rules panel covers the rest. */
+  #command(guildId: string, userId: string, ruleId: string, extra: { notice?: string; confirmDelete?: boolean } = {}): Rendered {
+    const rule = this.deps.admin.get(guildId, userId, ruleId);
+    if (rule.ownerId !== userId) throw new AdminDenied("コマンドを管理できるのは作成者だけです");
+    if (!rule.trigger.command) throw new AdminDenied("このルールはコマンドではありません");
+    return commandView({ rule, ids: guildCommandIds(this.deps.store, guildId), ...extra });
+  }
+
   async handleInteraction(interaction: APIInteraction): Promise<boolean> {
     if (interaction.type !== InteractionType.MessageComponent && interaction.type !== InteractionType.ModalSubmit) return false;
     const parsed = parseRuleCustomId(interaction.data.custom_id);
@@ -423,6 +449,30 @@ export class RuleService {
 
     try {
       switch (parsed.action) {
+        case "commands":
+          await update(this.#commands(guildId, userId, interaction.member?.permissions ?? "0"));
+          return true;
+        case "cmd": {
+          const values = "values" in interaction.data ? interaction.data.values : [];
+          await update(this.#command(guildId, userId, values[0] ?? parsed.arg));
+          return true;
+        }
+        case "cmdvis": {
+          const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
+          const label = VISIBILITY_CHOICES.find((o) => o.value === rule.trigger.command?.visibility)?.label ?? "";
+          await update(this.#command(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
+          return true;
+        }
+        case "cmddel":
+          await update(this.#command(guildId, userId, parsed.arg, { confirmDelete: true }));
+          return true;
+        case "cmddel2": {
+          const rule = this.deps.admin.get(guildId, userId, parsed.arg);
+          this.deps.admin.remove(guildId, userId, rule.id);
+          await update(this.#commands(guildId, userId, interaction.member?.permissions ?? "0", `コマンド /${rule.trigger.command?.name ?? ""} とルール「${rule.name}」を削除しました`));
+          return true;
+        }
         case "home":
           await update(this.#home(guildId, userId));
           return true;

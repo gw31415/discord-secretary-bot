@@ -20,12 +20,14 @@ const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用の
 export type RuleAction =
   | "home" | "open" | "enable" | "disable" | "dry" | "delete" | "delete2" | "code"
   | "plans" | "audit" | "halt" | "resume" | "clearstate" | "visibility"
-  | "allow" | "source" | "runs" | "view";
+  | "allow" | "source" | "runs" | "view"
+  | "commands" | "cmd" | "cmdvis" | "cmddel" | "cmddel2";
 
 const ACTIONS = new Set<RuleAction>([
   "home", "open", "enable", "disable", "dry", "delete", "delete2", "code",
   "plans", "audit", "halt", "resume", "clearstate", "visibility",
   "allow", "source", "runs", "view",
+  "commands", "cmd", "cmdvis", "cmddel", "cmddel2",
 ]);
 
 /** A rule's panel opens on its summary; what it may do, its code and its runs are a button away. */
@@ -340,4 +342,88 @@ export function auditView(entries: AuditEntry[], all: boolean): Rendered {
     [`### 監査ログ\n${all ? "このサーバーの最近の記録です。" : "あなたの操作の記録です。全件を見るには監査ログ表示の権限が必要です。"}`, lines.join("\n") || "ありません"],
     [row([button(ruleCustomId("home"), "戻る")])],
   );
+}
+
+// --- Commands -------------------------------------------------------------
+// The commands section of /settings: the server's guild commands (each one a
+// rule's), every one the presser may run as a link that runs it, and for their
+// own commands a page to manage them.
+
+export interface CommandsInput {
+  /** Enabled commands the presser may run, and their own commands, enabled or not. */
+  rules: Rule[];
+  userId: string;
+  /** Registered ids by command name, for </name:id> links. */
+  ids: Record<string, string>;
+  notice?: string;
+}
+
+function commandLink(name: string, ids: Record<string, string>): string {
+  return ids[name] ? `</${name}:${ids[name]}>` : `\`/${name}\``;
+}
+
+export function commandsView(input: CommandsInput): Rendered {
+  const lines = input.rules.map((r) => {
+    const c = r.trigger.command!;
+    const status = r.enabled ? commandLink(c.name, input.ids) : `\`/${c.name}\` ⏸️ 停止中`;
+    const owner = r.ownerId === input.userId ? "あなた" : `<@${r.ownerId}>`;
+    return `${status} ${c.description}\n-# 作成: ${owner}${c.permissions?.length ? ` · 必要な権限: ${c.permissions.join(", ")}` : ""}`;
+  });
+  const texts = ["## コマンド", lines.length ? lines.join("\n") : "使えるコマンドはまだありません。会話でBotに頼むと作れます。"];
+  if (input.notice) texts.push(`-# ${input.notice}`);
+  const own = input.rules.filter((r) => r.ownerId === input.userId);
+  const rows: APIComponentInContainer[] = [];
+  if (own.length > 0) {
+    rows.push({
+      type: ComponentType.ActionRow,
+      components: [{
+        type: ComponentType.StringSelect,
+        custom_id: ruleCustomId("cmd"),
+        placeholder: `自分のコマンドを開く(${own.length}件)`,
+        options: own.slice(0, 25).map((r) => ({
+          label: clip(`${r.enabled ? "🟢" : "⏸️"} /${r.trigger.command!.name}`, 100),
+          value: r.id,
+          description: clip(r.trigger.command!.description, 100),
+        })),
+      }],
+    });
+  }
+  rows.push(row([button(SETTINGS_HOME_ID, "← 設定のトップへ")]));
+  return container(texts, rows);
+}
+
+export interface CommandInput {
+  rule: Rule;
+  ids: Record<string, string>;
+  notice?: string;
+  confirmDelete?: boolean;
+}
+
+/** One of the presser's own commands: who sees its replies, its rule, and deleting it with the rule. */
+export function commandView(input: CommandInput): Rendered {
+  const { rule } = input;
+  const c = rule.trigger.command!;
+  const options = (c.options ?? []).map((o) => `- \`${o.name}\`${o.required ? "(必須)" : ""}: ${o.description}`);
+  const texts = [
+    `## ${rule.enabled ? commandLink(c.name, input.ids) : `/${c.name}`}`,
+    [c.description, rule.enabled ? "" : "⏸️ 停止中(ルールを有効にすると使えます)", c.permissions?.length ? `必要な権限: ${c.permissions.join(", ")}` : ""].filter(Boolean).join("\n"),
+    options.length ? `**オプション**\n${options.join("\n")}` : "",
+    `関連ルール: 「${rule.name}」`,
+  ];
+  if (input.notice) texts.push(`-# ${input.notice}`);
+  if (input.confirmDelete) {
+    texts.push(`⚠️ コマンド /${c.name} と関連ルール「${rule.name}」を削除します。実行履歴と監査ログは残ります。`);
+    return container(texts, [row([button(ruleCustomId("cmddel2", rule.id), "削除する", ButtonStyle.Danger), button(ruleCustomId("cmd", rule.id), "やめる")])]);
+  }
+  return container(texts, [
+    {
+      type: ComponentType.ActionRow,
+      components: [{
+        type: ComponentType.StringSelect,
+        custom_id: ruleCustomId("cmdvis", rule.id),
+        options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (c.visibility ?? "auto") === o.value })),
+      }],
+    },
+    row([button(ruleCustomId("open", rule.id), "関連ルールを見る"), button(ruleCustomId("cmddel", rule.id), "コマンドを削除", ButtonStyle.Danger), button(ruleCustomId("commands"), "← コマンド一覧")]),
+  ]);
 }

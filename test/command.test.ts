@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { ApplicationCommandOptionType, ApplicationCommandType, InteractionType, PermissionFlagsBits as P } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
-import { COMMANDS, guildCommands, registerCommands, registerGlobalCommands, SETTINGS_COMMAND_ID } from "../src/discord/commands.ts";
+import { COMMANDS, guildCommands, registerCommands, registerGlobalCommands, SETTINGS_COMMAND_ID, guildCommandIdsKey } from "../src/discord/commands.ts";
 import { RuleAdmin } from "../src/rules/admin.ts";
 import { commandEvent, commandJson, commandProblems, sampleCommandEvent } from "../src/rules/command.ts";
 import type { CommandSpec } from "../src/rules/command.ts";
@@ -105,7 +105,7 @@ function world(visibilityScore?: (input: any) => Promise<number | null>) {
       updateMessage: async (_id: string, _t: string, body: unknown) => void calls.push(["update", body]),
       deleteReply: async () => void calls.push(["delete", null]),
     },
-    applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]), bulkOverwriteGlobalCommands: async (_a: string, body: unknown) => (calls.push(["global", body]), [{ name: "settings", id: "900" }]), getGlobalCommands: async () => (calls.push(["global-read", null]), [{ name: "settings", id: "901" }]) },
+    applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => (calls.push(["register", body]), [] as Array<{ name: string; id: string }>), getGuildCommands: async () => [], bulkOverwriteGlobalCommands: async (_a: string, body: unknown) => (calls.push(["global", body]), [{ name: "settings", id: "900" }]), getGlobalCommands: async () => (calls.push(["global-read", null]), [{ name: "settings", id: "901" }]) },
   } as never;
   const service = new RuleService({ api, store, caches, admin, engine, selfId: () => SELF, now: () => 1_000_000, log: () => {}, ...(visibilityScore ? { visibilityScore } : {}) });
   const definition: RuleDefinition = {
@@ -293,4 +293,43 @@ test("a rule's panel opens on a short summary; allow, code and runs are pages in
   assert.match(JSON.stringify(w.calls.at(-1)![1]), /最近の実行/);
   await w.service.handleInteraction(press("view", ["delete"]));
   assert.match(JSON.stringify(w.calls.at(-1)![1]), /本当に削除/);
+});
+
+test("the commands section lists every command the presser may run as a link, and the owner manages theirs", async () => {
+  const w = world();
+  const mine = w.admin.save(GUILD, "1", w.definition);
+  const gated = w.admin.save(GUILD, "2", { ...w.definition, name: "掃除", trigger: { event: "COMMAND", command: { ...SPEC, name: "cleanup", description: "掃除する", permissions: ["ManageChannels"] } } });
+  w.store.setMeta(guildCommandIdsKey(GUILD), JSON.stringify({ announce: "501", cleanup: "502" }));
+  const press = (userId: string, custom: string, permissions: bigint, values?: string[]) => ({
+    id: "i4", token: "tok", application_id: "app", type: InteractionType.MessageComponent, guild_id: GUILD,
+    member: { user: { id: userId }, roles: [], permissions: permissions.toString() },
+    data: { custom_id: custom, component_type: values ? 3 : 2, ...(values ? { values } : {}) },
+  }) as never;
+  const last = () => JSON.stringify(w.calls.at(-1)![1]);
+
+  // Someone without Manage Channels sees only what they can run, each a link.
+  await w.service.handleInteraction(press("3", "rule:commands:", P.SendMessages));
+  assert.match(last(), /<\/announce:501>/);
+  assert.doesNotMatch(last(), /cleanup/);
+  assert.doesNotMatch(last(), /rule:cmd:/, "no menu without commands of their own");
+  await w.service.handleInteraction(press("3", "rule:commands:", P.ManageChannels));
+  assert.match(last(), /<\/cleanup:502>/);
+
+  // The owner opens theirs, changes who sees replies, and deletes it with its rule.
+  await w.service.handleInteraction(press("1", "rule:commands:", 0n));
+  assert.match(last(), /rule:cmd:/);
+  assert.doesNotMatch(last(), /cleanup/);
+  await w.service.handleInteraction(press("1", "rule:cmd:", 0n, [mine.id]));
+  assert.match(last(), new RegExp(`rule:open:${mine.id}`));
+  assert.match(last(), new RegExp(`rule:cmddel:${mine.id}`));
+  await w.service.handleInteraction(press("1", `rule:cmdvis:${mine.id}`, 0n, ["private"]));
+  assert.equal(w.store.getRule(mine.id)!.trigger.command!.visibility, "private");
+  await w.service.handleInteraction(press("2", `rule:cmd:${mine.id}`, 0n));
+  assert.match(String((w.calls.at(-1)![1] as { content?: string }).content), /作成者だけ/);
+  await w.service.handleInteraction(press("1", `rule:cmddel:${mine.id}`, 0n));
+  assert.match(last(), new RegExp(`rule:cmddel2:${mine.id}`));
+  await w.service.handleInteraction(press("1", `rule:cmddel2:${mine.id}`, 0n));
+  assert.equal(w.store.getRule(mine.id), undefined);
+  assert.match(last(), /コマンド \/announce とルール「お知らせ」を削除しました/);
+  assert.ok(w.store.getRule(gated.id));
 });

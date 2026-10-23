@@ -118,13 +118,14 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
     },
   );
   if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
-  // At most three buttons a row; the rules open their own panel in this message.
+  // At most three buttons a row; the rules and the commands open their own panels in this message.
   body.push(
     { type: ComponentType.ActionRow, components: [navButton("keys", "APIキーの管理", page), navButton("models", "モデルの選択", page), navButton("advanced", "応用設定", page)] },
     {
       type: ComponentType.ActionRow,
       components: [
         { type: ComponentType.Button, custom_id: ruleCustomId("home"), label: "ルール", style: ButtonStyle.Primary },
+        { type: ComponentType.Button, custom_id: ruleCustomId("commands"), label: "コマンド", style: ButtonStyle.Primary },
         ...(page === "home" ? [] : [navButton("home", "← 設定のトップへ", page)]),
       ],
     },
