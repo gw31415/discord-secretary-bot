@@ -11,7 +11,7 @@ import type { Plan, Step, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
 import { RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
-import type { SandboxResult } from "../sandbox.ts";
+import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
 import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
 import { createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
@@ -20,6 +20,8 @@ import { fetchImage, imageRefs } from "../agent/images.ts";
 import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { APIMessage } from "discord-api-types/v10";
 import type { Rule, RunOutcome } from "./types.ts";
+import { runWasm } from "../wasm/run.ts";
+import type { WasmRegistry } from "../wasm/registry.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
 // with its owner's read scope; the steps it returns go to the Planner, which
@@ -50,6 +52,9 @@ export interface RuleEngineDeps {
   notifyOwner?: (userId: string, content: string) => Promise<void>;
   log: (message: string, error?: unknown) => void;
   run?: typeof runSandboxed;
+  /** Compiled uploaded modules, for rules that run one instead of JS. */
+  wasm?: Pick<WasmRegistry, "compiled">;
+  runWasm?: typeof runWasm;
   /** The owner's judge model, for judge() and rank() in rule code. */
   decide?: (ownerId: string) => Decide | undefined;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -417,7 +422,7 @@ export class RuleEngine {
    * Used for real runs and for dry runs, which stop here.
    */
   async evaluate(
-    rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params">,
+    rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params" | "wasm">,
     event: unknown,
     reader?: Pick<Reader, "get">,
     eventName: string | null = null,
@@ -451,9 +456,7 @@ export class RuleEngine {
         return image.data;
       };
       const decider = this.deps.decide?.(rule.ownerId);
-      result = await (this.deps.run ?? runSandboxed)(
-        rule.code,
-        {
+      const bindings: SandboxBindings = {
           guildId: rule.guildId,
           actor: { kind: "user", userId: rule.ownerId, via: "rule" },
           event,
@@ -472,9 +475,19 @@ export class RuleEngine {
               return keep(data, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
             },
           },
-        },
-        RULE_SANDBOX_LIMITS,
-      );
+      };
+      if (rule.wasm) {
+        if (!this.deps.wasm) throw new Error("Wasmのルールはここでは動かせません");
+        const module = await this.deps.wasm.compiled(rule.wasm);
+        // A module draws with its own libraries and hands over the image; it is re-encoded so only real images go out.
+        const image = async (data: Buffer, name: string) => {
+          const { data: out, format } = await convertImage(data, {});
+          return keep(out, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+        };
+        result = await (this.deps.runWasm ?? runWasm)(module, { ...bindings, image }, RULE_SANDBOX_LIMITS);
+      } else {
+        result = await (this.deps.run ?? runSandboxed)(rule.code, bindings, RULE_SANDBOX_LIMITS, { cache: true });
+      }
     } catch (e) {
       return { kind: "error", error: (e instanceof Error ? e.message : String(e)).slice(0, MAX_ERROR), logs: [] };
     }

@@ -29,6 +29,9 @@ import type { CommandSpec, CommandVisibility } from "./command.ts";
 import { VISIBILITY_CHOICES } from "./command.ts";
 import { defaultVisibility, showsToAll } from "../agent/judge.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
+import { ModuleRejected, sizeLabel, wasmRef } from "../wasm/registry.ts";
+import type { WasmRegistry } from "../wasm/registry.ts";
+import type { WasmRef } from "../plan/types.ts";
 import type { Rule, RuleDefinition, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
@@ -52,10 +55,19 @@ export interface RuleServiceDeps {
   /** Explains rule code from the code alone, paid for by the owner. */
   summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
   /** How likely a command's reply is meant for everyone (0 to 1), by the owner's judge model; null without one. */
+  /** Uploaded Wasm modules a rule may run instead of code. */
+  wasm?: Pick<WasmRegistry, "resolve">;
   visibilityScore?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<number | null>;
 }
 
-type DryRunInput = Pick<RuleProposal, "code" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
+/** `wasm` is the module's sha256 here, already resolved. */
+type DryRunInput = Pick<RuleProposal, "code" | "wasm" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
+
+/** How the dialog and panel describe a module, in place of an explanation of code. */
+export function wasmSummary(ref: WasmRef): string {
+  const by = ref.producers.length ? `、${ref.producers.slice(0, 2).join("・")} 製` : "";
+  return `アップロードされたWasmモジュール「${ref.name}」(${sizeLabel(ref.size)}${by}、<@${ref.ownerId}> が登録、sha256 ${ref.sha256.slice(0, 12)})を動かします。中身はAIの説明の対象外です。`;
+}
 
 /** Display names from the cache: channels and roles; anything else stays an id. */
 export function cacheLabel(guild: GuildState | null | undefined): (id: string) => string {
@@ -140,7 +152,7 @@ export class RuleService {
     // A saved rule (or a new version of one) is tried on its current state; nothing a dry run sets is kept.
     const saved = rule.id ?? rule.replaces;
     const state = saved && this.deps.store.getRule(saved)?.ownerId === ownerId ? this.deps.store.getRuleState(saved) : null;
-    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
+    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.wasm ? { wasm: rule.wasm } : {}), ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
     const kept = { ...(result.state ? { state: JSON.stringify(result.state.value) } : {}), ...(result.reply !== undefined ? { reply: result.reply } : {}), ...(result.images?.length ? { images: result.images.length } : {}) };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs, ...kept };
@@ -179,14 +191,26 @@ export class RuleService {
     const stepIds = new Set(input.stepIds);
     const drafts: PlanRuleDraft[] = [];
     const problems: string[] = [];
-    for (const [i, r] of input.rules.entries()) {
-      const where = `ルール「${r.name}」`;
+    for (const [i, proposed] of input.rules.entries()) {
+      const where = `ルール「${proposed.name}」`;
       const own: string[] = [];
-      if (!r.name.trim()) own.push("名前がありません");
+      if (!proposed.name.trim()) own.push("名前がありません");
+      // A module named by the request runs instead of code, pinned to the build found now.
+      let wasm: WasmRef | undefined;
+      if (proposed.wasm) {
+        try {
+          if (!this.deps.wasm) throw new ModuleRejected("Wasmのルールはここでは作れません");
+          wasm = wasmRef(this.deps.wasm.resolve(input.ownerId, this.deps.caches.get(input.guildId)?.guild, proposed.wasm));
+        } catch (e) {
+          own.push(e instanceof Error ? e.message : String(e));
+        }
+      }
+      else if (!proposed.code.trim()) own.push("code(または wasm)がありません");
+      const r = { ...proposed, ...(wasm ? { wasm: wasm.sha256, code: "" } : {}) };
       const triggerIssues = triggerProblems(r.trigger);
       own.push(...triggerIssues);
       for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
-      const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, summary: null, limits: ruleLimits(r.limits) };
+      const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, ...(r.wasm ? { wasm: r.wasm } : {}), summary: null, limits: ruleLimits(r.limits) };
       if (triggerIssues.length === 0) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
       if (r.trigger.command && triggerIssues.length === 0) {
         own.push(...this.commandNameProblems(input.guildId, r.trigger.command.name, r.replaces, input.rules.slice(0, i).map((o) => o.trigger.command?.name)));
@@ -238,9 +262,10 @@ export class RuleService {
         trigger: await this.#withVisibility(input.ownerId, r, dry),
         allow: r.allow,
         code: r.code,
+        ...(wasm ? { wasm } : {}),
         ...(r.params ? { params: r.params } : {}),
         ...(r.limits ? { limits: ruleLimits(r.limits) } : {}),
-        summary: r.summary !== undefined ? r.summary : await this.#summarize(r.code, input.ownerId, triggerEvents(r.trigger).join("・")),
+        summary: wasm ? wasmSummary(wasm) : r.summary !== undefined ? r.summary : await this.#summarize(r.code, input.ownerId, triggerEvents(r.trigger).join("・")),
         ...(replaces ? { replaces } : {}),
         dry,
         ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),
@@ -292,6 +317,7 @@ export class RuleService {
       trigger: draft.trigger,
       allow: draft.allow,
       code: draft.code,
+      ...(draft.wasm ? { wasm: draft.wasm.sha256 } : {}),
       ...(draft.params ? { params: draft.params } : {}),
       summary: draft.summary,
       limits: draft.limits ?? DEFAULT_LIMITS,

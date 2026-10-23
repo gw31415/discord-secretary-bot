@@ -165,6 +165,7 @@ class RuleNotRegistered extends Error {}
 function ruleInputOf(r: PlanRuleDraft): RuleInput {
   return {
     name: r.name, trigger: r.trigger, allow: r.allow, code: r.code, summary: r.summary, dry: r.dry, request: r.request,
+    ...(r.wasm ? { wasm: r.wasm.sha256 } : {}),
     ...(r.params ? { params: r.params } : {}),
     ...(r.replaces ? { replaces: r.replaces.id } : {}),
     ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),

@@ -311,16 +311,18 @@ function fenced(lang: string, body: string): string {
 }
 
 function codeBody(plan: Plan, room: number): string[] {
-  const parts: Array<{ title: string; code: string; summary: string | null }> = [
+  const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string }> = [
     ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
     ...(plan.rules ?? []).map((r) => ({
-      title: `ルール「${r.name}」のコードの説明`,
+      title: r.wasm ? `ルール「${r.name}」が動かすWasm` : `ルール「${r.name}」のコードの説明`,
       code: r.code,
+      ...(r.wasm ? { wasm: `sha256 ${r.wasm.sha256}${r.wasm.producers.length ? `\nビルド: ${r.wasm.producers.join("、")}` : ""}` } : {}),
       summary: r.replaces?.before && r.summary ? `変更前: ${r.replaces.before.summary ?? "説明はありません"}\n変更後: ${r.summary}` : r.summary,
     })),
   ];
   const share = Math.floor(room / Math.max(1, parts.length));
-  return parts.flatMap(({ title, code, summary }) => {
+  return parts.flatMap(({ title, code, summary, wasm }) => {
+    if (wasm) return [`**${title}**\n${summary ?? ""}`, fenced("", wasm)];
     const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
     const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
     const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;

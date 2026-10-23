@@ -24,10 +24,16 @@ import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
 import { RuleService } from "./rules/service.ts";
 import { TRIGGER_INTENTS, TRIGGERS } from "./rules/triggers.ts";
+import { precompileJs, precompileJsEngine, setBytecodeCache } from "./sandbox.ts";
+import { WasmRegistry } from "./wasm/registry.ts";
+import { WasmPanel } from "./wasm/panel.ts";
+import { warmWorkers } from "./wasm/run.ts";
 
 const config = loadConfig();
 const store = new Store(config.dbPath, config.masterKey);
 const caches = new GuildCaches();
+const wasm = new WasmRegistry(store);
+setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data) });
 
 function served(guildId: string | undefined): guildId is string {
   return !!guildId && (config.allowedGuildIds.size === 0 || config.allowedGuildIds.has(guildId));
@@ -127,6 +133,7 @@ const engine = new RuleEngine({
   makeReader,
   notifyOwner: sendDm,
   decide: (ownerId) => decideFor(store, ownerId),
+  wasm,
   onRulesChanged: syncCommands,
   log,
 });
@@ -137,6 +144,7 @@ const rules = new RuleService({
   caches,
   admin,
   engine,
+  wasm,
   selfId: () => selfId,
   now: () => Date.now(),
   log,
@@ -157,6 +165,7 @@ const rules = new RuleService({
 });
 
 const widenPrompts = new WidenPrompts(client.api);
+const wasmPanel = new WasmPanel({ api: client.api, registry: wasm, log });
 
 const conversations = new Conversations({
   store,
@@ -189,6 +198,7 @@ const conversations = new Conversations({
   rules: {
     list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
     runs: (guildId, ownerId, ruleId, shareable, limit) => rules.runsFor(guildId, ownerId, ruleId, shareable, limit),
+    wasm: { list: (ownerId) => wasm.list(ownerId), upload: (ownerId, name, bytes) => wasm.upload(ownerId, name, bytes) },
   },
   askWiden: (input) => widenPrompts.ask(input),
   onAwake: () => presence.refresh(),
@@ -319,6 +329,7 @@ client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
     if (await planner.handleInteraction(data)) return;
     if (await rules.handleCustomCommand(data)) return;
     if (await rules.handleInteraction(data)) return;
+    if (await wasmPanel.handleInteraction(data)) return;
     await handleInteraction(api, store, data);
   } catch (e) {
     log("インタラクションの処理に失敗", e);
@@ -348,6 +359,7 @@ const sweeper = setInterval(() => {
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
   engine.sweep();
   store.deleteRuleRunsBefore(new Date(Date.now() - SNAPSHOT_RETENTION_MS));
+  store.deleteBytecodeBefore(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
 }, 60_000);
 
 async function shutdown(signal: string): Promise<void> {
@@ -362,6 +374,23 @@ async function shutdown(signal: string): Promise<void> {
 }
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+// Everything rules run is compiled before the first event: the JS engine, every enabled rule's code (kept
+// as bytecode across restarts) and every uploaded module an enabled rule runs.
+await precompileJsEngine().catch((e) => log("JSエンジンのコンパイルに失敗", e));
+warmWorkers();
+{
+  let compiled = 0;
+  for (const code of store.enabledRuleCode()) {
+    try {
+      if (await precompileJs(code)) compiled++;
+    } catch (e) {
+      log("ルールのコードのコンパイルに失敗", e);
+    }
+  }
+  if (compiled) log(`ルールのコード ${compiled} 件をコンパイルしました`);
+}
+await wasm.precompileUsed().then((n) => n && log(`Wasmモジュール ${n} 個をコンパイルしました`)).catch((e) => log("Wasmモジュールのコンパイルに失敗", e));
 
 // Plans a restart cut off are marked failed (and can be resumed) before anything else runs.
 await planner.recover().catch((e) => log("中断された変更の後始末に失敗", e));

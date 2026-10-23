@@ -1,11 +1,15 @@
-import { newAsyncContext, shouldInterruptAfterDeadline } from "quickjs-emscripten";
-import type { QuickJSAsyncContext, QuickJSHandle } from "quickjs-emscripten";
-import { CANVAS_PRELUDE, MAX_IMAGES_PER_RUN, measureText, renderCanvas } from "./canvas.ts";
-import { checkDecideInput, DECIDE_PRELUDE, MAX_DECIDES_PER_RUN } from "./agent/decide.ts";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { CANVAS_PRELUDE } from "./canvas.ts";
+import { DECIDE_PRELUDE } from "./agent/decide.ts";
 import type { Decide } from "./agent/decide.ts";
+import { execute, hostCalls } from "./wasm/run.ts";
 
-// Read-only code execution. The code runs in QuickJS inside WebAssembly and can
-// only reach the bindings passed in here: no network, files, timers or host objects.
+// Read-only code execution. JavaScript is one more Wasm module: QuickJS built
+// for WASI (wasm/js-runner), run in the same sandbox as uploaded modules. The
+// code can only reach the bindings passed in here, through secretary.call: no
+// network, files, timers or host objects. A rule's code is compiled to QuickJS
+// bytecode once and kept, so later runs skip the parse.
 
 export interface SandboxBindings {
   guildId: string;
@@ -59,6 +63,82 @@ const PRELUDE = [
   "function plan(steps, rules) { return { steps: steps || [], rules: rules || [] }; }",
 ].join("\n");
 
+/** The host functions the preludes call, over secretary.call. */
+const HOST_SHIM = [
+  "function __call(fn, args) { args = args || {}; args.fn = fn; var r = JSON.parse(__host(JSON.stringify(args))); if (r.error !== undefined) throw new Error(r.error); return r.value; }",
+  "var discord = { get: function (route, opts) { return __call(\"get\", { route: String(route), query: (opts && opts.query) || {} }); } };",
+  "function log() { __log(Array.prototype.map.call(arguments, function (a) { return JSON.stringify(a); }).join(\" \")); }",
+  "function reply(text) { __call(\"reply\", { text: String(text) }); }",
+  "function __attach(w, h, ops, name) { return __call(\"canvas\", { width: w, height: h, ops: JSON.parse(ops), name: name }); }",
+  "function __measure(font, text) { return __call(\"measure\", { font: font, text: text }); }",
+  "function __math(tex, options, name) { return __call(\"renderMath\", { tex: tex, options: JSON.parse(options), name: name }); }",
+  "function __convert(source, options, name) { return __call(\"convertImage\", { source: JSON.parse(source), options: JSON.parse(options), name: name }); }",
+  "function __judge(state, questions) { return JSON.stringify(__call(\"judge\", { state: JSON.parse(state), questions: JSON.parse(questions) })); }",
+].join("\n");
+
+/**
+ * The whole program for one piece of code. Every helper is defined whatever the
+ * run allows, so one compiled program serves every run of a rule; what a run
+ * may not use fails with a message when called. The code is wrapped so it can
+ * `return` its answer; setState keeps a JSON copy, so later changes to the
+ * object do not leak into what is saved.
+ */
+export function program(code: string): string {
+  return `${HOST_SHIM}\n${PRELUDE}\n${CANVAS_PRELUDE}\n${MEDIA_PRELUDE}\n${DECIDE_PRELUDE}\nvar __state; var setState = __stateful ? function (v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; } : undefined;\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`;
+}
+
+const JS_HEAP_MAX = 48 * 1024 * 1024;
+const COMPILE_LIMIT_MS = 10_000;
+
+let runner: Promise<{ module: WebAssembly.Module; sha256: string }> | null = null;
+
+/** The JS engine module, compiled once and kept. Called at startup; runs call it too. */
+export function precompileJsEngine(): Promise<{ module: WebAssembly.Module; sha256: string }> {
+  runner ??= (async () => {
+    const bytes = await readFile(new URL("./wasm/js-runner.wasm", import.meta.url));
+    return { module: await WebAssembly.compile(bytes), sha256: createHash("sha256").update(bytes).digest("hex") };
+  })();
+  runner.catch(() => (runner = null));
+  return runner;
+}
+
+/** Where compiled programs are kept between runs and restarts; the key covers the engine build and the program. */
+export interface BytecodeCache {
+  get(key: string): Buffer | undefined;
+  set(key: string, data: Buffer): void;
+}
+
+let bytecodeCache: BytecodeCache | null = null;
+export function setBytecodeCache(cache: BytecodeCache | null): void {
+  bytecodeCache = cache;
+}
+
+async function cacheKey(code: string): Promise<string> {
+  const { sha256 } = await precompileJsEngine();
+  return createHash("sha256").update(sha256).update("\0").update(program(code)).digest("hex");
+}
+
+function header(value: Record<string, unknown>): string {
+  return `${JSON.stringify(value)}\n`;
+}
+
+/** Compiles code to QuickJS bytecode inside the sandbox; a syntax error comes back as an Error. */
+export async function compileJs(code: string): Promise<Buffer> {
+  const { module } = await precompileJsEngine();
+  const run = await execute(module, Buffer.concat([Buffer.from(header({ mode: "compile", memory: JS_HEAP_MAX })), Buffer.from(program(code))]), async () => JSON.stringify({ error: "コンパイル中は使えません" }), COMPILE_LIMIT_MS);
+  if (run.exitCode !== 0) throw new Error(run.logs.at(-1) ?? `コンパイルに失敗しました(${run.exitCode})`);
+  return run.stdout;
+}
+
+/** Compiles a rule's code ahead of its first run, unless it is kept already. */
+export async function precompileJs(code: string): Promise<boolean> {
+  if (!bytecodeCache) return false;
+  const key = await cacheKey(code);
+  if (bytecodeCache.get(key)) return false;
+  bytecodeCache.set(key, await compileJs(code));
+  return true;
+}
+
 export interface SandboxResult {
   ok: boolean;
   value?: unknown;
@@ -68,112 +148,54 @@ export interface SandboxResult {
   logs: string[];
 }
 
-function toHandle(vm: QuickJSAsyncContext, value: unknown): QuickJSHandle {
-  if (value === undefined) return vm.undefined.dup();
-  const json = vm.newString(JSON.stringify(value));
-  const parse = vm.getProp(vm.getProp(vm.global, "JSON"), "parse");
-  const result = vm.unwrapResult(vm.callFunction(parse, vm.undefined, json));
-  json.dispose();
-  parse.dispose();
-  return result;
-}
-
-export async function runSandboxed(code: string, bindings: SandboxBindings, limits: SandboxLimits): Promise<SandboxResult> {
-  const vm = await newAsyncContext();
-  const logs: string[] = [];
-  let gets = 0;
+/**
+ * Runs code once. With `cache`, the code's compiled form is used and kept
+ * (rules, whose code runs many times); otherwise it is parsed for this run.
+ */
+export async function runSandboxed(code: string, bindings: SandboxBindings, limits: SandboxLimits, options: { cache?: boolean } = {}): Promise<SandboxResult> {
+  const stateful = bindings.state !== undefined;
+  const globals = {
+    guild: bindings.guildId,
+    actor: bindings.actor,
+    event: bindings.event ?? null,
+    params: bindings.params ?? null,
+    eventName: bindings.eventName ?? null,
+    batch: bindings.batch ?? null,
+    __stateful: stateful,
+    ...(stateful ? { state: bindings.state } : {}),
+  };
+  let output: string;
+  let logs: string[] = [];
   try {
-    vm.runtime.setMemoryLimit(limits.memoryBytes);
-    vm.runtime.setMaxStackSize(1024 * 1024);
-    vm.runtime.setInterruptHandler(shouldInterruptAfterDeadline(Date.now() + limits.wallTimeMs));
-
-    vm.newString(bindings.guildId).consume((h) => vm.setProp(vm.global, "guild", h));
-    toHandle(vm, bindings.actor).consume((h) => vm.setProp(vm.global, "actor", h));
-    toHandle(vm, bindings.event ?? null).consume((h) => vm.setProp(vm.global, "event", h));
-    toHandle(vm, bindings.params ?? null).consume((h) => vm.setProp(vm.global, "params", h));
-    toHandle(vm, bindings.eventName ?? null).consume((h) => vm.setProp(vm.global, "eventName", h));
-    toHandle(vm, bindings.batch ?? null).consume((h) => vm.setProp(vm.global, "batch", h));
-    const stateful = bindings.state !== undefined;
-    if (stateful) toHandle(vm, bindings.state).consume((h) => vm.setProp(vm.global, "state", h));
-
-    const discord = vm.newObject();
-    vm.newAsyncifiedFunction("get", async (routeHandle, optsHandle) => {
-      if (++gets > limits.maxGets) throw new Error(`discord.get は1回の実行で${limits.maxGets}回までです`);
-      const route = vm.getString(routeHandle);
-      const opts = optsHandle ? (vm.dump(optsHandle) as { query?: Record<string, unknown> } | undefined) : undefined;
-      return toHandle(vm, await bindings.get(route, opts?.query ?? {}));
-    }).consume((fn) => vm.setProp(discord, "get", fn));
-    vm.setProp(vm.global, "discord", discord);
-    discord.dispose();
-
-    let attached = 0;
-    if (bindings.attach) {
-      const attach = bindings.attach;
-      vm.newFunction("__attach", (w, h, opsJson, name) => {
-        if (++attached > MAX_IMAGES_PER_RUN) throw new Error(`attachImage は1回の実行で${MAX_IMAGES_PER_RUN}回までです`);
-        const png = renderCanvas(vm.dump(w), vm.dump(h), JSON.parse(vm.getString(opsJson)));
-        return vm.newString(attach(png, vm.getString(name)));
-      }).consume((fn) => vm.setProp(vm.global, "__attach", fn));
-      vm.newFunction("__measure", (font, text) => toHandle(vm, measureText(vm.getString(font), vm.getString(text)))).consume((fn) => vm.setProp(vm.global, "__measure", fn));
+    const { module } = await precompileJsEngine();
+    let payload: Buffer | undefined;
+    if (options.cache && bytecodeCache) {
+      const key = await cacheKey(code);
+      payload = bytecodeCache.get(key);
+      if (!payload) {
+        try {
+          payload = await compileJs(code);
+          bytecodeCache.set(key, payload);
+        } catch {
+          payload = undefined; // The source run below reports the error.
+        }
+      }
     }
-    if (bindings.media) {
-      const media = bindings.media;
-      const count = (what: string) => {
-        if (++attached > MAX_IMAGES_PER_RUN) throw new Error(`画像を作れるのは1回の実行で${MAX_IMAGES_PER_RUN}枚までです(${what})`);
-      };
-      vm.newAsyncifiedFunction("__math", async (tex, options, name) => {
-        count("renderMath");
-        return vm.newString(await media.math(vm.getString(tex), JSON.parse(vm.getString(options)), vm.getString(name)));
-      }).consume((fn) => vm.setProp(vm.global, "__math", fn));
-      vm.newAsyncifiedFunction("__convert", async (source, options, name) => {
-        count("convertImage");
-        return vm.newString(await media.convert(JSON.parse(vm.getString(source)), JSON.parse(vm.getString(options)), vm.getString(name)));
-      }).consume((fn) => vm.setProp(vm.global, "__convert", fn));
-    }
-
-    if (bindings.decide) {
-      const decide = bindings.decide;
-      let judged = 0;
-      vm.newAsyncifiedFunction("__judge", async (state, questions) => {
-        if (++judged > MAX_DECIDES_PER_RUN) throw new Error(`judge・rank は1回の実行で${MAX_DECIDES_PER_RUN}回までです`);
-        const input = checkDecideInput(JSON.parse(vm.getString(state)), JSON.parse(vm.getString(questions)));
-        return vm.newString(JSON.stringify(await decide(input.state, input.questions)));
-      }).consume((fn) => vm.setProp(vm.global, "__judge", fn));
-    }
-
-    if (bindings.reply) {
-      const reply = bindings.reply;
-      vm.newFunction("reply", (text) => {
-        reply(String(vm.dump(text)));
-      }).consume((fn) => vm.setProp(vm.global, "reply", fn));
-    }
-
-    vm.newFunction("log", (...args) => {
-      logs.push(args.map((a) => JSON.stringify(vm.dump(a))).join(" ").slice(0, 2000));
-    }).consume((fn) => vm.setProp(vm.global, "log", fn));
-
-    // Wrapped so the code can `return` its answer; JSON keeps host and guest values apart.
-    // call()/rule()/plan() only build plain objects: a returned plan is a proposal, not a write.
-    // setState keeps a JSON copy, so later changes to the object do not leak into what is saved.
-    const prelude = [PRELUDE, ...(bindings.attach ? [CANVAS_PRELUDE] : []), ...(bindings.media ? [MEDIA_PRELUDE] : []), ...(bindings.decide ? [DECIDE_PRELUDE] : [])].join("\n");
-    const wrapped = stateful
-      ? `${prelude}\nvar __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }\nJSON.stringify({ value: (function () {\n${code}\n})(), state: __state })`
-      : `${prelude}\nJSON.stringify((function () {\n${code}\n})())`;
-    const result = await vm.evalCodeAsync(wrapped, "agent.js");
-    if (result.error) {
-      const err = vm.dump(result.error) as { name?: string; message?: string } | string;
-      result.error.dispose();
-      return { ok: false, error: typeof err === "string" ? err : `${err.name ?? "Error"}: ${err.message ?? ""}`, logs };
-    }
-    const json = vm.getString(result.value);
-    result.value.dispose();
-    const parsed = json === undefined || json === "undefined" ? undefined : JSON.parse(json);
-    if (!stateful) return { ok: true, value: parsed, logs };
-    const out = parsed as { value?: unknown; state?: { value: unknown } };
-    return { ok: true, value: out.value, ...(out.state ? { state: out.state } : {}), logs };
+    const mode = payload ? "bytecode" : "source";
+    const stdin = Buffer.concat([Buffer.from(header({ mode, memory: Math.min(limits.memoryBytes, JS_HEAP_MAX), globals })), payload ?? Buffer.from(program(code))]);
+    const run = await execute(module, stdin, hostCalls(bindings, limits), limits.wallTimeMs);
+    logs = run.logs;
+    if (run.exitCode !== 0) return { ok: false, error: `JSの実行が止まりました(${run.exitCode})${logs.length ? `: ${logs.at(-1)}` : ""}`, logs };
+    output = run.stdout.toString("utf8");
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
-  } finally {
-    vm.dispose();
   }
+  let parsed: { value?: unknown; state?: { value: unknown }; __error?: string };
+  try {
+    parsed = JSON.parse(output) as typeof parsed;
+  } catch {
+    return { ok: false, error: "コードの結果を読めませんでした", logs };
+  }
+  if (parsed.__error !== undefined) return { ok: false, error: parsed.__error, logs };
+  return { ok: true, value: parsed.value, ...(stateful && parsed.state ? { state: parsed.state } : {}), logs };
 }
