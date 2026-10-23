@@ -15,6 +15,7 @@ import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
 import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
+import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
 import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
 import { isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
@@ -735,6 +736,65 @@ export class Planner {
     if (raw?.guild_id === state.id) state.channels.set(raw.id, toChannel(raw));
   }
 
+  /**
+   * The step at `i` with the steps right after it that can go in the same
+   * request (see batch.ts), each with its references filled in.
+   */
+  #nextGroup(remaining: Step[], i: number, results: Map<string, unknown>, referenced: Set<string>): Array<{ step: Step; resolved: Step }> {
+    const resolve = (step: Step) => ({
+      step,
+      resolved: { ...step, pathParams: resolveRefs(step.pathParams, results), ...(step.body !== undefined ? { body: resolveRefs(step.body, results) } : {}) } as Step,
+    });
+    const now = this.deps.now();
+    const group = [resolve(remaining[i]!)];
+    const keys = [batchKey(group[0]!.resolved, referenced, now)];
+    if (keys[0] === null) return group;
+    for (let j = i + 1; j < remaining.length; j++) {
+      let next: { step: Step; resolved: Step };
+      try {
+        next = resolve(remaining[j]!);
+      } catch {
+        break;
+      }
+      const key = batchKey(next.resolved, referenced, now);
+      if (key !== keys[0]) break;
+      group.push(next);
+      keys.push(key);
+    }
+    return group.slice(0, batchRun(group.map((g) => g.resolved), keys));
+  }
+
+  /** A step's checks right before it is sent: permissions, a rule's allow list on the target as it is now, and the snapshot. */
+  async #checkStep(plan: Plan, state: GuildState, step: Step, resolved: Step): Promise<void> {
+    const spec = specOf(resolved);
+    await this.#addChannel(state, resolved);
+    const key = spec.target?.(resolved.pathParams, plan.guildId);
+    const [before, channels] = await Promise.all([
+      key ? this.resource(plan.guildId, key) : null,
+      plan.rule ? this.#channelStates([resolved], plan.rule.allow) : undefined,
+    ]);
+    const problems = [
+      ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
+      // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
+      ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], channels) : []),
+    ];
+    if (problems.length > 0) throw new Error(problems.join(" / "));
+    if (key) this.deps.store.saveSnapshot(plan.id, step.id, key, before);
+  }
+
+  #reason(plan: Plan): string {
+    return plan.rule
+      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更 ${plan.id})`
+      : `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
+  }
+
+  /** Several steps in the one request Discord has for them. */
+  async #sendBatch(plan: Plan, steps: Step[]): Promise<unknown> {
+    const { method, path, body } = await batchRequest(steps, plan.guildId, (path) => this.#get(path));
+    const options = { reason: this.#reason(plan), body };
+    return method === "PATCH" ? this.#rest.patch(path, options) : this.#rest.post(path, options);
+  }
+
   async #send(plan: Plan, step: Step): Promise<unknown> {
     const { api } = this.deps;
     const spec = specOf(step);
@@ -748,9 +808,7 @@ export class Planner {
         ...(uploads.length > 0 ? { files: uploads } : {}),
       });
     }
-    const reason = plan.rule
-      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更 ${plan.id})`
-      : `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
+    const reason = this.#reason(plan);
     const { method, path } = routeOf(step.op, step.pathParams);
     let payload: unknown = body;
     if (spec.op === "POST /channels/{channel}/messages") {
@@ -794,51 +852,66 @@ export class Planner {
       const rows = new Map(store.getSteps(plan.id).map((s) => [s.stepId, s]));
       const remaining = plan.steps.filter((s) => rows.get(s.id)?.state !== "done");
       const results = new Map<string, unknown>(plan.steps.filter((s) => rows.get(s.id)?.state === "done").map((s) => [s.id, rows.get(s.id)!.response]));
-      let current: Step | undefined;
+      /** The steps being checked or sent; on an error they are the ones marked failed. */
+      let current: Step[] = [];
       try {
         const state = await this.#freshState(plan, remaining);
         if (!opts.fresh) await this.#checkPreconditions(plan, remaining, results);
         const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }));
         if (problems.length > 0) throw new Aborted(`権限が足りなくなりました: ${problems.join(" / ")}`);
 
+        const referenced = referencedSteps(plan.steps);
         let lastDm = 0;
         let lastRefresh = this.deps.now();
-        for (const step of remaining) {
-          current = step;
-          const resolved: Step = { ...step, pathParams: resolveRefs(step.pathParams, results), ...(step.body !== undefined ? { body: resolveRefs(step.body, results) } : {}) };
-          const spec = specOf(resolved);
-          await this.#addChannel(state, resolved);
-          const key = spec.target?.(resolved.pathParams, plan.guildId);
-          const [before, channels] = await Promise.all([
-            key ? this.resource(plan.guildId, key) : null,
-            plan.rule ? this.#channelStates([resolved], plan.rule.allow) : undefined,
-          ]);
-          const stepProblems = [
-            ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
-            // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
-            ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], channels) : []),
-          ];
-          if (stepProblems.length > 0) throw new Error(stepProblems.join(" / "));
-          if (key) store.saveSnapshot(plan.id, step.id, key, before);
-          if (spec.op === "POST /users/{user}/dm") {
+        for (let i = 0; i < remaining.length; ) {
+          current = [remaining[i]!];
+          const group = this.#nextGroup(remaining, i, results, referenced);
+          i += group.length;
+          current = group.map((g) => g.step);
+          // Every step is checked on its own as before; only the request is shared.
+          const checks = await Promise.allSettled(group.map((g) => this.#checkStep(plan, state, g.step, g.resolved)));
+          const refused = checks.flatMap((c, k) => (c.status === "rejected" ? [{ step: group[k]!.step, error: c.reason as unknown }] : []));
+          if (refused.length > 0) {
+            current = refused.map((r) => r.step);
+            throw refused[0]!.error;
+          }
+          if (group[0]!.resolved.op === "POST /users/{user}/dm") {
             const wait = lastDm + DM_INTERVAL_MS - this.deps.now();
             if (wait > 0) await sleep(wait);
             lastDm = this.deps.now();
           }
-          store.markStepInFlight(plan.id, step.id, { pathParams: resolved.pathParams, body: resolved.body });
-          this.deps.beforeWrite?.(plan, resolved);
-          const response = await this.#send(plan, resolved);
-          const resultId = (response as { id?: string } | undefined)?.id ?? null;
-          store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
-          results.set(step.id, response ?? null);
-          this.deps.onWrite?.(plan, resolved, response);
+          for (const { step, resolved } of group) {
+            store.markStepInFlight(plan.id, step.id, { pathParams: resolved.pathParams, body: resolved.body });
+            this.deps.beforeWrite?.(plan, resolved);
+          }
+          let responses: unknown[];
+          let errors: Array<string | null>;
+          if (group.length === 1) {
+            responses = [await this.#send(plan, group[0]!.resolved)];
+            errors = [null];
+          } else {
+            const resolved = group.map((g) => g.resolved);
+            const response = await this.#sendBatch(plan, resolved);
+            responses = group.map(() => null);
+            errors = batchOutcome(resolved, response);
+          }
+          group.forEach(({ step, resolved }, k) => {
+            if (errors[k]) return;
+            const response = responses[k];
+            const resultId = (response as { id?: string } | undefined)?.id ?? null;
+            store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
+            results.set(step.id, response ?? null);
+            this.deps.onWrite?.(plan, resolved, response);
+          });
+          current = group.filter((_, k) => errors[k]).map((g) => g.step);
+          if (current.length > 0) throw new Error(errors.find(Boolean)!);
           // Progress on long plans, without editing the dialog on every step.
           if (plan.steps.length > 1 && this.deps.now() - lastRefresh >= PROGRESS_INTERVAL_MS) {
             lastRefresh = this.deps.now();
             await this.#refresh(plan.id).catch(() => undefined);
           }
         }
-        current = undefined;
+        current = [];
         if (plan.rules?.length) await this.#registerRules(plan, results);
         store.transitionPlan(plan.id, ["executing"], "succeeded", { reason: null });
         store.audit(plan.actor, "plan.succeeded", { steps: plan.steps.length }, plan.id);
@@ -848,12 +921,12 @@ export class Planner {
           store.transitionPlan(plan.id, ["executing"], "aborted", { reason: message });
           store.audit(plan.actor, "plan.aborted", { reason: message }, plan.id);
         } else {
-          if (current) store.finishStep(plan.id, current.id, { state: "failed", error: message.slice(0, 500) });
-          const reason = current
-            ? `${current.id} で失敗: ${message.slice(0, 300)}`
+          for (const step of current) store.finishStep(plan.id, step.id, { state: "failed", error: message.slice(0, 500) });
+          const reason = current.length > 0
+            ? `${current.map((step) => step.id).join("・")} で失敗: ${message.slice(0, 300)}`
             : e instanceof RuleNotRegistered ? message.slice(0, 400) : `実行前の確認で失敗: ${message.slice(0, 300)}`;
           store.transitionPlan(plan.id, ["executing"], "failed", { reason });
-          store.audit(plan.actor, "plan.failed", { step: current?.id, error: message.slice(0, 500) }, plan.id);
+          store.audit(plan.actor, "plan.failed", { step: current[0]?.id, error: message.slice(0, 500) }, plan.id);
           this.deps.log(`変更 ${plan.id} の実行に失敗`, e);
         }
       }
