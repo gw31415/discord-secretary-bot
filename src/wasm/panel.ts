@@ -10,8 +10,9 @@ import { MAX_BYTES_PER_USER, MAX_MODULES_PER_USER, ModuleRejected, sizeLabel } f
 import type { WasmRegistry } from "./registry.ts";
 
 // The "Wasm" section of /settings: the presser's own modules. A module is
-// uploaded through a modal's file field, and only does something once a rule
-// runs it (asked for in conversation). Modules belong to the person, like the
+// usually added in conversation (attached and talked over with the bot); the
+// modal's file field here is the other way in. Either way it only does
+// something once a rule runs it. Modules belong to the person, like the
 // rest of /settings, so the section is the same in every server.
 
 export const WASM_SECTION_ID = "wasm:home:";
@@ -40,6 +41,7 @@ function view(texts: string[], rows: APIButtonComponent[][], select?: APICompone
 
 const HOW_TO = [
   "WASI(preview 1)のコマンドとしてビルドした .wasm を登録できます(Rust の wasm32-wasip1、Go の GOOS=wasip1、C の wasi-sdk、Zig など)。",
+  "**登録のしかた**: Botにメンションして .wasm を添付し、何に使いたいかを相談すると、Botが登録してルールやコマンドの案を出します。下の「Wasmを登録」から登録だけしておくこともできます。",
   "標準入力でイベントなどのJSONを受け取り、標準出力に `{ \"steps\": [...], \"reply\": \"…\", \"state\": … }` を書きます。Discordの読み取りなどはホスト関数 `secretary.call` で呼びます。",
   "登録しただけでは動きません。会話で「このWasmを /xxx コマンドにして」のように頼むと、ルールとして確認画面が出ます。実行はルールの作成者の権限の範囲だけです。",
 ].join("\n");

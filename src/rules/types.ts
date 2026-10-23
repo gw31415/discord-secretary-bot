@@ -50,6 +50,9 @@ export interface RuleTrigger {
   command?: CommandSpec;
 }
 
+/** What a rule runs: its own JavaScript, or an uploaded Wasm module pinned to one build. */
+export type RuleProgram = { kind: "js"; code: string } | { kind: "wasm"; sha256: string };
+
 /** What the owner approves. Any change makes a new version that is approved again. */
 export interface RuleDefinition {
   name: string;
@@ -57,10 +60,7 @@ export interface RuleDefinition {
   sourcePrompt: string;
   trigger: RuleTrigger;
   allow: AllowEntry[];
-  /** JavaScript run in the QuickJS sandbox; empty when `wasm` is set. */
-  code: string;
-  /** The sha256 of an uploaded Wasm module that runs instead of `code`. */
-  wasm?: string;
+  program: RuleProgram;
   /** Values the code reads as `params`, e.g. the id of a channel made with the rule. */
   params?: Record<string, unknown>;
   /** Written from the code alone by a model that did not see the request. */
@@ -101,9 +101,8 @@ export interface RuleProposal {
   name: string;
   trigger: RuleTrigger;
   allow: AllowEntry[];
-  code: string;
-  /** An uploaded Wasm module that runs instead of `code`: its name among the owner's modules, or its sha256 (at least 12 characters). */
-  wasm?: string;
+  /** A module is named as the agent knows it: by its owner's name for it, or its sha256 (at least 12 characters). */
+  program: { kind: "js"; code: string } | { kind: "wasm"; module: string };
   params?: Record<string, unknown>;
   /** An event the agent made up for the dry run when no real one is at hand. */
   sampleEvent?: unknown;

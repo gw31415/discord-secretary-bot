@@ -4,7 +4,7 @@ import { runSandboxed } from "../src/sandbox.ts";
 import { checkDecideInput, MAX_DECIDES_PER_RUN, parseAnswers } from "../src/agent/decide.ts";
 import type { Answer, Decide, Question } from "../src/agent/decide.ts";
 
-const limits = { wallTimeMs: 2000, memoryBytes: 32 * 1024 * 1024, maxGets: 5 };
+const limits = { wallTimeMs: 2000, maxGets: 5 };
 const base = { guildId: "g", actor: { kind: "user" as const, userId: "u", via: "rule" as const }, get: async () => ({}) };
 
 const questions: Record<string, Question> = {

@@ -175,16 +175,16 @@ test("hostile routes never reach Discord, and Discord is only ever asked to GET 
 });
 
 test("sandboxed code has no way out besides discord.get", async () => {
-  const { runSandboxed, AGENT_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const { runSandboxed, SANDBOX_LIMITS } = await import("../src/sandbox.ts");
   const routes: string[] = [];
   const bindings = { guildId: GUILD, actor: { kind: "user" as const, userId: "2" }, get: async (route: string) => (routes.push(route), null) };
   const probe = await runSandboxed(
     `return ["fetch","require","process","std","os","XMLHttpRequest","WebSocket","setTimeout","Deno","Bun","module","global"].filter((n) => typeof globalThis[n] !== "undefined")`,
-    bindings, AGENT_SANDBOX_LIMITS,
+    bindings, SANDBOX_LIMITS,
   );
   assert.deepEqual(probe.value, []);
   for (const code of [`return import("os")`, `return new Function("return this")().process.exit()`, `return (function(){ return this })().require("fs")`]) {
-    const r = await runSandboxed(code, bindings, AGENT_SANDBOX_LIMITS);
+    const r = await runSandboxed(code, bindings, SANDBOX_LIMITS);
     // Either it fails, or it yields nothing from the host.
     assert.ok(!r.ok || r.value === undefined || JSON.stringify(r.value) === "{}", `escaped: ${code} → ${JSON.stringify(r)}`);
   }

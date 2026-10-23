@@ -7,10 +7,12 @@ import type { WorkerInput, WorkerMessage } from "./worker.ts";
 // The one sandbox every piece of code runs in: a Wasm module in its own worker
 // thread, killed when its time is up, with a 64 MiB memory cap written into
 // the module and no way out but stdin, stdout, stderr and secretary.call.
-// JavaScript (the agent's and rules') runs here too, as QuickJS compiled to
-// Wasm (see sandbox.ts); uploaded modules run directly. Whatever a module asks
-// of the host reaches only the bindings given here, so its reads and writes
-// stay within what the person it runs for may do.
+// Every rule runs as a Program: a module and what goes ahead of the run's
+// input on its stdin. An uploaded module is just the module; JavaScript is the
+// JS engine with the program ahead of the input (see sandbox.ts). Both read
+// the same input and write the same output. Whatever a module asks of the host
+// reaches only the bindings given here, so its reads and writes stay within
+// what the person it runs for may do.
 
 export const MAX_STDOUT = 4 * 1024 * 1024;
 const MAX_STDERR = 64 * 1024;
@@ -25,6 +27,14 @@ export interface WasmBindings extends SandboxBindings {
   image?: (data: Buffer, name: string) => Promise<string>;
 }
 
+/** A module to run and the bytes it reads on stdin ahead of the run's input. */
+export interface Program {
+  module: WebAssembly.Module;
+  prefix?: Uint8Array;
+  /** The JS engine, which may also use the host functions its own preludes need (canvas, measure). */
+  engine?: boolean;
+}
+
 export interface Execution {
   exitCode: number;
   stdout: Buffer;
@@ -37,6 +47,48 @@ export interface Execution {
  * Throws when the module traps, runs out of time or cannot start.
  */
 export async function execute(module: WebAssembly.Module, stdin: Uint8Array, host: (request: string) => Promise<string>, wallTimeMs: number): Promise<Execution> {
+  const deadline = Date.now() + wallTimeMs;
+  const timeUp = () => new Error(`実行時間の上限(${wallTimeMs / 1000}秒)を超えました`);
+  if (!(await slot(deadline))) throw timeUp();
+  try {
+    return await executeIn(module, stdin, host, deadline, timeUp);
+  } finally {
+    release();
+  }
+}
+
+// At most this many modules run at once; the rest wait their turn, and the
+// wait counts toward their time.
+const MAX_RUNNING = 4;
+let running = 0;
+const waiting: Array<() => void> = [];
+
+/** Waits for a free slot until `deadline`; false when time ran out first. */
+function slot(deadline: number): Promise<boolean> {
+  if (running < MAX_RUNNING) {
+    running++;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const take = () => {
+      clearTimeout(timer);
+      running++;
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      waiting.splice(waiting.indexOf(take), 1);
+      resolve(false);
+    }, Math.max(0, deadline - Date.now()));
+    waiting.push(take);
+  });
+}
+
+function release(): void {
+  running--;
+  waiting.shift()?.();
+}
+
+async function executeIn(module: WebAssembly.Module, stdin: Uint8Array, host: (request: string) => Promise<string>, deadline: number, timeUp: () => Error): Promise<Execution> {
   const { port1, port2 } = new MessageChannel();
   const signal = new SharedArrayBuffer(4);
   const flag = new Int32Array(signal);
@@ -45,7 +97,7 @@ export async function execute(module: WebAssembly.Module, stdin: Uint8Array, hos
   let healthy = false;
   try {
     const done = await new Promise<Extract<WorkerMessage, { type: "done" }>>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`実行時間の上限(${wallTimeMs / 1000}秒)を超えました`)), wallTimeMs);
+      const timer = setTimeout(() => reject(timeUp()), Math.max(0, deadline - Date.now()));
       const finish = (fn: () => void) => {
         clearTimeout(timer);
         worker.off("error", onError);
@@ -91,7 +143,7 @@ export async function execute(module: WebAssembly.Module, stdin: Uint8Array, hos
 }
 
 // Starting a thread costs tens of milliseconds, so finished ones are kept for the next run.
-const MAX_IDLE_WORKERS = 4;
+const MAX_IDLE_WORKERS = MAX_RUNNING;
 const idle: Worker[] = [];
 
 function takeWorker(): Worker {
@@ -132,19 +184,21 @@ export function wasmInput(bindings: SandboxBindings): string {
 }
 
 /**
- * Runs an uploaded module for a rule. Its output is one JSON document on
- * stdout, { steps, state?, reply? }; reply() and the rest come through
- * secretary.call like the JS prelude's.
+ * Runs a rule's program once. The output is one JSON document on stdout,
+ * { steps?, state?, reply? }, the same for JS and uploaded modules.
  */
-export async function runWasm(module: WebAssembly.Module, bindings: WasmBindings, limits: SandboxLimits): Promise<SandboxResult> {
+export async function runModule(program: Program, bindings: WasmBindings, limits: SandboxLimits): Promise<SandboxResult> {
+  const input = new TextEncoder().encode(wasmInput(bindings));
+  const stdin = program.prefix ? Buffer.concat([program.prefix, input]) : input;
   let run: Execution;
   try {
-    run = await execute(module, new TextEncoder().encode(wasmInput(bindings)), hostCalls(bindings, limits), limits.wallTimeMs);
+    run = await execute(program.module, stdin, hostCalls(bindings, limits, program.engine), limits.wallTimeMs);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e), logs: [] };
   }
   const { logs } = run;
-  if (run.exitCode !== 0) return { ok: false, error: `終了コード ${run.exitCode} で終わりました${logs.length ? `: ${logs.at(-1)!.slice(0, 300)}` : ""}`, logs };
+  // A failed run's last line on stderr is its error.
+  if (run.exitCode !== 0) return { ok: false, error: logs.at(-1)?.slice(0, 500) ?? `終了コード ${run.exitCode} で終わりました`, logs: logs.slice(0, -1) };
   const text = run.stdout.toString("utf8").trim();
   if (!text) return { ok: true, value: null, logs };
   let out: unknown;
@@ -155,21 +209,25 @@ export async function runWasm(module: WebAssembly.Module, bindings: WasmBindings
   }
   if (out === null) return { ok: true, value: null, logs };
   if (typeof out !== "object" || Array.isArray(out)) return { ok: false, error: "標準出力は { \"steps\": [...] } の形のJSONにしてください", logs };
-  const o = out as { steps?: unknown; rules?: unknown; state?: unknown; reply?: unknown };
+  const o = out as { steps?: unknown; state?: unknown; reply?: unknown };
   if (o.reply !== undefined && o.reply !== null) {
     if (!bindings.reply) return { ok: false, error: "reply はコマンドの実行のときだけ使えます", logs };
     bindings.reply(String(o.reply));
   }
   return {
     ok: true,
-    value: o.steps === undefined && o.rules === undefined ? null : { steps: o.steps ?? [], ...(o.rules !== undefined ? { rules: o.rules } : {}) },
+    value: o.steps === undefined ? null : { steps: o.steps },
     ...(bindings.state !== undefined && Object.hasOwn(o, "state") ? { state: { value: o.state ?? null } } : {}),
     logs,
   };
 }
 
-/** Answers a module's requests; every answer is JSON, { value } or { error }. */
-export function hostCalls(bindings: WasmBindings, limits: SandboxLimits): (request: string) => Promise<string> {
+/**
+ * Answers a module's requests; every answer is JSON, { value } or { error }.
+ * The public ABI is get, judge, rank, renderMath, convertImage and image
+ * (docs/wasm.md); canvas and measure serve the JS engine's createCanvas.
+ */
+export function hostCalls(bindings: WasmBindings, limits: SandboxLimits, engine = false): (request: string) => Promise<string> {
   let gets = 0;
   let decides = 0;
   let images = 0;
@@ -202,11 +260,8 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits): (reque
       const answers = (await decide({ items }, questions)) as Record<string, { score: number }>;
       return items.map((item, i) => ({ item, score: answers[`item${i}`]!.score })).sort((a, b) => b.score - a.score);
     },
-    async reply(r) {
-      if (!bindings.reply) throw new Error("reply はコマンドの実行のときだけ使えます");
-      bindings.reply(String(r.text ?? ""));
-      return null;
-    },
+  };
+  const engineFns: typeof fns = {
     async canvas(r) {
       if (!bindings.attach) throw new Error("createCanvas・attachImage はここでは使えません");
       image("attachImage");
@@ -216,6 +271,8 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits): (reque
       if (!bindings.attach) throw new Error("measureText はここでは使えません");
       return measureText(String(r.font ?? ""), String(r.text ?? ""));
     },
+  };
+  const publicFns: typeof fns = {
     async renderMath(r) {
       if (!bindings.media) throw new Error("renderMath はここでは使えません");
       image("renderMath");
@@ -233,6 +290,8 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits): (reque
       return bindings.image(Buffer.from(r.data, "base64"), name(r.name));
     },
   };
+  Object.assign(fns, publicFns);
+  if (engine) Object.assign(fns, engineFns);
   return async (request) => {
     try {
       const r = JSON.parse(request) as Record<string, unknown>;

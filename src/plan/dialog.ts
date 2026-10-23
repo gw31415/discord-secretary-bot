@@ -314,9 +314,9 @@ function codeBody(plan: Plan, room: number): string[] {
   const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string }> = [
     ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
     ...(plan.rules ?? []).map((r) => ({
-      title: r.wasm ? `ルール「${r.name}」が動かすWasm` : `ルール「${r.name}」のコードの説明`,
-      code: r.code,
-      ...(r.wasm ? { wasm: `sha256 ${r.wasm.sha256}${r.wasm.producers.length ? `\nビルド: ${r.wasm.producers.join("、")}` : ""}` } : {}),
+      title: r.program.kind === "wasm" ? `ルール「${r.name}」が動かすWasm` : `ルール「${r.name}」のコードの説明`,
+      code: r.program.kind === "js" ? r.program.code : "",
+      ...(r.program.kind === "wasm" ? { wasm: `sha256 ${r.program.module.sha256}${r.program.module.producers.length ? `\nビルド: ${r.program.module.producers.join("、")}` : ""}` } : {}),
       summary: r.replaces?.before && r.summary ? `変更前: ${r.replaces.before.summary ?? "説明はありません"}\n変更後: ${r.summary}` : r.summary,
     })),
   ];

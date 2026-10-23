@@ -88,6 +88,7 @@ const planner = new Planner({
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code });
   },
+  beforeWrite: (plan, step) => engine.noteWrite(plan, step, null),
   onWrite: (plan, step, response) => {
     caches.get(plan.guildId)?.applyWrite(step.op, step.pathParams, response);
     engine.noteWrite(plan, step, response);
@@ -198,7 +199,14 @@ const conversations = new Conversations({
   rules: {
     list: (guildId, ownerId, shareable) => rules.rulesFor(guildId, ownerId, shareable),
     runs: (guildId, ownerId, ruleId, shareable, limit) => rules.runsFor(guildId, ownerId, ruleId, shareable, limit),
-    wasm: { list: (ownerId) => wasm.list(ownerId), upload: (ownerId, name, bytes) => wasm.upload(ownerId, name, bytes) },
+    wasm: {
+      list: (ownerId) => wasm.list(ownerId),
+      upload: (ownerId, name, bytes) => wasm.upload(ownerId, name, bytes),
+      load: async (ownerId, guildId, ref) => {
+        const found = wasm.resolve(ownerId, caches.get(guildId)?.guild, ref);
+        return { module: await wasm.compiled(found.sha256), name: found.name, sha256: found.sha256 };
+      },
+    },
   },
   askWiden: (input) => widenPrompts.ask(input),
   onAwake: () => presence.refresh(),

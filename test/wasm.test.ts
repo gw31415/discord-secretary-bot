@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_MEMORY_PAGES, ModuleRejected, prepareModule } from "../src/wasm/module.ts";
-import { execute, runWasm } from "../src/wasm/run.ts";
+import { execute, runModule } from "../src/wasm/run.ts";
 
 // Small modules written out byte by byte, so the tests need no Wasm toolchain.
 
@@ -96,23 +96,23 @@ test("a module runs once, reaches the host only through secretary.call, and is s
 
   const spin = await prepareModule(wasm({ types: [[[], []]], memory: [1], funcs: [[0, LOOP]], exports: [["_start", 0, 0], ["memory", 2, 0]] }));
   const started = Date.now();
-  const r = await runWasm(await WebAssembly.compile(spin.bytes), { guildId: "1", actor: { kind: "user", userId: "2" }, get: async () => null }, { wallTimeMs: 300, memoryBytes: 0, maxGets: 1 });
+  const r = await runModule({ module: await WebAssembly.compile(spin.bytes) }, { guildId: "1", actor: { kind: "user", userId: "2" }, get: async () => null }, { wallTimeMs: 300, maxGets: 1 });
   assert.equal(r.ok, false);
   assert.match(r.error!, /上限/);
   assert.ok(Date.now() - started < 3000);
 });
 
 test("rule code compiles to bytecode once and runs from it", async () => {
-  const { compileJs, runSandboxed, setBytecodeCache, RULE_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const { compileJs, jsProgram, setBytecodeCache, SANDBOX_LIMITS } = await import("../src/sandbox.ts");
   await assert.rejects(compileJs("return )"), /SyntaxError/);
   const kept = new Map<string, Buffer>();
   setBytecodeCache({ get: (k) => kept.get(k), set: (k, v) => void kept.set(k, v) });
   try {
     const bindings = { guildId: "1", actor: { kind: "user" as const, userId: "2" }, get: async () => ({ n: 3 }), state: null };
     const code = "return plan([call('POST /channels/{channel}/messages', { path: { channel: '9' }, body: { content: String(discord.get('/x').n) } })])";
-    const first = await runSandboxed(code, bindings, RULE_SANDBOX_LIMITS, { cache: true });
+    const first = await runModule(await jsProgram(code), bindings, SANDBOX_LIMITS);
     assert.equal(kept.size, 1);
-    const second = await runSandboxed(code, bindings, RULE_SANDBOX_LIMITS, { cache: true });
+    const second = await runModule(await jsProgram(code), bindings, SANDBOX_LIMITS);
     assert.deepEqual(first.value, second.value);
     assert.equal((second.value as { steps: Array<{ body: { content: string } }> }).steps[0]!.body.content, "3");
   } finally {
@@ -176,12 +176,11 @@ test("an uploaded module runs a rule as its owner, pinned to its build; others i
     sourcePrompt: "",
     trigger: { event: "MESSAGE_CREATE" },
     allow: [{ op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } } }],
-    code: "",
-    wasm: v1.sha256,
+    program: { kind: "wasm", sha256: v1.sha256 },
     summary: null,
     limits: DEFAULT_LIMITS,
   });
-  assert.equal(store.getRule(rule.id)!.wasm, v1.sha256);
+  assert.deepEqual(store.getRule(rule.id)!.program, { kind: "wasm", sha256: v1.sha256 });
 
   engine.dispatch("MESSAGE_CREATE", GUILD, { id: "700", channel_id: "10", guild_id: GUILD, content: "hi", author: { id: "3" } });
   await engine.idle();
@@ -196,4 +195,70 @@ test("an uploaded module runs a rule as its owner, pinned to its build; others i
   assert.equal(registry.resolve("1", cache.guild, "greeter").sha256, v2.sha256);
   assert.throws(() => registry.remove("1", v1.sha256), /使っているので消せません/);
   assert.equal(registry.remove("1", v2.sha256).sha256, v2.sha256);
+});
+
+test("a .wasm attached to a message is pointed out to the agent", async () => {
+  const { formatMessage } = await import("../src/agent/tools.ts");
+  const line = formatMessage({ id: "1", timestamp: "2026-10-23T05:00:00Z", author: { id: "2", username: "a" }, content: "これを /hello にしたい", attachments: [{ id: "3", filename: "hello.wasm", size: 2048, url: "", proxy_url: "" }], embeds: [] } as never);
+  assert.match(line, /hello\.wasm\(Wasmモジュール 2KB、register_wasm で登録できる\)/);
+});
+
+test("run_wasm runs an attached or kept module once, read-only, and points steps at propose_plan", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const step = { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "hi" } };
+  const bytes = printer(JSON.stringify({ steps: [step] }));
+  const message = { id: "5", author: { id: "9" }, attachments: [{ id: "a", filename: "post.wasm", size: bytes.length, url: "https://cdn/post.wasm" }] };
+  const reader = { guild: { id: "1" }, scope: { speakerId: "1", channelId: "10" }, get: async (route: string) => (route === "/channels/10/messages/5" ? message : null) } as never;
+  const loaded: string[] = [];
+  const tools = readTools(reader, {
+    images: false,
+    fetch: (async () => new Response(bytes)) as never,
+    rules: {
+      list: () => [],
+      runs: () => null,
+      wasm: {
+        list: () => [],
+        upload: async () => { throw new Error("not here"); },
+        load: async (ref: string) => (loaded.push(ref), { module: await WebAssembly.compile(bytes), name: "post", sha256: "ab".repeat(32) }),
+      },
+    },
+  });
+  const run = tools.find((t) => t.name === "run_wasm")!;
+  const fromAttachment = await run.execute("t", { message_id: "5" });
+  const shown = (fromAttachment.content[0] as { text: string }).text;
+  assert.match(shown, /post\.wasm.*終了コード 0/);
+  assert.match(shown, /"op":"POST \/channels\/\{channel\}\/messages"/);
+  assert.match(shown, /変更の提案が 1 件/);
+  const fromModule = await run.execute("t", { module: "post" });
+  assert.match((fromModule.content[0] as { text: string }).text, /post\(abababababab\) 終了コード 0/);
+  assert.deepEqual(loaded, ["post"]);
+  await assert.rejects(run.execute("t", {}), /message_id か module/);
+});
+
+test("rules saved before programs were a union read as a JS or a Wasm program", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { randomBytes } = await import("node:crypto");
+  const { Store } = await import("../src/db.ts");
+  const path = join(mkdtempSync(join(tmpdir(), "rules-")), "bot.db");
+  const key = randomBytes(32);
+  let store = new Store(path, key);
+  const version = store.db.pragma("user_version", { simple: true }) as number;
+  const insert = store.db.prepare("INSERT INTO rules (id, guild_id, owner_id, name, rule_json, version, enabled, consecutive_failures, created_at, updated_at) VALUES (?, '1', '2', ?, ?, 1, 1, 0, '', '')");
+  const old = { sourcePrompt: "", trigger: { event: "MESSAGE_CREATE" }, allow: [], summary: null, limits: { perMinute: 10, maxConsecutiveFailures: 5 } };
+  insert.run("js", "js", JSON.stringify({ ...old, name: "js", code: "return null" }));
+  insert.run("wasm", "wasm", JSON.stringify({ ...old, name: "wasm", code: "", wasm: "ab".repeat(32) }));
+  store.db.pragma(`user_version = ${version - 1}`);
+  store.close();
+  store = new Store(path, key);
+  try {
+    assert.deepEqual(store.getRule("js")!.program, { kind: "js", code: "return null" });
+    assert.deepEqual(store.getRule("wasm")!.program, { kind: "wasm", sha256: "ab".repeat(32) });
+    assert.equal("code" in store.getRule("wasm")!, false);
+    assert.deepEqual(store.enabledRuleCode(), ["return null"]);
+    assert.deepEqual(store.wasmInUse(), ["ab".repeat(32)]);
+  } finally {
+    store.close();
+  }
 });

@@ -291,12 +291,12 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   } else if (page === "source") {
     texts.push(
       `**元の依頼**\n${clip(rule.sourcePrompt, 300)}`,
-      rule.wasm
-        ? `**Wasmモジュール**を動かします\n${fenced("", `sha256 ${rule.wasm}`)}\n-# 中身は /settings の「Wasm」で、登録した人が確かめられます。`
-        : fenced("js", rule.code.length > MAX_CODE ? `${rule.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.code),
+      rule.program.kind === "wasm"
+        ? `**Wasmモジュール**を動かします\n${fenced("", `sha256 ${rule.program.sha256}`)}\n-# 中身は /settings の「Wasm」で、登録した人が確かめられます。`
+        : fenced("js", rule.program.code.length > MAX_CODE ? `${rule.program.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.program.code),
     );
     if (input.can.owner) texts.push(`-# 直すときは会話でBotに「ルール \`${rule.id}\`(${rule.name})を〜に直して」と頼みます。`);
-    if (!rule.wasm) buttons.push(button(ruleCustomId("code", rule.id), "ファイルで"));
+    if (rule.program.kind === "js") buttons.push(button(ruleCustomId("code", rule.id), "ファイルで"));
   } else {
     texts.push(`**最近の実行**\n${input.runs.length > 0 ? input.runs.map(runLine).join("\n") : "まだありません"}`);
     const hasState = input.state !== undefined && input.state !== null;

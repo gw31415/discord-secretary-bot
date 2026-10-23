@@ -80,7 +80,7 @@ function world(now = { t: 1_000_000 }) {
     sourcePrompt: "投稿に返事して",
     trigger: { event: "MESSAGE_CREATE" },
     allow: [POST_GENERAL],
-    code: "return plan([])",
+    program: { kind: "js", code: "return plan([])" },
     summary: null,
     limits: DEFAULT_LIMITS,
   };

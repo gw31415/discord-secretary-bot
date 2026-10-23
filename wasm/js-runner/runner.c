@@ -3,13 +3,15 @@
  * it runs here, inside QuickJS compiled to WASI, under the same sandbox and
  * ABI as any uploaded module: the only way out is secretary.call.
  *
- * stdin: one line of JSON (the header), then the payload.
- *   {"mode":"compile"}            payload = source; stdout = QuickJS bytecode
- * Every header may carry "memory": the JS heap limit in bytes (default 48 MiB).
- *   {"mode":"source","globals":{}} payload = source; stdout = the program's string result
- *   {"mode":"bytecode","globals":{}} payload = bytecode from "compile"
- * A thrown error comes out as {"__error":"Name: message"} on stdout; a syntax
- * error in "compile" goes to stderr with exit code 3.
+ * stdin: one line of JSON (the header), the program (`size` bytes), then the
+ * run's input: the same JSON object every module reads on stdin.
+ *   {"mode":"compile","size":N}  program = source; stdout = QuickJS bytecode
+ *   {"mode":"source","size":N}   program = source
+ *   {"mode":"bytecode","size":N} program = bytecode from "compile"
+ * In the run modes each key of the input becomes a global, and stdout is the
+ * program's string result, so a rule's program writes what any module writes.
+ * A thrown error (or a syntax error) goes to stderr as "Name: message" and
+ * the exit code is 1, as with any module that fails.
  * Inside, __host(string) sends a request to the bot and returns its answer,
  * and __log(string) writes one line to stderr (the run's logs).
  */
@@ -87,16 +89,10 @@ static char *exception_text(JSContext *ctx) {
   return out;
 }
 
-static void print_error(JSContext *ctx) {
+static int fail(JSContext *ctx) {
   char *text = exception_text(ctx);
-  JSValue s = JS_NewString(ctx, text);
-  JSValue json = JS_JSONStringify(ctx, s, JS_UNDEFINED, JS_UNDEFINED);
-  const char *quoted = JS_ToCString(ctx, json);
-  printf("{\"__error\":%s}", quoted ? quoted : "\"error\"");
-  if (quoted) JS_FreeCString(ctx, quoted);
-  JS_FreeValue(ctx, json);
-  JS_FreeValue(ctx, s);
-  free(text);
+  fprintf(stderr, "%s\n", text);
+  return 1;
 }
 
 int main(void) {
@@ -108,70 +104,75 @@ int main(void) {
     return 2;
   }
   size_t header_len = (size_t)(nl - input);
-  uint8_t *payload = nl + 1;
-  size_t payload_len = len - header_len - 1;
+  uint8_t *program = nl + 1;
+  size_t rest = len - header_len - 1;
 
   JSRuntime *rt = JS_NewRuntime();
   JS_SetMaxStackSize(rt, 768 * 1024);
+  /* The JS heap's own limit, below the module's memory cap, so running out is a catchable error. */
+  JS_SetMemoryLimit(rt, 48 * 1024 * 1024);
   JSContext *ctx = JS_NewContext(rt);
   JSValue global = JS_GetGlobalObject(ctx);
 
   *nl = 0; /* the parser reads up to a NUL */
   JSValue header = JS_ParseJSON(ctx, (const char *)input, header_len, "header");
-  /* The JS heap's own limit, below the module's memory cap, so running out is a catchable error. */
-  double memory = 48 * 1024 * 1024;
-  JSValue memory_v = JS_GetPropertyStr(ctx, header, "memory");
-  if (JS_IsNumber(memory_v)) JS_ToFloat64(ctx, &memory, memory_v);
-  JS_SetMemoryLimit(rt, (size_t)memory);
   JSValue mode_v = JS_GetPropertyStr(ctx, header, "mode");
   const char *mode = JS_ToCString(ctx, mode_v);
-  if (!mode) {
+  double size_d = -1;
+  JSValue size_v = JS_GetPropertyStr(ctx, header, "size");
+  if (JS_IsNumber(size_v)) JS_ToFloat64(ctx, &size_d, size_v);
+  if (!mode || size_d < 0 || (size_t)size_d > rest) {
     fputs("bad header\n", stderr);
     return 2;
   }
+  size_t program_len = (size_t)size_d;
+  uint8_t *run_input = program + program_len;
+  size_t run_input_len = rest - program_len;
+  int is_source = strcmp(mode, "bytecode") != 0;
+  char *source = NULL;
+  if (is_source) {
+    /* The source must end in NUL for the parser. */
+    source = malloc(program_len + 1);
+    memcpy(source, program, program_len);
+    source[program_len] = 0;
+  }
 
   if (strcmp(mode, "compile") == 0) {
-    /* The source must end in NUL for the parser. */
-    char *source = malloc(payload_len + 1);
-    memcpy(source, payload, payload_len);
-    source[payload_len] = 0;
-    JSValue fn = JS_Eval(ctx, source, payload_len, "code.js", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
-    if (JS_IsException(fn)) {
-      char *text = exception_text(ctx);
-      fprintf(stderr, "%s\n", text);
-      return 3;
-    }
+    JSValue fn = JS_Eval(ctx, source, program_len, "code.js", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+    if (JS_IsException(fn)) return fail(ctx);
     size_t size;
     uint8_t *bytecode = JS_WriteObject(ctx, &size, fn, JS_WRITE_OBJ_BYTECODE);
     fwrite(bytecode, 1, size, stdout);
     return 0;
   }
 
-  JSValue globals = JS_GetPropertyStr(ctx, header, "globals");
+  /* The run's input, as globals. */
+  char *json = malloc(run_input_len + 1);
+  memcpy(json, run_input, run_input_len);
+  json[run_input_len] = 0;
+  JSValue values = JS_ParseJSON(ctx, json, run_input_len, "input");
+  if (!JS_IsObject(values)) {
+    fputs("the input is not a JSON object\n", stderr);
+    return 2;
+  }
   JSPropertyEnum *props;
   uint32_t count;
-  if (JS_IsObject(globals) && JS_GetOwnPropertyNames(ctx, &props, &count, globals, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+  if (JS_GetOwnPropertyNames(ctx, &props, &count, values, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
     for (uint32_t i = 0; i < count; i++) {
-      JS_SetProperty(ctx, global, props[i].atom, JS_GetProperty(ctx, globals, props[i].atom));
+      JS_SetProperty(ctx, global, props[i].atom, JS_GetProperty(ctx, values, props[i].atom));
     }
   }
   JS_SetPropertyStr(ctx, global, "__host", JS_NewCFunction(ctx, js_host, "__host", 1));
   JS_SetPropertyStr(ctx, global, "__log", JS_NewCFunction(ctx, js_log, "__log", 1));
 
   JSValue result;
-  if (strcmp(mode, "bytecode") == 0) {
-    JSValue fn = JS_ReadObject(ctx, payload, payload_len, JS_READ_OBJ_BYTECODE);
-    result = JS_IsException(fn) ? fn : JS_EvalFunction(ctx, fn);
+  if (is_source) {
+    result = JS_Eval(ctx, source, program_len, "code.js", JS_EVAL_TYPE_GLOBAL);
   } else {
-    char *source = malloc(payload_len + 1);
-    memcpy(source, payload, payload_len);
-    source[payload_len] = 0;
-    result = JS_Eval(ctx, source, payload_len, "code.js", JS_EVAL_TYPE_GLOBAL);
+    JSValue fn = JS_ReadObject(ctx, program, program_len, JS_READ_OBJ_BYTECODE);
+    result = JS_IsException(fn) ? fn : JS_EvalFunction(ctx, fn);
   }
-  if (JS_IsException(result)) {
-    print_error(ctx);
-    return 0;
-  }
+  if (JS_IsException(result)) return fail(ctx);
   size_t out_len;
   const char *out = JS_ToCStringLen(ctx, &out_len, result);
   if (out) fwrite(out, 1, out_len, stdout);

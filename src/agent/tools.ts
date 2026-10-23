@@ -14,7 +14,7 @@ import { ConvertOptionsSchema, convertImage, forModel, MathOptionsSchema, parseO
 import type { ConvertOptions, MathOptions } from "../media.ts";
 import { checkDecideInput, JUDGE_CODE_LINE, MAX_QUESTIONS, MAX_STATE_JSON as MAX_JUDGE_STATE_JSON } from "./decide.ts";
 import type { Decide } from "./decide.ts";
-import { AGENT_SANDBOX_LIMITS, RULE_SANDBOX_LIMITS, runSandboxed } from "../sandbox.ts";
+import { runRuleCode, runSandboxed, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { SandboxBindings } from "../sandbox.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
@@ -28,7 +28,12 @@ import { MAX_BATCH, MAX_DEBOUNCE_SECONDS, MAX_TRIGGER_EVENTS, triggerSummary } f
 import { MAX_LIMITS, MAX_STATE_JSON } from "../rules/types.ts";
 import type { Rule, RuleProposal, RuleRun } from "../rules/types.ts";
 import type { WasmModule } from "../db.ts";
-import { MAX_MODULE_BYTES } from "../wasm/module.ts";
+import { MAX_MODULE_BYTES, prepareModule } from "../wasm/module.ts";
+import { execute, hostCalls, wasmInput } from "../wasm/run.ts";
+import type { WasmBindings } from "../wasm/run.ts";
+
+/** How much of a one-shot module's stdout the model sees. */
+const MAX_WASM_OUTPUT = 20_000;
 import { sizeLabel } from "../wasm/registry.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
@@ -68,7 +73,7 @@ export function formatMessage(m: Omit<APIMessage, "reactions"> & Partial<Pick<AP
   const content = [m.content, ...componentText(m.components)].filter(Boolean).join("\n");
   let line = `${parts.join(" ")}: ${content}`;
   if (m.attachments.length > 0) {
-    line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : ""}`).join(", ")}]`;
+    line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : a.filename.toLowerCase().endsWith(".wasm") ? `(Wasmモジュール ${sizeLabel(a.size)}、register_wasm で登録できる)` : ""}`).join(", ")}]`;
   }
   if (m.embeds.length > 0) line += ` [埋め込み${m.embeds.length}件${m.embeds.some((e) => e.image || e.thumbnail) ? "・画像あり" : ""}]`;
   if (m.reactions?.length) {
@@ -133,6 +138,8 @@ export interface WasmTools {
   list: () => WasmModule[];
   /** Checks and keeps a module for the speaker; throws ModuleRejected with the reason. */
   upload: (name: string, bytes: Uint8Array) => Promise<{ module: WasmModule; replaced: number }>;
+  /** A kept module the speaker may run: their own by name, or one from someone in the server by sha256. */
+  load: (ref: string) => Promise<{ module: WebAssembly.Module; name: string; sha256: string }>;
 }
 
 export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
@@ -261,7 +268,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   /** Runs code whose images go into the reply's box; a failed run leaves none behind. */
   const runDrawing = async (code: string) => {
     const made: string[] = [];
-    const result = await runSandboxed(code, drawingBindings(made), AGENT_SANDBOX_LIMITS);
+    const result = await runSandboxed(code, drawingBindings(made), SANDBOX_LIMITS);
     if (!result.ok) box?.discard(made);
     return { result, made: result.ok ? made : [] };
   };
@@ -336,7 +343,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
           ({ result, made } = await runDrawing(code));
           return result.ok ? null : `${result.error}${result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : ""}`;
         },
-        run: (code) => runSandboxed(code, trialBindings, AGENT_SANDBOX_LIMITS),
+        run: (code) => runSandboxed(code, trialBindings, SANDBOX_LIMITS),
         tools: coderTools,
         ...(box ? { canvas: true } : {}),
       });
@@ -395,7 +402,74 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     },
   });
 
+  const wasm = options.rules?.wasm;
+  const runWasmTool = tool({
+    name: "run_wasm",
+    label: "Wasmを動かす",
+    description: [
+      "Wasmモジュールを登録せずに1回だけ動かし、標準出力・ログ・画像を返します。メッセージに添付された .wasm(だれの添付でも可)か、登録済みのモジュール(話し手のものは名前、同じサーバーの人のものは sha256 12文字以上)を指定します。",
+      "実行は読み取りだけです。モジュールは WASI のコマンドとして、標準入力で { guild, actor, eventName: null, event: input, batch: null, params: null, state: null } のJSONを読みます(stdin を渡すとその文字列だけ)。Discordの読み取りなどは secretary.call で、範囲は今のチャンネルで扱える分だけです。1回30秒・メモリ64MiBまで。",
+      "標準出力が { steps: [...] } なら変更の提案です。実行するには、その steps を propose_plan の steps に渡して確認ダイアログを出します(勝手には実行されません)。reply があれば返答に使えます。",
+    ].join("\n"),
+    parameters: Type.Object({
+      ...WASM_SOURCE,
+      module: Type.Optional(Type.String({ description: "登録済みのモジュール名か sha256。message_id の代わりに" })),
+      input: Type.Optional(Type.Unknown({ description: "標準入力のJSONの event に入れる値" })),
+      stdin: Type.Optional(Type.String({ maxLength: 100_000, description: "標準入力にそのまま渡す文字列(input の代わりに)" })),
+    }),
+    execute: async (_id, params) => {
+      if (!wasm) throw new Error("ここでは Wasm を動かせません");
+      let module: WebAssembly.Module;
+      let label: string;
+      if (params.module) {
+        const found = await wasm.load(params.module);
+        module = found.module;
+        label = `${found.name}(${found.sha256.slice(0, 12)})`;
+      } else if (params.message_id) {
+        const { bytes, filename } = await attachedWasm(reader, { ...params, message_id: params.message_id }, options.fetch ?? fetch);
+        const prepared = await prepareModule(bytes);
+        module = await WebAssembly.compile(prepared.bytes);
+        label = `${filename}(${prepared.info.sha256.slice(0, 12)})`;
+      } else throw new Error("message_id か module のどちらかを指定してください");
+      const made: string[] = [];
+      const bindings: WasmBindings = {
+        ...drawingBindings(made),
+        ...(box
+          ? {
+              // Whatever the module hands over is re-encoded, so only real images go out.
+              image: async (data: Buffer, name: string) => {
+                box.checkRoom();
+                const { data: out, format } = await convertImage(data, {});
+                const id = box.add({ data: out, name: `${name || "image"}.${format === "jpeg" ? "jpg" : format}` });
+                made.push(id);
+                return id;
+              },
+            }
+          : {}),
+      };
+      const stdin = params.stdin ?? wasmInput({ ...sandboxBindings, eventName: null, event: params.input ?? null, state: null });
+      let run;
+      try {
+        run = await execute(module, new TextEncoder().encode(stdin), hostCalls(bindings, SANDBOX_LIMITS), SANDBOX_LIMITS.wallTimeMs);
+      } catch (e) {
+        box?.discard(made);
+        throw e;
+      }
+      const out = run.stdout.toString("utf8");
+      const lines = [`${label} 終了コード ${run.exitCode}`, `標準出力${out.length > MAX_WASM_OUTPUT ? `(先頭 ${MAX_WASM_OUTPUT} 文字)` : ""}:\n${out.slice(0, MAX_WASM_OUTPUT) || "(なし)"}`];
+      if (run.logs.length) lines.push(`ログ(標準エラー出力):\n${run.logs.join("\n")}`);
+      try {
+        const parsed = JSON.parse(out) as { steps?: unknown };
+        if (Array.isArray(parsed?.steps) && parsed.steps.length > 0) lines.push(`変更の提案が ${parsed.steps.length} 件あります。実行するなら steps を propose_plan の steps に渡してください。`);
+      } catch {
+        // Plain text output.
+      }
+      return { content: [{ type: "text" as const, text: lines.join("\n\n") }, ...(await drawn(made))], details: {} };
+    },
+  });
+
   const tools = [readMessages, searchMessages, listChannels, findMembers, coder ? runCodeTask : runCode];
+  if (wasm) tools.push(runWasmTool);
   if (options.images) tools.push(viewImages);
   if (box) tools.push(renderMathTool, convertImageTool);
   if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide));
@@ -540,7 +614,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask({ ...r, code_task: task }), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runSandboxed(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }, RULE_SANDBOX_LIMITS),
+          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
           tools,
         });
         return { ...rest, code };
@@ -574,8 +648,7 @@ function toProposal(r: RuleInput): RuleProposal {
       ...(a.channel ? { channel: a.channel } : {}),
       ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
     })),
-    code: r.wasm ? "" : (r.code ?? ""),
-    ...(r.wasm ? { wasm: r.wasm } : {}),
+    program: r.wasm ? { kind: "wasm", module: r.wasm } : { kind: "js", code: r.code ?? "" },
     ...(r.params ? { params: r.params } : {}),
     ...(r.sample_event !== undefined ? { sampleEvent: r.sample_event } : {}),
     ...(r.replaces_rule ? { replaces: r.replaces_rule } : {}),
@@ -611,7 +684,7 @@ const RULES_DESCRIPTION = [
   "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
   "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
   "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
-  "  wasm: コードの代わりに、アップロードされたWasmモジュールを動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。話し手が .wasm を添付して頼んだときは、先に register_wasm で登録します。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
+  "  wasm: コードの代わりに、アップロードされたWasmモジュールを動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。Wasmは会話で登録できます(/settings の「Wasm」からも登録できます)。一度動かすだけなら登録せずに run_wasm で動かします。話し手が .wasm を添付して使い道を話したら、何をするモジュールか・どう使いたいか(どのきっかけで動かすか、コマンドにするか、何を変更するか)を相談し、決まったら register_wasm で登録してからルール案を出します。登録しただけで済ませたいと言われたら登録だけします。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
   "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 4 } を加えます。",
   "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
   "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND だけにし、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに作成者の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。変更は作成者の権限で allow の範囲だけ実行されるので、実行した人の権限で絞るときは permissions(例: [\"ManageChannels\"])を付けます。読み取りはそのチャンネルを見られる全員が読めるものに限られます。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
@@ -619,6 +692,26 @@ const RULES_DESCRIPTION = [
   "  きっかけにできるイベント:",
   triggerSummary(),
 ].join("\n");
+
+/** A .wasm attached to a message the reader may open. */
+async function attachedWasm(reader: Reader, ref: { message_id: string; channel_id?: string | undefined; index?: number | undefined }, fetchFn: typeof fetch): Promise<{ bytes: Uint8Array; filename: string; authorId: string }> {
+  const channelId = ref.channel_id ?? reader.scope.channelId;
+  const message = (await reader.get(`/channels/${channelId}/messages/${ref.message_id}`, {})) as APIMessage | null;
+  if (!message) throw new Error("メッセージが見つかりません");
+  const files = message.attachments.filter((a) => a.filename.toLowerCase().endsWith(".wasm"));
+  const file = files[ref.index ?? 0];
+  if (!file) throw new Error("このメッセージに .wasm の添付はありません");
+  if (file.size > MAX_MODULE_BYTES) throw new Error(`.wasm は${MAX_MODULE_BYTES / 1024 / 1024}MBまでです`);
+  const res = await fetchFn(file.url);
+  if (!res.ok) throw new Error(`添付を取得できませんでした(${res.status})`);
+  return { bytes: new Uint8Array(await res.arrayBuffer()), filename: file.filename, authorId: message.author.id };
+}
+
+const WASM_SOURCE = {
+  message_id: Type.Optional(Type.String({ description: ".wasm が添付されたメッセージ" })),
+  channel_id: Type.Optional(Type.String({ description: "省略時は今のチャンネル" })),
+  index: Type.Optional(Type.Integer({ minimum: 0, description: "何個目の .wasm か(0から、既定 0)" })),
+};
 
 /** The speaker's Wasm modules: listing them, and keeping one attached to a message. */
 function wasmTools(reader: Reader, wasm: WasmTools, fetchFn: typeof fetch): AgentTool<any>[] {
@@ -632,7 +725,7 @@ function wasmTools(reader: Reader, wasm: WasmTools, fetchFn: typeof fetch): Agen
       parameters: Type.Object({}),
       execute: async () => {
         const items = wasm.list();
-        return text(items.length ? items.map(describe).join("\n") : "モジュールはありません。/settings の「Wasm」から登録するか、.wasm を添付して頼んでもらってください");
+        return text(items.length ? items.map(describe).join("\n") : "モジュールはありません。.wasm を添付して話しかけてもらえば register_wasm で登録できます(/settings の「Wasm」からも登録できます)");
       },
     }),
     tool({
@@ -640,24 +733,14 @@ function wasmTools(reader: Reader, wasm: WasmTools, fetchFn: typeof fetch): Agen
       label: "Wasmを登録",
       description: `メッセージに添付された .wasm を話し手のモジュールとして登録します(${MAX_MODULE_BYTES / 1024 / 1024}MBまで)。同じ名前で登録すると新しい版になり、それを使うルールは差し替えるまで古い版のまま動きます。添付したのが話し手本人のメッセージのときだけ使います。登録しただけでは何も動きません。`,
       parameters: Type.Object({
+        ...WASM_SOURCE,
         message_id: Type.String(),
-        channel_id: Type.Optional(Type.String({ description: "省略時は今のチャンネル" })),
-        index: Type.Optional(Type.Integer({ minimum: 0, description: "何個目の .wasm か(0から、既定 0)" })),
         name: Type.Optional(Type.String({ maxLength: 40, description: "モジュール名。省略時はファイル名" })),
       }),
       execute: async (_id, params) => {
-        const channelId = params.channel_id ?? reader.scope.channelId;
-        const message = (await reader.get(`/channels/${channelId}/messages/${params.message_id}`, {})) as APIMessage | null;
-        if (!message) throw new Error("メッセージが見つかりません");
-        if (message.author.id !== reader.scope.speakerId) throw new Error("話し手本人が添付した .wasm だけ登録できます");
-        const files = message.attachments.filter((a) => a.filename.toLowerCase().endsWith(".wasm"));
-        const file = files[params.index ?? 0];
-        if (!file) throw new Error("このメッセージに .wasm の添付はありません");
-        if (file.size > MAX_MODULE_BYTES) throw new Error(`.wasm は${MAX_MODULE_BYTES / 1024 / 1024}MBまでです`);
-        const res = await fetchFn(file.url);
-        if (!res.ok) throw new Error(`添付を取得できませんでした(${res.status})`);
-        const bytes = new Uint8Array(await res.arrayBuffer());
-        const { module, replaced } = await wasm.upload(params.name ?? file.filename, bytes);
+        const { bytes, filename, authorId } = await attachedWasm(reader, params, fetchFn);
+        if (authorId !== reader.scope.speakerId) throw new Error("話し手本人が添付した .wasm だけ登録できます");
+        const { module, replaced } = await wasm.upload(params.name ?? filename, bytes);
         return text(`登録しました: ${describe(module)}${replaced ? `(同じ名前の古い版${replaced}個は使われていないので消しました)` : ""}`);
       },
     }),
@@ -714,7 +797,7 @@ function listRules(rules: RuleTools): AgentTool<any> {
         items
           .map(({ rule, shown, state }) =>
             shown
-              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, ...(rule.wasm ? { wasm: rule.wasm } : { code: rule.code }), state: state ?? null })
+              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, ...(rule.program.kind === "wasm" ? { wasm: rule.program.sha256 } : { code: rule.program.code }), state: state ?? null })
               : `${rule.id} ${rule.name}: このチャンネルでは扱えないチャンネルを使うため、内容は表示できません`,
           )
           .join("\n"),
@@ -798,7 +881,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       // Runs plan code; the error comes back as text so the coder can fix it.
       let planned: { drafts: StepDraft[]; rules: RuleProposal[] } | undefined;
       const runPlan = async (code: string): Promise<string | null> => {
-        const result = await runSandboxed(code, sandboxBindings, AGENT_SANDBOX_LIMITS);
+        const result = await runSandboxed(code, sandboxBindings, SANDBOX_LIMITS);
         if (!result.ok) {
           // A common mix-up: the rule's code (which reads `event`) passed as the plan's code.
           const hint = /\bevent\b/.test(code) ? `\nこのコードは今すぐ行う変更を作るコードで、event はありません(null)。イベントごとに動くコードは rules[].${codeField} に書いてください。` : "";
@@ -819,7 +902,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       let drafts: StepDraft[];
       let code = params.code;
       if (coder && params.code_task) {
-        code = (await writeCode(coder, "plan", params.code_task, { check: runPlan, run: (c) => runSandboxed(c, sandboxBindings, AGENT_SANDBOX_LIMITS), tools: coderTools })).code;
+        code = (await writeCode(coder, "plan", params.code_task, { check: runPlan, run: (c) => runSandboxed(c, sandboxBindings, SANDBOX_LIMITS), tools: coderTools })).code;
       } else if (code) {
         const problem = await runPlan(code);
         if (problem) throw new Error(problem);

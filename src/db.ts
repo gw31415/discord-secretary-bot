@@ -160,6 +160,13 @@ const MIGRATIONS: string[] = [
     used_at TEXT NOT NULL
   );
   `,
+  `
+  UPDATE rules SET rule_json = json_remove(json_set(rule_json, '$.program',
+    CASE WHEN json_extract(rule_json, '$.wasm') IS NOT NULL
+      THEN json_object('kind', 'wasm', 'sha256', json_extract(rule_json, '$.wasm'))
+      ELSE json_object('kind', 'js', 'code', coalesce(json_extract(rule_json, '$.code'), '')) END), '$.code', '$.wasm')
+  WHERE json_extract(rule_json, '$.program') IS NULL;
+  `,
 ];
 
 export interface ModelRef {
@@ -267,8 +274,8 @@ interface RuleDbRow {
 }
 
 function definitionOf(rule: RuleDefinition): RuleDefinition {
-  const { name, sourcePrompt, trigger, allow, code, wasm, params, summary, limits } = rule;
-  return { name, sourcePrompt, trigger, allow, code, ...(wasm ? { wasm } : {}), ...(params ? { params } : {}), summary, limits };
+  const { name, sourcePrompt, trigger, allow, program, params, summary, limits } = rule;
+  return { name, sourcePrompt, trigger, allow, program, ...(params ? { params } : {}), summary, limits };
 }
 
 function toRule(row: RuleDbRow): Rule {
@@ -737,19 +744,19 @@ export class Store {
 
   /** The code of every enabled JS rule, in any server. */
   enabledRuleCode(): string[] {
-    const rows = this.db.prepare("SELECT DISTINCT json_extract(rule_json, '$.code') AS code FROM rules WHERE enabled = 1 AND json_extract(rule_json, '$.wasm') IS NULL").all() as Array<{ code: string | null }>;
+    const rows = this.db.prepare("SELECT DISTINCT json_extract(rule_json, '$.program.code') AS code FROM rules WHERE enabled = 1 AND json_extract(rule_json, '$.program.kind') = 'js'").all() as Array<{ code: string | null }>;
     return rows.map((r) => r.code ?? "").filter((c) => c.trim());
   }
 
   /** Builds that enabled rules run, in any server. */
   wasmInUse(): string[] {
-    const rows = this.db.prepare("SELECT DISTINCT json_extract(rule_json, '$.wasm') AS sha FROM rules WHERE enabled = 1 AND json_extract(rule_json, '$.wasm') IS NOT NULL").all() as Array<{ sha: string }>;
+    const rows = this.db.prepare("SELECT DISTINCT json_extract(rule_json, '$.program.sha256') AS sha FROM rules WHERE enabled = 1 AND json_extract(rule_json, '$.program.kind') = 'wasm'").all() as Array<{ sha: string }>;
     return rows.map((r) => r.sha);
   }
 
   /** Rules in any server that run these bytes. */
   rulesUsingWasm(sha256: string): Rule[] {
-    const rows = this.db.prepare("SELECT * FROM rules WHERE json_extract(rule_json, '$.wasm') = ? ORDER BY created_at").all(sha256) as RuleDbRow[];
+    const rows = this.db.prepare("SELECT * FROM rules WHERE json_extract(rule_json, '$.program.kind') = 'wasm' AND json_extract(rule_json, '$.program.sha256') = ? ORDER BY created_at").all(sha256) as RuleDbRow[];
     return rows.map(toRule);
   }
 

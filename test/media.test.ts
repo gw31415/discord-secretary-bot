@@ -6,7 +6,7 @@ import { runSandboxed } from "../src/sandbox.ts";
 import type { SandboxBindings } from "../src/sandbox.ts";
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-const LIMITS = { wallTimeMs: 10_000, memoryBytes: 64 * 1024 * 1024, maxGets: 1 };
+const LIMITS = { wallTimeMs: 10_000, maxGets: 1 };
 
 test("TeX becomes an SVG sized by the font size, with ams and mhchem", async () => {
   const small = await renderMath(String.raw`\frac{a}{b} + \ce{H2O}`, { size: 16, padding: 0 });

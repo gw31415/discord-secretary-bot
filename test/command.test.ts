@@ -113,7 +113,7 @@ function world(visibilityScore?: (input: any) => Promise<number | null>) {
     sourcePrompt: "/announce で投稿",
     trigger: { event: "COMMAND", command: SPEC },
     allow: [{ op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } } }],
-    code: "",
+    program: { kind: "js", code: "" },
     summary: null,
     limits: DEFAULT_LIMITS,
   };
@@ -257,7 +257,7 @@ test("the owner changes who sees a command's replies from /rules, keeping the ve
   const after = w.store.getRule(rule.id)!;
   assert.equal(after.trigger.command!.visibility, "public");
   assert.equal(after.version, rule.version);
-  assert.equal(after.code, rule.code);
+  assert.deepEqual(after.program, rule.program);
   const view = JSON.stringify(w.calls.at(-1)![1]);
   assert.match(view, /返事を全員に見せる」にしました/);
   assert.throws(() => w.admin.setVisibility(GUILD, "1", rule.id, "everyone" as never), /選べない/);

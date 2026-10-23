@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runSandboxed } from "../src/sandbox.ts";
 
-const limits = { wallTimeMs: 2000, memoryBytes: 16 * 1024 * 1024, maxGets: 3 };
+const limits = { wallTimeMs: 2000, maxGets: 3 };
 const bindings = {
   guildId: "1",
   actor: { kind: "user" as const, userId: "42" },
@@ -51,20 +51,21 @@ test("plan(steps, rules) carries rules, and a rule's code reads its params", asy
 });
 
 test("a rule's code reads which trigger fired as eventName", async () => {
-  const { runSandboxed, RULE_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const { runRuleCode } = await import("../src/sandbox.ts");
   const bindings = { guildId: "1", actor: { kind: "user" as const, userId: "2" }, get: async () => null };
-  assert.equal((await runSandboxed("return eventName", { ...bindings, eventName: "CHANNEL_CREATE" }, RULE_SANDBOX_LIMITS)).value, "CHANNEL_CREATE");
-  assert.equal((await runSandboxed("return eventName", bindings, RULE_SANDBOX_LIMITS)).value, null);
+  const named = (b: object) => runRuleCode("return plan([call('X', { body: eventName })])", { ...bindings, ...b });
+  assert.equal(((await named({ eventName: "CHANNEL_CREATE" })).value as { steps: Array<{ body: unknown }> }).steps[0]!.body, "CHANNEL_CREATE");
+  assert.equal(((await named({})).value as { steps: Array<{ body: unknown }> }).steps[0]!.body, null);
 });
 
 test("rule code reads its state and sets the next one; other code has neither", async () => {
-  const { runSandboxed, RULE_SANDBOX_LIMITS, AGENT_SANDBOX_LIMITS } = await import("../src/sandbox.ts");
+  const { runRuleCode, runSandboxed } = await import("../src/sandbox.ts");
   const bindings = { guildId: "100", actor: { kind: "user" as const, userId: "1" }, get: async () => null };
-  const r = await runSandboxed("const s = state || { n: 0 }; s.n++; setState(s); s.n = 99; return null", { ...bindings, state: { n: 1 } }, RULE_SANDBOX_LIMITS);
+  const r = await runRuleCode("const s = state || { n: 0 }; s.n++; setState(s); s.n = 99; return null", { ...bindings, state: { n: 1 } });
   assert.deepEqual(r.state, { value: { n: 2 } });
   assert.equal(r.value, null);
-  const untouched = await runSandboxed("return plan([])", { ...bindings, state: null }, RULE_SANDBOX_LIMITS);
+  const untouched = await runRuleCode("return plan([])", { ...bindings, state: null });
   assert.equal(untouched.state, undefined);
-  const agent = await runSandboxed("return [typeof state, typeof setState]", bindings, AGENT_SANDBOX_LIMITS);
-  assert.deepEqual(agent.value, ["undefined", "undefined"]);
+  const agent = await runSandboxed("return [state, typeof setState]", bindings);
+  assert.deepEqual(agent.value, [null, "undefined"]);
 });

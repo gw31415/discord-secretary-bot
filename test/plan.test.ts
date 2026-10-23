@@ -543,6 +543,7 @@ const RULE = {
 test("a rule's plan runs without a dialog, as its owner, inside its allow list", async () => {
   const { planner, store, calls, replies } = setup();
   const written: string[] = [];
+  planner.deps.beforeWrite = (_plan, step) => void written.push(`before ${step.op} (${calls.length} sent)`);
   planner.deps.onWrite = (_plan, step) => void written.push(step.op);
   const done = await planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "ようこそ" } }] });
   assert.equal(done.status, "succeeded");
@@ -552,7 +553,8 @@ test("a rule's plan runs without a dialog, as its owner, inside its allow list",
   const row = store.getPlan(done.plan.id)!;
   assert.equal(row.plan.actor.via, "rule");
   assert.equal(row.approvedBy, "1");
-  assert.deepEqual(written, ["POST /channels/{channel}/messages"]);
+  // Marked before it is sent too, since the gateway may report it before the response arrives.
+  assert.deepEqual(written, ["before POST /channels/{channel}/messages (0 sent)", "POST /channels/{channel}/messages"]);
 });
 
 test("a rule's steps outside its allow list, or past its count, are rejected before anything runs", async () => {
@@ -609,14 +611,14 @@ const LOBBY_RULE = {
     { op: "POST /guilds/{guild}/channels", body: { type: "object", properties: { name: { type: "string", pattern: "^📞" }, type: { const: 2 } }, required: ["name", "type"], additionalProperties: false }, maxStepsPerRun: 1 },
     { op: "PATCH /guilds/{guild}/members/{user}", body: { type: "object", properties: { channel_id: { type: "string" } }, required: ["channel_id"], additionalProperties: false }, maxStepsPerRun: 1 },
   ],
-  code: "if (event.channel_id !== params.lobby) return null; return plan([]);",
+  program: { kind: "js" as const, code: "if (event.channel_id !== params.lobby) return null; return plan([]);" },
   params: { lobby: { $ref: "steps.s1.result.id" } },
 };
 const CLEANUP_RULE = {
   name: "空き部屋を消す",
   trigger: { event: "VOICE_STATE_UPDATE", includeBotOrigin: true },
   allow: [{ op: "DELETE /channels/{channel}", target: { properties: { name: { pattern: "^📞" } }, required: ["name"] }, maxStepsPerRun: 1 }],
-  code: "return null;",
+  program: { kind: "js" as const, code: "return null;" },
   sampleEvent: { guild_id: GUILD, user_id: "3", channel_id: null, before_channel_id: "10" },
 };
 
@@ -769,10 +771,10 @@ test("with a coding model, the agent describes code and the coder writes and fix
     code_task: "vc作成 というボイスチャンネルを作る",
     rules: [{ name: "通話部屋", trigger_event: "VOICE_STATE_UPDATE", allow: [{ op: "POST /guilds/{guild}/channels" }], code_task: "vc作成 に入った人の部屋を作る", params: { lobby: "1" } }],
   });
-  const [drafts, code, rules] = proposed[0] as [Array<{ op: string }>, string, Array<{ code: string; name: string }>];
+  const [drafts, code, rules] = proposed[0] as [Array<{ op: string }>, string, Array<{ program: { code: string }; name: string }>];
   assert.equal(drafts[0]!.op, "POST /guilds/{guild}/channels");
   assert.match(code, /vc作成/);
-  assert.equal(rules[0]!.code, "if (!event.channel_id) return null; return plan([])");
+  assert.equal(rules[0]!.program.code, "if (!event.channel_id) return null; return plan([])");
   // The rule's task carries its trigger, params and allow, since the coder sees nothing else.
   const ruleAsk = asked.find((a) => a.kind === "rule")!;
   assert.match(ruleAsk.task, /VOICE_STATE_UPDATE/);
@@ -857,7 +859,7 @@ const TEX_RULE = {
   name: "数式",
   trigger: { event: "COMMAND", command: { name: "tex", description: "数式を画像にする", options: [{ name: "tex", description: "TeX", type: "string" as const, required: true }] } },
   allow: [],
-  code: "reply('ok'); return null;",
+  program: { kind: "js" as const, code: "reply('ok'); return null;" },
 };
 
 test("a command's dialog starts on the judge's pick for who sees replies, and the requester can change it", async () => {
