@@ -113,6 +113,8 @@ export class RuleEngine {
   readonly #pending = new Map<string, { version: number; first: number; timer: unknown; batch: BatchItem[] }>();
   /** Start times of recent runs per rule, for the per-minute limit. */
   readonly #runs = new Map<string, number[]>();
+  /** Events that came while a rule was over its per-minute limit, run together once it is not. */
+  readonly #deferred = new Map<string, { version: number; batch: BatchItem[]; timer: unknown }>();
   /** Rules whose rate-limit skip was already recorded this minute, so a flood leaves one row. */
   readonly #limitedNoted = new Map<string, number>();
   /** Runs that must not overlap, one after another in the order events arrived (see serialKey). */
@@ -258,8 +260,42 @@ export class RuleEngine {
       this.#debounce(rule, { eventName: event, event: data });
       return;
     }
-    if (!this.#allowRun(rule)) return;
-    this.#enqueue(serialKey(rule, data), () => this.#run(rule.id, rule.version, eventIdOf(event, data), [{ eventName: event, event: data }]));
+    this.#start(rule, [{ eventName: event, event: data }]);
+  }
+
+  /**
+   * Runs on a batch now, or, past the rule's per-minute limit, once a run is
+   * allowed again: events that come meanwhile join that one run's batch, so
+   * the last state is never left unhandled.
+   */
+  #start(rule: Rule, batch: BatchItem[]): void {
+    const wait = this.#allowRun(rule);
+    if (wait === 0) {
+      const last = batch.at(-1)!;
+      this.#enqueue(serialKey(rule, last.event), () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), batch));
+      return;
+    }
+    const { setTimer = defaultSetTimer } = this.deps;
+    let deferred = this.#deferred.get(rule.id);
+    if (deferred && deferred.version !== rule.version) deferred = undefined;
+    if (deferred) {
+      deferred.batch.push(...batch);
+      deferred.batch.splice(0, Math.max(0, deferred.batch.length - MAX_BATCH));
+      return;
+    }
+    deferred = { version: rule.version, batch: batch.slice(-MAX_BATCH), timer: null };
+    this.#deferred.set(rule.id, deferred);
+    deferred.timer = setTimer(() => this.#resume(rule.id), wait);
+  }
+
+  /** The limit allows a run again: one run on everything that waited. */
+  #resume(ruleId: string): void {
+    const deferred = this.#deferred.get(ruleId);
+    if (!deferred) return;
+    this.#deferred.delete(ruleId);
+    const rule = this.deps.store.getRule(ruleId);
+    if (!rule?.enabled || rule.version !== deferred.version || this.halted(rule.guildId)) return;
+    this.#start(rule, deferred.batch);
   }
 
   #debounce(rule: Rule, item: BatchItem): void {
@@ -288,19 +324,24 @@ export class RuleEngine {
     const rule = this.deps.store.getRule(ruleId);
     const last = pending.batch.at(-1);
     if (!rule?.enabled || rule.version !== pending.version || !last) return;
-    if (!this.#allowRun(rule)) return;
-    this.#enqueue(serialKey(rule, last.event), () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), pending.batch));
+    this.#start(rule, pending.batch);
   }
 
-  /** Runs every debounced rule now instead of after its wait (tests and shutdown). */
+  /** Runs every debounced or held-back rule now instead of after its wait (tests and shutdown). */
   flushDebounced(): void {
     for (const [id, pending] of this.#pending) {
       (this.deps.clearTimer ?? defaultClearTimer)(pending.timer);
       this.#flush(id);
     }
+    for (const [id, deferred] of this.#deferred) {
+      (this.deps.clearTimer ?? defaultClearTimer)(deferred.timer);
+      this.#runs.delete(id);
+      this.#resume(id);
+    }
   }
 
-  #allowRun(rule: Rule): boolean {
+  /** 0 when the rule may run now (and counts the run), else how long until it may. */
+  #allowRun(rule: Rule): number {
     const now = this.deps.now();
     const recent = (this.#runs.get(rule.id) ?? []).filter((t) => now - t < 60_000);
     if (recent.length >= rule.limits.perMinute) {
@@ -308,13 +349,13 @@ export class RuleEngine {
       if ((this.#limitedNoted.get(rule.id) ?? 0) <= now) {
         this.#limitedNoted.set(rule.id, now + 60_000);
         const id = this.deps.store.startRuleRun({ ruleId: rule.id, ruleVersion: rule.version, eventId: "-" });
-        this.deps.store.finishRuleRun(id, { outcome: "rate_limited", error: `1分あたり${rule.limits.perMinute}回を超えたため、この1分の残りのイベントを飛ばしました` });
+        this.deps.store.finishRuleRun(id, { outcome: "rate_limited", error: `1分あたり${rule.limits.perMinute}回を超えたため、この間のイベントは枠が空いたときにまとめて1回で処理します` });
       }
-      return false;
+      return Math.max(1, recent[0]! + 60_000 - now);
     }
     recent.push(now);
     this.#runs.set(rule.id, recent);
-    return true;
+    return 0;
   }
 
   /** Runs with the same key go one after another; a run without one starts at once. */
@@ -391,7 +432,7 @@ export class RuleEngine {
     const guild = this.deps.caches.get(rule.guildId)?.guild;
     const channelId = typeof event.channel_id === "string" ? event.channel_id : "";
     if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event)) return skipped("ルールの作成者がこのチャンネルを見られないため、ここでは動きません");
-    if (!this.#allowRun(rule)) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
+    if (this.#allowRun(rule) !== 0) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
     const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: rule.ownerId, audience: "channel" });
     return new Promise((resolve) => {
       this.#enqueue(serialKey(rule, event), async () => {

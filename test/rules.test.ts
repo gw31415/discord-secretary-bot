@@ -163,6 +163,11 @@ test("runs are rate limited, and failures in a row switch the rule off and tell 
   await w.engine.idle();
   assert.equal(w.runs.length, 2);
   assert.equal(w.store.recentRuleRuns(rule.id, 10).filter((r) => r.outcome === "rate_limited").length, 1);
+  // The events past the limit are not dropped: they run once, together, when the limit allows.
+  w.engine.flushDebounced();
+  await w.engine.idle();
+  assert.equal(w.runs.length, 3);
+  assert.deepEqual(w.seen.at(-1).batch.map((b: any) => b.event.id), ["802", "803"]);
 
   w.now.t += 61_000;
   w.setCode(() => ({ ok: false, error: "TypeError: boom", logs: [] }));
