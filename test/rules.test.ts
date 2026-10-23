@@ -415,3 +415,38 @@ test("a rule carries its state to the next run, but only from runs that went thr
   w.store.setRuleState(rule.id, null);
   assert.equal(w.store.getRuleState(rule.id), null);
 });
+
+test("a rule's runs go one at a time, while another rule runs alongside", async () => {
+  const w = world();
+  const slow = w.admin.save(GUILD, "1", { ...w.definition, name: "遅い" });
+  const fast = w.admin.save(GUILD, "1", { ...w.definition, name: "速い" });
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let slowRunning = 0;
+  let overlapped = false;
+  w.setResult(async () => {
+    const name = w.runs.at(-1).rule.id === slow.id ? "slow" : "fast";
+    order.push(`${name} start`);
+    if (name === "slow") {
+      if (++slowRunning > 1) overlapped = true;
+      await gate;
+      slowRunning--;
+    }
+    order.push(`${name} end`);
+    return { plan: { id: "p" }, status: "succeeded", reason: null };
+  });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "701"));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "702"));
+  await new Promise((r) => setTimeout(r, 50));
+  // The other rule finished both of its runs while the first one waits.
+  assert.equal(order.filter((o) => o === "fast end").length, 2);
+  // The waiting rule has started its first run only; its second waits for it.
+  assert.equal(order.filter((o) => o === "slow start").length, 1);
+  release();
+  await w.engine.idle();
+  assert.equal(order.filter((o) => o === "slow end").length, 2);
+  assert.equal(overlapped, false);
+  assert.equal(w.store.recentRuleRuns(slow.id, 5).length, 2);
+  assert.equal(w.store.recentRuleRuns(fast.id, 5).length, 2);
+});

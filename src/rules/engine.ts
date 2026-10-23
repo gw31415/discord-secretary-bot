@@ -115,7 +115,7 @@ export class RuleEngine {
   readonly #runs = new Map<string, number[]>();
   /** Rules whose rate-limit skip was already recorded this minute, so a flood leaves one row. */
   readonly #limitedNoted = new Map<string, number>();
-  /** Runs one after another per server, in the order events arrived. */
+  /** Runs of each rule, one after another in the order events arrived. */
   readonly #queues = new Map<string, Promise<void>>();
 
   constructor(deps: RuleEngineDeps) {
@@ -211,7 +211,7 @@ export class RuleEngine {
   /**
    * Called for every Gateway event a rule can use. The checks that decide
    * whether a rule runs happen now, against the state at the moment of the
-   * event; the runs themselves are queued per server.
+   * event; the runs themselves are queued per rule.
    */
   dispatch(event: string, guildId: string | undefined, data: Data): void {
     if (!guildId || !TRIGGERS[event]) return;
@@ -258,7 +258,7 @@ export class RuleEngine {
       return;
     }
     if (!this.#allowRun(rule)) return;
-    this.#enqueue(rule.guildId, () => this.#run(rule.id, rule.version, eventIdOf(event, data), [{ eventName: event, event: data }]));
+    this.#enqueue(rule.id, () => this.#run(rule.id, rule.version, eventIdOf(event, data), [{ eventName: event, event: data }]));
   }
 
   #debounce(rule: Rule, item: BatchItem): void {
@@ -288,7 +288,7 @@ export class RuleEngine {
     const last = pending.batch.at(-1);
     if (!rule?.enabled || rule.version !== pending.version || !last) return;
     if (!this.#allowRun(rule)) return;
-    this.#enqueue(rule.guildId, () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), pending.batch));
+    this.#enqueue(rule.id, () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), pending.batch));
   }
 
   /** Runs every debounced rule now instead of after its wait (tests and shutdown). */
@@ -316,11 +316,15 @@ export class RuleEngine {
     return true;
   }
 
-  #enqueue(guildId: string, task: () => Promise<unknown>): void {
-    const next = (this.#queues.get(guildId) ?? Promise.resolve()).then(async () => void (await task())).catch((e) => this.deps.log("ルールの実行に失敗", e));
-    this.#queues.set(guildId, next);
+  /**
+   * Runs of one rule go one at a time, so a rule never races itself (two rooms
+   * for one join, state written over); different rules run side by side.
+   */
+  #enqueue(ruleId: string, task: () => Promise<unknown>): void {
+    const next = (this.#queues.get(ruleId) ?? Promise.resolve()).then(async () => void (await task())).catch((e) => this.deps.log("ルールの実行に失敗", e));
+    this.#queues.set(ruleId, next);
     void next.finally(() => {
-      if (this.#queues.get(guildId) === next) this.#queues.delete(guildId);
+      if (this.#queues.get(ruleId) === next) this.#queues.delete(ruleId);
     });
   }
 
@@ -391,7 +395,7 @@ export class RuleEngine {
     if (!this.#allowRun(rule)) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
     const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: rule.ownerId, audience: "channel" });
     return new Promise((resolve) => {
-      this.#enqueue(rule.guildId, async () => {
+      this.#enqueue(rule.id, async () => {
         try {
           resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader)) ?? skipped("このコマンドのルールは止まっています"));
         } catch (e) {
