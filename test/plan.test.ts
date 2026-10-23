@@ -9,6 +9,7 @@ import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
 import { confirmPhrase, needsTypedConfirm, dialogButtons, dialogText, parsePlanCustomId, renderDialog } from "../src/plan/dialog.ts";
 import { Planner } from "../src/plan/service.ts";
+import { batchKey, referencedSteps } from "../src/plan/batch.ts";
 import { RuleAdmin } from "../src/rules/admin.ts";
 import { RuleEngine } from "../src/rules/engine.ts";
 import { RuleService } from "../src/rules/service.ts";
@@ -139,6 +140,10 @@ function fakeDiscord() {
       channels[id] = { id, type: 0, name: (options?.body as { name: string }).name, guild_id: GUILD, permission_overwrites: [] };
       return channels[id];
     }
+    if (method === "POST" && path === `/guilds/${GUILD}/bulk-ban`) {
+      const ids = (options?.body as { user_ids: string[] }).user_ids;
+      return { banned_users: ids.filter((id) => !failures.has(`ban:${id}`)), failed_users: ids.filter((id) => failures.has(`ban:${id}`)) };
+    }
     if (method === "POST") return { id: String(next++) };
     return undefined;
   };
@@ -161,7 +166,7 @@ function fakeDiscord() {
       followUp: async (_a: string, _t: string, body: any) => void replies.push({ kind: "followUp", body }),
     },
   } as unknown as API;
-  return { api, calls, replies, channels, members, failures };
+  return { api, calls, replies, channels, members, messages, failures };
 }
 
 function setup(now = { t: Date.parse("2026-10-21T00:00:00Z") }) {
@@ -900,4 +905,82 @@ test("a command's dialog starts on the judge's pick for who sees replies, and th
   await t.planner.handleInteraction(click(changed, "run", "1"));
   await settle(() => t.store.getPlan(plan.id)!.status === "succeeded");
   assert.equal(t.store.listRules(GUILD)[0]!.trigger.command!.visibility, "public");
+});
+
+// --- Sending neighbouring steps in one request ---------------------------------
+
+const ANY = (op: string) => ({ op, maxStepsPerRun: 50 });
+
+test("neighbouring position changes go in one request; other steps are sent alone", async () => {
+  const { planner, store, calls } = setup();
+  const written: string[] = [];
+  planner.deps.onWrite = (_plan, step) => void written.push(String(step.pathParams.channel));
+  const rule = { ...RULE, allow: [ANY("PATCH /channels/{channel}")] };
+  const done = await planner.runForRule({
+    guildId: GUILD, ownerId: "1", rule,
+    drafts: [
+      { op: "PATCH /channels/{channel}", path: { channel: "11" }, body: { position: 0 } },
+      { op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { position: 1, parent_id: null } },
+      { op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { name: "renamed" } },
+    ],
+  });
+  assert.equal(done.status, "succeeded");
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`PATCH /guilds/${GUILD}/channels`, "PATCH /channels/10"]);
+  assert.deepEqual(calls[0]!.options!.body, [{ id: "11", position: 0 }, { id: "10", position: 1, parent_id: null }]);
+  assert.match(calls[0]!.options!.reason!, /ルール「挨拶」/);
+  // Each step is still recorded, and reported as the bot's own write, one by one.
+  assert.deepEqual(store.getSteps(done.plan.id).map((s) => s.state), ["done", "done", "done"]);
+  assert.deepEqual(written, ["11", "10", "10"]);
+});
+
+test("recent deletions in one channel use bulk delete; old ones are deleted one by one", async () => {
+  const { planner, now, calls, messages } = setup();
+  const recent = (ms: number) => String((BigInt(now.t - ms) - 1420070400000n) << 22n);
+  const [a, b] = [recent(60_000), recent(3600_000)];
+  const old = recent(15 * 24 * 3600_000);
+  for (const id of [a, b, old]) messages[id] = { id, content: "x", author: { username: "alice" } };
+  const rule = { ...RULE, allow: [ANY("DELETE /channels/{channel}/messages/{message}")] };
+  const done = await planner.runForRule({
+    guildId: GUILD, ownerId: "1", rule,
+    drafts: [a, b, old].map((message) => ({ op: "DELETE /channels/{channel}/messages/{message}", path: { channel: "10", message } })),
+  });
+  assert.equal(done.status, "succeeded");
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["POST /channels/10/messages/bulk-delete", `DELETE /channels/10/messages/${old}`]);
+  assert.deepEqual(calls[0]!.options!.body, { messages: [a, b] });
+});
+
+test("bans with the same message deletion go in one bulk ban, and a user it could not ban fails that step", async () => {
+  const { planner, store, calls, failures } = setup();
+  failures.add("ban:2");
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [
+      { op: "PUT /guilds/{guild}/bans/{user}", path: { user: "3" }, body: {} },
+      { op: "PUT /guilds/{guild}/bans/{user}", path: { user: "2" }, body: {} },
+      { op: "PUT /guilds/{guild}/bans/{user}", path: { user: "4" }, body: { delete_message_seconds: 3600 } },
+    ],
+  });
+  await planner.handleInteraction(modal(plan, "1", confirmPhrase(plan)));
+  await settle(() => store.getPlan(plan.id)!.status === "failed");
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`POST /guilds/${GUILD}/bulk-ban`]);
+  assert.deepEqual(calls[0]!.options!.body, { user_ids: ["3", "2"], delete_message_seconds: 0 });
+  assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "failed", "pending"]);
+  assert.match(store.getPlan(plan.id)!.reason!, /s2 で失敗: BANできませんでした/);
+});
+
+test("a step whose result a later step uses is never merged", () => {
+  const steps = normalizeSteps(
+    [
+      { op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { position: 0 } },
+      { op: "PATCH /channels/{channel}", path: { channel: "11" }, body: { position: 1 } },
+      { op: "POST /channels/{channel}/messages", path: { channel: { $ref: "steps.s2.result.id" } }, body: { content: "x" } },
+    ],
+    GUILD,
+    "p",
+  );
+  const referenced = referencedSteps(steps);
+  assert.deepEqual([...referenced], ["s2"]);
+  assert.notEqual(batchKey(steps[0]!, referenced, 0), null);
+  assert.equal(batchKey(steps[1]!, referenced, 0), null);
+  assert.equal(batchKey(steps[2]!, referenced, 0), null);
 });
