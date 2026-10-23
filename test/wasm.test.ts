@@ -198,38 +198,8 @@ test("an uploaded module runs a rule as its owner, pinned to its build; others i
   assert.equal(registry.remove("1", v2.sha256).sha256, v2.sha256);
 });
 
-test("/settings with a .wasm attached registers it; without one it falls through to the panel", async () => {
-  const { randomBytes } = await import("node:crypto");
-  const { Store } = await import("../src/db.ts");
-  const { WasmRegistry } = await import("../src/wasm/registry.ts");
-  const { WasmPanel } = await import("../src/wasm/panel.ts");
-  const { COMMANDS } = await import("../src/discord/commands.ts");
-  assert.ok((COMMANDS[0] as { options?: Array<{ name: string }> }).options?.some((o) => o.name === "wasm"));
-
-  const registry = new WasmRegistry(new Store(":memory:", randomBytes(32)));
-  const calls: string[] = [];
-  const edits: any[] = [];
-  const api = {
-    interactions: {
-      defer: async () => void calls.push("defer"),
-      reply: async (_id: string, _t: string, body: any) => void calls.push(`reply:${JSON.stringify(body).includes(".wasm ではありません")}`),
-      editReply: async (_a: string, _t: string, body: any) => void edits.push(body),
-    },
-  };
-  const bytes = printer("{}");
-  const panel = new WasmPanel({ api: api as never, registry, log: () => {}, fetch: (async () => new Response(bytes)) as never });
-  const command = (attachment?: { filename: string; size: number }) => ({
-    type: 2, id: "i", token: "t", application_id: "a", member: { user: { id: "1" } },
-    data: {
-      name: "settings", type: 1,
-      ...(attachment ? { options: [{ name: "wasm", type: 11, value: "9" }], resolved: { attachments: { "9": { id: "9", url: "https://cdn/x", ...attachment } } } } : {}),
-    },
-  });
-  assert.equal(await panel.handleInteraction(command() as never), false);
-  assert.equal(await panel.handleInteraction(command({ filename: "hello.wasm", size: bytes.length }) as never), true);
-  assert.deepEqual(calls, ["defer"]);
-  assert.match(JSON.stringify(edits[0]), /登録しました/);
-  assert.equal(registry.list("1")[0]!.name, "hello");
-  await panel.handleInteraction(command({ filename: "hello.txt", size: 3 }) as never);
-  assert.deepEqual(calls, ["defer", "reply:true"]);
+test("a .wasm attached to a message is pointed out to the agent", async () => {
+  const { formatMessage } = await import("../src/agent/tools.ts");
+  const line = formatMessage({ id: "1", timestamp: "2026-10-23T05:00:00Z", author: { id: "2", username: "a" }, content: "これを /hello にしたい", attachments: [{ id: "3", filename: "hello.wasm", size: 2048, url: "", proxy_url: "" }], embeds: [] } as never);
+  assert.match(line, /hello\.wasm\(Wasmモジュール 2KB、register_wasm で登録できる\)/);
 });

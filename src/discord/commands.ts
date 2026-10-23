@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { API } from "@discordjs/core";
-import { ApplicationCommandOptionType, ApplicationCommandType, ApplicationIntegrationType, InteractionContextType } from "discord-api-types/v10";
+import { ApplicationCommandType, ApplicationIntegrationType, InteractionContextType } from "discord-api-types/v10";
 import type { RESTPutAPIApplicationCommandsJSONBody, RESTPutAPIApplicationGuildCommandsJSONBody } from "discord-api-types/v10";
 import type { Store } from "../db.ts";
 import { commandJson } from "../rules/command.ts";
@@ -18,14 +18,6 @@ export const COMMANDS: RESTPutAPIApplicationCommandsJSONBody = [
     name: "settings",
     description: "あなたの設定(APIキー・使うモデル・Webツール・読み取りの許可)とルール・コマンドの管理を開きます",
     type: ApplicationCommandType.ChatInput,
-    options: [
-      {
-        type: ApplicationCommandOptionType.Attachment,
-        name: "wasm",
-        description: ".wasm を付けて送ると、あなたのWasmモジュールとして登録します",
-        required: false,
-      },
-    ],
     ...IN_SERVERS,
   },
 ];

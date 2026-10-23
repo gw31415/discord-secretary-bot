@@ -68,7 +68,7 @@ export function formatMessage(m: Omit<APIMessage, "reactions"> & Partial<Pick<AP
   const content = [m.content, ...componentText(m.components)].filter(Boolean).join("\n");
   let line = `${parts.join(" ")}: ${content}`;
   if (m.attachments.length > 0) {
-    line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : ""}`).join(", ")}]`;
+    line += ` [添付: ${m.attachments.map((a) => `${a.filename}${a.content_type?.startsWith("image/") ? "(画像)" : a.filename.toLowerCase().endsWith(".wasm") ? `(Wasmモジュール ${sizeLabel(a.size)}、register_wasm で登録できる)` : ""}`).join(", ")}]`;
   }
   if (m.embeds.length > 0) line += ` [埋め込み${m.embeds.length}件${m.embeds.some((e) => e.image || e.thumbnail) ? "・画像あり" : ""}]`;
   if (m.reactions?.length) {
@@ -611,7 +611,7 @@ const RULES_DESCRIPTION = [
   "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
   "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
   "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
-  "  wasm: コードの代わりに、アップロードされたWasmモジュールを動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。話し手が .wasm を添付して頼んだときは、先に register_wasm で登録します。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
+  "  wasm: コードの代わりに、アップロードされたWasmモジュールを動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。Wasmの登録は会話だけでします。話し手が .wasm を添付したら、何をするモジュールか・どう使いたいか(どのきっかけで動かすか、コマンドにするか、何を変更するか)を相談し、決まったら register_wasm で登録してからルール案を出します。登録しただけで済ませたいと言われたら登録だけします。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
   "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 4 } を加えます。",
   "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
   "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND だけにし、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに作成者の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。変更は作成者の権限で allow の範囲だけ実行されるので、実行した人の権限で絞るときは permissions(例: [\"ManageChannels\"])を付けます。読み取りはそのチャンネルを見られる全員が読めるものに限られます。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
@@ -632,7 +632,7 @@ function wasmTools(reader: Reader, wasm: WasmTools, fetchFn: typeof fetch): Agen
       parameters: Type.Object({}),
       execute: async () => {
         const items = wasm.list();
-        return text(items.length ? items.map(describe).join("\n") : "モジュールはありません。/settings の「Wasm」から登録するか、.wasm を添付して頼んでもらってください");
+        return text(items.length ? items.map(describe).join("\n") : "モジュールはありません。.wasm を添付して話しかけてもらえば register_wasm で登録できます");
       },
     }),
     tool({
