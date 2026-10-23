@@ -12,7 +12,7 @@ import { Conversations, MAX_MESSAGES_PER_REPLY } from "./conversation.ts";
 import type { GuildMessage, ReactionAdd } from "./conversation.ts";
 import { Store } from "./db.ts";
 import { GuildCaches } from "./discord/cache.ts";
-import { registerCommands } from "./discord/commands.ts";
+import { registerCommands, registerGlobalCommands } from "./discord/commands.ts";
 import { Presence } from "./discord/presence.ts";
 import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
@@ -205,6 +205,9 @@ client.once(GatewayDispatchEvents.Ready, ({ data }) => {
   selfId = data.user.id;
   botName = data.user.global_name ?? data.user.username;
   log(`${data.user.username} としてログインしました(参加サーバー ${data.guilds.length} 件)`);
+  registerGlobalCommands(client.api, store, config.applicationId)
+    .then((changed) => log(changed ? "グローバルコマンドを登録しました" : "グローバルコマンドは変更なし"))
+    .catch((e) => log("グローバルコマンドの登録に失敗", e));
 });
 
 // Registering on GUILD_CREATE (not READY) also covers the bot being invited while running.

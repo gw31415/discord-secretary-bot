@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { ApplicationCommandOptionType, ApplicationCommandType, InteractionType, PermissionFlagsBits as P } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
-import { guildCommands, registerCommands } from "../src/discord/commands.ts";
+import { COMMANDS, guildCommands, registerCommands, registerGlobalCommands } from "../src/discord/commands.ts";
 import { RuleAdmin } from "../src/rules/admin.ts";
 import { commandEvent, commandJson, commandProblems, sampleCommandEvent } from "../src/rules/command.ts";
 import type { CommandSpec } from "../src/rules/command.ts";
@@ -105,7 +105,7 @@ function world(visibilityScore?: (input: any) => Promise<number | null>) {
       updateMessage: async (_id: string, _t: string, body: unknown) => void calls.push(["update", body]),
       deleteReply: async () => void calls.push(["delete", null]),
     },
-    applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]) },
+    applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]), bulkOverwriteGlobalCommands: async (_a: string, body: unknown) => void calls.push(["global", body]) },
   } as never;
   const service = new RuleService({ api, store, caches, admin, engine, selfId: () => SELF, now: () => 1_000_000, log: () => {}, ...(visibilityScore ? { visibilityScore } : {}) });
   const definition: RuleDefinition = {
@@ -163,16 +163,20 @@ test("a command that only replies needs no allowed operations", async () => {
   assert.match((w.calls.at(-1)![1] as { content: string }).content, /今日は晴れ/);
 });
 
-test("enabled command rules are registered next to the bot's own commands", async () => {
+test("enabled command rules are the server's guild commands; /settings and /rules are global", async () => {
   const w = world();
-  assert.deepEqual(guildCommands(w.store, GUILD).map((c) => c.name).sort(), ["rules", "settings"]);
+  assert.deepEqual(guildCommands(w.store, GUILD), []);
   const rule = w.admin.save(GUILD, "1", w.definition);
-  assert.deepEqual(guildCommands(w.store, GUILD).map((c) => c.name).sort(), ["announce", "rules", "settings"]);
+  assert.deepEqual(guildCommands(w.store, GUILD).map((c) => c.name), ["announce"]);
   assert.equal(await registerCommands(w.api, w.store, "app", GUILD), true);
   assert.equal(await registerCommands(w.api, w.store, "app", GUILD), false);
   w.admin.setEnabled(GUILD, "1", rule.id, false);
   assert.equal(await registerCommands(w.api, w.store, "app", GUILD), true);
-  assert.deepEqual((w.calls.at(-1)![1] as Array<{ name: string }>).map((c) => c.name).sort(), ["rules", "settings"]);
+  assert.deepEqual(w.calls.at(-1)![1], []);
+  assert.deepEqual(COMMANDS.map((c) => c.name), ["settings", "rules"]);
+  assert.ok(COMMANDS.every((c) => JSON.stringify(c.contexts) === "[0]"), "server-only");
+  assert.equal(await registerGlobalCommands(w.api, w.store, "app"), true);
+  assert.equal(await registerGlobalCommands(w.api, w.store, "app"), false);
 });
 
 test("by default the owner's judge model decides who sees the reply; failures and errors stay private", async () => {
