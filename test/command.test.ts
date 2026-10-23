@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { ApplicationCommandOptionType, ApplicationCommandType, InteractionType, PermissionFlagsBits as P } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
-import { COMMANDS, guildCommands, registerCommands, registerGlobalCommands } from "../src/discord/commands.ts";
+import { COMMANDS, guildCommands, registerCommands, registerGlobalCommands, SETTINGS_COMMAND_ID } from "../src/discord/commands.ts";
 import { RuleAdmin } from "../src/rules/admin.ts";
 import { commandEvent, commandJson, commandProblems, sampleCommandEvent } from "../src/rules/command.ts";
 import type { CommandSpec } from "../src/rules/command.ts";
@@ -105,7 +105,7 @@ function world(visibilityScore?: (input: any) => Promise<number | null>) {
       updateMessage: async (_id: string, _t: string, body: unknown) => void calls.push(["update", body]),
       deleteReply: async () => void calls.push(["delete", null]),
     },
-    applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]), bulkOverwriteGlobalCommands: async (_a: string, body: unknown) => void calls.push(["global", body]) },
+    applicationCommands: { bulkOverwriteGuildCommands: async (_a: string, _g: string, body: unknown) => void calls.push(["register", body]), bulkOverwriteGlobalCommands: async (_a: string, body: unknown) => (calls.push(["global", body]), [{ name: "settings", id: "900" }]), getGlobalCommands: async () => (calls.push(["global-read", null]), [{ name: "settings", id: "901" }]) },
   } as never;
   const service = new RuleService({ api, store, caches, admin, engine, selfId: () => SELF, now: () => 1_000_000, log: () => {}, ...(visibilityScore ? { visibilityScore } : {}) });
   const definition: RuleDefinition = {
@@ -176,7 +176,13 @@ test("enabled command rules are the server's guild commands; /settings is global
   assert.deepEqual(COMMANDS.map((c) => c.name), ["settings"]);
   assert.ok(COMMANDS.every((c) => JSON.stringify(c.contexts) === "[0]"), "server-only");
   assert.equal(await registerGlobalCommands(w.api, w.store, "app"), true);
+  assert.equal(w.store.getMeta(SETTINGS_COMMAND_ID), "900");
   assert.equal(await registerGlobalCommands(w.api, w.store, "app"), false);
+  // An id lost while the commands stayed the same is read back without re-registering.
+  w.store.setMeta(SETTINGS_COMMAND_ID, "");
+  assert.equal(await registerGlobalCommands(w.api, w.store, "app"), false);
+  assert.equal(w.store.getMeta(SETTINGS_COMMAND_ID), "901");
+  assert.equal(w.calls.filter((c) => c[0] === "global").length, 1);
 });
 
 test("by default the owner's judge model decides who sees the reply; failures and errors stay private", async () => {

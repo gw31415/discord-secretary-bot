@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import type { APIMessage } from "discord-api-types/v10";
-import { Conversations, SESSION_MS, SETUP_NOTICE, splitForDiscord, styleSamples } from "../src/conversation.ts";
+import { Conversations, SESSION_MS, setupNotice, splitForDiscord, styleSamples } from "../src/conversation.ts";
 import type { ConversationDeps, GuildMessage } from "../src/conversation.ts";
 import { Store } from "../src/db.ts";
 import { parseJudgement } from "../src/agent/judge.ts";
@@ -142,8 +142,9 @@ test("judgements parse defensively", () => {
   assert.equal(parseJudgement('{"addressed": "yes"}'), null);
 });
 
-test("the setup notice points to /settings", () => {
-  assert.match(SETUP_NOTICE, /\/settings/);
+test("the setup notice links to /settings once its id is known", () => {
+  assert.match(setupNotice(), /`\/settings`/);
+  assert.match(setupNotice("123"), /<\/settings:123>/);
 });
 
 test("the model's <next> lines split a reply into separate posts", () => {
