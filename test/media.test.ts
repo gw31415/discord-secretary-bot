@@ -1,22 +1,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { convertImage, forModel, MODEL_IMAGE_SIDE, renderMath } from "../src/media.ts";
+import { convertImage, forModel, MODEL_IMAGE_SIDE, renderMath, toUploadable } from "../src/media.ts";
 import { runSandboxed } from "../src/sandbox.ts";
 import type { SandboxBindings } from "../src/sandbox.ts";
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 const LIMITS = { wallTimeMs: 10_000, memoryBytes: 64 * 1024 * 1024, maxGets: 1 };
 
-test("TeX becomes a PNG sized by the font size, with ams and mhchem", async () => {
+test("TeX becomes an SVG sized by the font size, with ams and mhchem", async () => {
   const small = await renderMath(String.raw`\frac{a}{b} + \ce{H2O}`, { size: 16, padding: 0 });
   const large = await renderMath(String.raw`\frac{a}{b} + \ce{H2O}`, { size: 64, padding: 0 });
-  assert.ok(small.subarray(0, 4).equals(PNG_MAGIC));
+  assert.match(small.toString(), /^<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/);
   const [s, l] = await Promise.all([sharp(small).metadata(), sharp(large).metadata()]);
   assert.ok(Math.abs(l.width / s.width - 4) < 0.5, `${s.width} → ${l.width}`);
   const padded = await sharp(await renderMath("x", { size: 16, padding: 10 })).metadata();
   const bare = await sharp(await renderMath("x", { size: 16, padding: 0 })).metadata();
   assert.equal(padded.width - bare.width, 20);
+  assert.match((await renderMath("x", { background: "#fff" })).toString(), /<rect [^>]*fill="#fff"/);
+});
+
+test("SVGs become PNGs only on the way to Discord; other files pass through", async () => {
+  const svg = await renderMath("x^2", { size: 20 });
+  const other = { name: "a.jpg", data: Buffer.from("jpeg") };
+  const [png, same] = await toUploadable([{ name: "eq.svg", data: svg }, other]);
+  assert.equal(png!.name, "eq.png");
+  assert.ok(png!.data.subarray(0, 4).equals(PNG_MAGIC));
+  assert.equal(same, other);
+  const seen = await forModel(svg, "image/svg+xml");
+  assert.equal(seen.mimeType, "image/png");
 });
 
 test("a TeX mistake or an extension that is not loaded comes back as an error", async () => {

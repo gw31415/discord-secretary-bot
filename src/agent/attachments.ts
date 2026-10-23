@@ -13,7 +13,7 @@ export interface ImageFile {
   name: string;
 }
 
-const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 /** Tools that add images to the reply's box; `seesImages` says whether to show them to the model. */
@@ -35,7 +35,7 @@ export class ImageBox {
 
   add(file: ImageFile): string {
     this.checkRoom();
-    if (!mimeOf(file.name)) throw new Error("PNG・JPEG・GIF・WebP の画像だけ添付できます");
+    if (!mimeOf(file.name)) throw new Error("PNG・JPEG・GIF・WebP・SVG の画像だけ添付できます");
     if (file.data.length > MAX_IMAGE_BYTES) throw new Error("画像は8MBまでです");
     if (this.#next > 99) throw new Error("この返答ではもう画像を作れません");
     const id = `img${this.#next++}`;
@@ -81,7 +81,8 @@ export function attachedResult(box: ImageBox, file: ImageFile, seesImages: boole
   return {
     content: [
       { type: "text", text: `画像 ${id}(${name})を用意しました。返答に添付されます。propose_plan の投稿に付けるときは body の files に "${id}" を入れます。` },
-      ...(seesImages ? [{ type: "image" as const, data: file.data.toString("base64"), mimeType: mimeOf(name)! }] : []),
+      // An SVG is only shown once converted; tools that hand one over say so in their own words.
+      ...(seesImages && mimeOf(name) !== "image/svg+xml" ? [{ type: "image" as const, data: file.data.toString("base64"), mimeType: mimeOf(name)! }] : []),
     ],
     details: { id },
   };

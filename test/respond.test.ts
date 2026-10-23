@@ -315,7 +315,7 @@ test("render_math and convert_image add images to the reply, and code can do the
       attachments: box,
     });
     assert.equal(result.text, "式です");
-    assert.deepEqual(box.forReply().map((a) => a.name), ["integral.png", "small.jpg", "pythagoras.png", "p.webp"]);
+    assert.deepEqual(box.forReply().map((a) => a.name), ["integral.svg", "small.jpg", "pythagoras.svg", "p.webp"]);
     assert.equal(result.toolErrors?.length, 1);
   } finally {
     llm.deleteProvider(faux.provider.id);

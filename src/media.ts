@@ -72,7 +72,11 @@ function color(value: string | undefined, what: string): string | undefined {
   return value.trim();
 }
 
-/** The formula as a PNG; throws with MathJax's message when the TeX is wrong. */
+/**
+ * The formula as an SVG; throws with MathJax's message when the TeX is wrong.
+ * Size, colour, background and padding are all drawn into the SVG itself; making
+ * a bitmap of it is the conversion layer's job (convertImage, or toUploadable when posting).
+ */
 export async function renderMath(tex: string, options: MathOptions = {}): Promise<Buffer> {
   if (typeof tex !== "string" || tex.trim() === "") throw new Error("数式(TeX)が空です");
   if (tex.length > MAX_TEX) throw new Error(`数式は${MAX_TEX}文字までです`);
@@ -95,19 +99,41 @@ export async function renderMath(tex: string, options: MathOptions = {}): Promis
   // MathJax sizes in ex; the viewBox is in thousandths of an em, so px follow from the font size.
   const box = /viewBox="([-\d.]+) ([-\d.]+) ([\d.]+) ([\d.]+)"/.exec(svg);
   if (!box) throw new Error("数式を描けません");
-  const width = Math.max(1, Math.ceil((Number(box[3]) / 1000) * size));
-  const height = Math.max(1, Math.ceil((Number(box[4]) / 1000) * size));
-  if (width + 2 * padding > MAX_OUTPUT_SIDE || height + 2 * padding > MAX_OUTPUT_SIDE) throw new Error("数式が大きすぎます。size を小さくするか分けてください");
+  const [x, y, w, h] = box.slice(1, 5).map(Number) as [number, number, number, number];
+  const pad = (padding / size) * 1000;
+  const width = Math.max(1, Math.ceil((w / 1000) * size)) + 2 * padding;
+  const height = Math.max(1, Math.ceil((h / 1000) * size)) + 2 * padding;
+  if (width > MAX_OUTPUT_SIDE || height > MAX_OUTPUT_SIDE) throw new Error("数式が大きすぎます。size を小さくするか分けてください");
+  const viewBox = `${x - pad} ${y - pad} ${w + 2 * pad} ${h + 2 * pad}`;
   svg = svg
     .replace(/ width="[^"]*"/, ` width="${width}"`)
     .replace(/ height="[^"]*"/, ` height="${height}"`)
     .replace(/ style="[^"]*"/, "")
+    .replace(/ viewBox="[^"]*"/, ` viewBox="${viewBox}"`)
     .replaceAll("currentColor", fg);
+  if (!svg.includes('xmlns="http://www.w3.org/2000/svg"')) svg = svg.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
+  if (bg) svg = svg.replace(/(<svg[^>]*>)/, `$1<rect x="${x - pad}" y="${y - pad}" width="${w + 2 * pad}" height="${h + 2 * pad}" fill="${bg}"/>`);
+  return Buffer.from(svg);
+}
 
-  const transparent = { r: 0, g: 0, b: 0, alpha: 0 };
-  let image = sharp(Buffer.from(svg), { limitInputPixels: MAX_INPUT_PIXELS }).extend({ top: padding, bottom: padding, left: padding, right: padding, background: transparent });
-  if (bg) image = sharp(await image.png().toBuffer()).flatten({ background: bg });
-  return image.png().toBuffer();
+/** Vector images, which Discord and the models do not show and so become PNGs on the way out. */
+export function isVector(name: string): boolean {
+  return /\.svg$/i.test(name);
+}
+
+/** The name a file goes out under: a vector image is posted as a PNG. */
+export function uploadName(name: string): string {
+  return isVector(name) ? name.replace(/\.svg$/i, ".png") : name;
+}
+
+/**
+ * Files as they go to Discord. Everything else passes through; an SVG is drawn
+ * at its own size into a PNG, since Discord only offers it as a download.
+ */
+export async function toUploadable<T extends { name: string; data: Buffer }>(files: T[]): Promise<T[]> {
+  return Promise.all(
+    files.map(async (f) => (isVector(f.name) ? { ...f, name: uploadName(f.name), data: await sharp(f.data, { limitInputPixels: MAX_INPUT_PIXELS }).png().toBuffer() } : f)),
+  );
 }
 
 export const FORMATS = ["png", "jpeg", "webp"] as const;
@@ -190,6 +216,11 @@ export async function convertImage(source: Buffer, options: ConvertOptions = {})
  * anything sharp cannot read come back as they were.
  */
 export async function forModel(data: Buffer, mimeType: string): Promise<{ data: Buffer; mimeType: string }> {
+  // Models take bitmaps only.
+  if (mimeType === "image/svg+xml") {
+    data = await sharp(data, { limitInputPixels: MAX_INPUT_PIXELS }).png().toBuffer();
+    mimeType = "image/png";
+  }
   try {
     const meta = await sharp(data, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
     const long = Math.max(meta.autoOrient?.width ?? meta.width, meta.autoOrient?.height ?? meta.height);

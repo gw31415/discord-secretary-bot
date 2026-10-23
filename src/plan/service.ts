@@ -298,7 +298,7 @@ export class Planner {
         this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更 \`${plan.id}\` に置き換えました` });
         this.deps.store.audit(plan.actor, "plan.replace", { by: plan.id }, oldRow.plan.id);
         // The new version's images replace the old ones on the message.
-        const uploads = dialogUploads(plan);
+        const uploads = await dialogUploads(plan);
         await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, {
           ...this.#render(plan, { status: "pending_approval" }),
           attachments: uploads.map((f, i) => ({ id: i, filename: f.name })),
@@ -306,7 +306,7 @@ export class Planner {
         });
         return plan;
       }
-      const uploads = dialogUploads(plan);
+      const uploads = await dialogUploads(plan);
       const message = await this.deps.api.channels.createMessage(input.channelId, {
         ...this.#render(plan, { status: "pending_approval" }),
         ...(uploads.length > 0 ? { files: uploads } : {}),
@@ -731,7 +731,7 @@ export class Planner {
     const { api } = this.deps;
     const spec = specOf(step);
     const body = step.body as Record<string, unknown> | undefined;
-    const uploads = uploadsFor(plan, step);
+    const uploads = await uploadsFor(plan, step);
     if (spec.op === "POST /users/{user}/dm") {
       const dm = await api.users.createDM(String(step.pathParams.user));
       return api.channels.createMessage(dm.id, {

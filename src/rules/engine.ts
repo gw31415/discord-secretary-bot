@@ -466,7 +466,7 @@ export class RuleEngine {
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
           ...(decider ? { decide: decider } : {}),
           media: {
-            math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.png`),
+            math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.svg`),
             convert: async (source: unknown, raw: unknown, name: string) => {
               const { data, format } = await convertImage(await load(source), parseOptions(ConvertOptionsSchema, raw));
               return keep(data, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);

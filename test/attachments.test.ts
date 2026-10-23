@@ -9,7 +9,7 @@ test("the box numbers images, cleans their names and refuses what Discord cannot
   assert.equal(box.add({ data: PNG, name: "数式 1.png" }), "img1");
   assert.equal(box.add({ data: PNG, name: "数式 1.png" }), "img2");
   assert.deepEqual(Object.values(box.all()).map((a) => a.name), ["1.png", "1-img2.png"]);
-  assert.throws(() => box.add({ data: PNG, name: "page.svg" }), /PNG・JPEG・GIF・WebP/);
+  assert.throws(() => box.add({ data: PNG, name: "page.bmp" }), /PNG・JPEG・GIF・WebP・SVG/);
   box.add({ data: PNG, name: "c.jpg" });
   box.add({ data: PNG, name: "d.gif" });
   assert.throws(() => box.add({ data: PNG, name: "e.png" }), /4枚まで/);
