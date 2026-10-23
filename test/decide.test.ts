@@ -58,6 +58,8 @@ test("code can judge and rank with the judge model", async () => {
   assert.equal(many.ok, false);
   assert.match(many.error ?? "", /回までです/);
 
-  const without = await runSandboxed(`return typeof judge`, base, limits);
-  assert.equal(without.value, "undefined");
+  // Without a judge model the functions exist (the program is the same for every run) but say why they cannot answer.
+  const without = await runSandboxed(`return judge({}, { q: { type: "bool", instructions: "x", criteria: { true: "a", false: "b" } } })`, base, limits);
+  assert.equal(without.ok, false);
+  assert.match(without.error ?? "", /判定モデル/);
 });

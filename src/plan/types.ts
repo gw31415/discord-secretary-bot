@@ -128,6 +128,16 @@ export interface AllowEntry {
  * results (e.g. the id of a channel the plan creates); they are filled in when
  * the steps have run, and the rule is registered then.
  */
+/** An uploaded module a rule runs, as the dialog shows it. */
+export interface WasmRef {
+  sha256: string;
+  name: string;
+  size: number;
+  /** Who uploaded it. */
+  ownerId: string;
+  producers: string[];
+}
+
 export interface PlanRuleDraft {
   /** "r1", "r2", … within the plan. */
   key: string;
@@ -135,6 +145,8 @@ export interface PlanRuleDraft {
   trigger: RuleTrigger;
   allow: AllowEntry[];
   code: string;
+  /** The Wasm module that runs instead of `code`. */
+  wasm?: WasmRef;
   /** Values the code reads as `params`. */
   params?: Record<string, unknown>;
   /** Written from the code alone by a model that did not see the request. */

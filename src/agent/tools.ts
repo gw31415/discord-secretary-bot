@@ -27,6 +27,9 @@ import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
 import { MAX_BATCH, MAX_DEBOUNCE_SECONDS, MAX_TRIGGER_EVENTS, triggerSummary } from "../rules/triggers.ts";
 import { MAX_LIMITS, MAX_STATE_JSON } from "../rules/types.ts";
 import type { Rule, RuleProposal, RuleRun } from "../rules/types.ts";
+import type { WasmModule } from "../db.ts";
+import { MAX_MODULE_BYTES } from "../wasm/module.ts";
+import { sizeLabel } from "../wasm/registry.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
 // narrows results to what may be shown in the channel the reply goes to.
@@ -122,6 +125,14 @@ export interface RuleTools {
   list: () => Array<{ rule: Rule; shown: boolean; state?: unknown }>;
   /** Recent runs of one of the speaker's rules; null when it is not theirs or not shown here. */
   runs: (ruleId: string, limit: number) => RuleRun[] | null;
+  /** The speaker's uploaded Wasm modules, which rules may run instead of code. */
+  wasm?: WasmTools;
+}
+
+export interface WasmTools {
+  list: () => WasmModule[];
+  /** Checks and keeps a module for the speaker; throws ModuleRejected with the reason. */
+  upload: (name: string, bytes: Uint8Array) => Promise<{ module: WasmModule; replaced: number }>;
 }
 
 export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
@@ -390,6 +401,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide));
   if (options.decide) tools.push(judgeTool(options.decide));
   if (options.rules) tools.push(...ruleReadTools(options.rules));
+  if (options.rules?.wasm) tools.push(...wasmTools(reader, options.rules.wasm, options.fetch ?? fetch));
   if (options.widen && reader.narrowed) tools.push(widenRead(reader, options.widen));
   return tools;
 }
@@ -443,6 +455,7 @@ const RULE_FIELDS = {
   params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   sample_event: Type.Optional(Type.Unknown()),
   replaces_rule: Type.Optional(Type.String()),
+  wasm: Type.Optional(Type.String({ description: "コードの代わりに動かすアップロード済みWasmモジュール(話し手のモジュール名か sha256)" })),
   command: Type.Optional(
     Type.Object(
       {
@@ -467,12 +480,12 @@ const RULE_FIELDS = {
     ),
   ),
 };
-const RuleSchema = Type.Object({ ...RULE_FIELDS, code: Type.String({ maxLength: 8000 }) });
+const RuleSchema = Type.Object({ ...RULE_FIELDS, code: Type.Optional(Type.String({ maxLength: 8000 })) });
 type RuleInput = Static<typeof RuleSchema>;
 /** With a coding model, the agent describes each rule's code and the coder writes it. */
 const CodedRuleSchema = Type.Object({
   ...RULE_FIELDS,
-  code_task: Type.String({ maxLength: 4000, description: "イベントごとに何を確かめて何をするコードか" }),
+  code_task: Type.Optional(Type.String({ maxLength: 4000, description: "イベントごとに何を確かめて何をするコードか(wasm のときは不要)" })),
 });
 type CodedRuleInput = Static<typeof CodedRuleSchema>;
 
@@ -491,7 +504,7 @@ async function writeCode(coder: Coder, kind: CodeKind, task: string, env: CodeEn
 }
 
 /** The rule's own settings go with its task, so the coder knows what it may do. */
-function ruleTask(r: CodedRuleInput): string {
+function ruleTask(r: CodedRuleInput & { code_task: string }): string {
   return [
     r.code_task,
     "",
@@ -519,9 +532,12 @@ const RULE_TRIAL_MEDIA: Pick<SandboxBindings, "attach" | "media"> = {
 async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: SandboxBindings, tools: AgentTool<any>[]): Promise<RuleInput[]> {
   return Promise.all(
     rules.map(async (r, i) => {
-      const { code_task: _task, ...rest } = r;
+      const { code_task: task, ...rest } = r;
+      // A rule that runs an uploaded module has no code to write.
+      if (r.wasm) return rest;
+      if (!task) throw new Error(`rules[${i}](${r.name}): code_task か wasm を渡してください`);
       try {
-        const { code } = await writeCode(coder, "rule", ruleTask(r), {
+        const { code } = await writeCode(coder, "rule", ruleTask({ ...r, code_task: task }), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
           run: (code, event) => runSandboxed(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }, RULE_SANDBOX_LIMITS),
@@ -558,7 +574,8 @@ function toProposal(r: RuleInput): RuleProposal {
       ...(a.channel ? { channel: a.channel } : {}),
       ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
     })),
-    code: r.code,
+    code: r.wasm ? "" : (r.code ?? ""),
+    ...(r.wasm ? { wasm: r.wasm } : {}),
     ...(r.params ? { params: r.params } : {}),
     ...(r.sample_event !== undefined ? { sampleEvent: r.sample_event } : {}),
     ...(r.replaces_rule ? { replaces: r.replaces_rule } : {}),
@@ -580,7 +597,7 @@ function rulesFromCode(value: unknown): RuleProposal[] {
 
 const RULES_DESCRIPTION = [
   "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
-  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
+  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code か wasm, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
   "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。true はBotの変更すべてで動き、\"other_rules\" はほかのルールや会話からの変更では動くがこのルール自身の変更では動きません(Botの投稿・リアクションでは動きません)。ほかのルールの結果に合わせて直すルール(例: 並べ替えのあとに一覧を作り直す)は \"other_rules\" にします。",
   "  時刻で動かすときは trigger_event(または more_trigger_events)に SCHEDULE を入れ、schedule に cron(分 時 日 月 曜日。例: 毎朝4時は \"0 4 * * *\"、10分おきは \"*/10 * * * *\")を、必要なら timezone(既定 Asia/Tokyo)を書きます。イベントのきっかけと一緒に使えます(例: チャンネルの作成・変更と毎日4時の作り直し)。BOT_READY はBotの起動・再接続のたびに動くので、止まっていた間の変化を取り込めます。",
   "  debounce_seconds: 短い間にイベントがまとめて来るとき(並べ替えでチャンネルの変更が何件も届くなど)に付けると、最後のイベントからその秒数待って1回だけ動きます。コードはその間のイベントを batch(古い順の [{ eventName, event }]。最大" + MAX_BATCH + "件)で読めます。batch はいつもあり、まとめないときは1件です。",
@@ -594,6 +611,7 @@ const RULES_DESCRIPTION = [
   "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
   "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
   "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
+  "  wasm: コードの代わりに、アップロードされたWasmモジュールを動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。話し手が .wasm を添付して頼んだときは、先に register_wasm で登録します。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
   "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 4 } を加えます。",
   "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
   "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND だけにし、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに作成者の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。変更は作成者の権限で allow の範囲だけ実行されるので、実行した人の権限で絞るときは permissions(例: [\"ManageChannels\"])を付けます。読み取りはそのチャンネルを見られる全員が読めるものに限られます。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
@@ -601,6 +619,50 @@ const RULES_DESCRIPTION = [
   "  きっかけにできるイベント:",
   triggerSummary(),
 ].join("\n");
+
+/** The speaker's Wasm modules: listing them, and keeping one attached to a message. */
+function wasmTools(reader: Reader, wasm: WasmTools, fetchFn: typeof fetch): AgentTool<any>[] {
+  const describe = (m: WasmModule) =>
+    JSON.stringify({ name: m.name, sha256: m.sha256, size: sizeLabel(m.size), built_with: m.info.producers, uploaded: m.createdAt.slice(0, 16) });
+  return [
+    tool({
+      name: "list_wasm",
+      label: "Wasmモジュールを見る",
+      description: "話し手がアップロードしたWasmモジュールの一覧(名前・sha256・大きさ・ビルドした道具・登録日時)を新しい順に返します。ルールの wasm に名前を入れるときに確かめます。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        const items = wasm.list();
+        return text(items.length ? items.map(describe).join("\n") : "モジュールはありません。/settings の「Wasm」から登録するか、.wasm を添付して頼んでもらってください");
+      },
+    }),
+    tool({
+      name: "register_wasm",
+      label: "Wasmを登録",
+      description: `メッセージに添付された .wasm を話し手のモジュールとして登録します(${MAX_MODULE_BYTES / 1024 / 1024}MBまで)。同じ名前で登録すると新しい版になり、それを使うルールは差し替えるまで古い版のまま動きます。添付したのが話し手本人のメッセージのときだけ使います。登録しただけでは何も動きません。`,
+      parameters: Type.Object({
+        message_id: Type.String(),
+        channel_id: Type.Optional(Type.String({ description: "省略時は今のチャンネル" })),
+        index: Type.Optional(Type.Integer({ minimum: 0, description: "何個目の .wasm か(0から、既定 0)" })),
+        name: Type.Optional(Type.String({ maxLength: 40, description: "モジュール名。省略時はファイル名" })),
+      }),
+      execute: async (_id, params) => {
+        const channelId = params.channel_id ?? reader.scope.channelId;
+        const message = (await reader.get(`/channels/${channelId}/messages/${params.message_id}`, {})) as APIMessage | null;
+        if (!message) throw new Error("メッセージが見つかりません");
+        if (message.author.id !== reader.scope.speakerId) throw new Error("話し手本人が添付した .wasm だけ登録できます");
+        const files = message.attachments.filter((a) => a.filename.toLowerCase().endsWith(".wasm"));
+        const file = files[params.index ?? 0];
+        if (!file) throw new Error("このメッセージに .wasm の添付はありません");
+        if (file.size > MAX_MODULE_BYTES) throw new Error(`.wasm は${MAX_MODULE_BYTES / 1024 / 1024}MBまでです`);
+        const res = await fetchFn(file.url);
+        if (!res.ok) throw new Error(`添付を取得できませんでした(${res.status})`);
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        const { module, replaced } = await wasm.upload(params.name ?? file.filename, bytes);
+        return text(`登録しました: ${describe(module)}${replaced ? `(同じ名前の古い版${replaced}個は使われていないので消しました)` : ""}`);
+      },
+    }),
+  ];
+}
 
 /** Reading the speaker's rules and their runs; the coding agent gets these too, for debugging rules. */
 function ruleReadTools(rules: RuleTools): AgentTool<any>[] {
@@ -652,7 +714,7 @@ function listRules(rules: RuleTools): AgentTool<any> {
         items
           .map(({ rule, shown, state }) =>
             shown
-              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, code: rule.code, state: state ?? null })
+              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, ...(rule.wasm ? { wasm: rule.wasm } : { code: rule.code }), state: state ?? null })
               : `${rule.id} ${rule.name}: このチャンネルでは扱えないチャンネルを使うため、内容は表示できません`,
           )
           .join("\n"),
@@ -691,7 +753,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
   const rulesDescription = coder
     ? RULES_DESCRIPTION.replace(
         /\n  各要素[^\n]*\n/,
-        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code_task, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
+        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, limits?, command?, allow, code_task か wasm, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
       ).replace(/\n  code: イベントごとに[^\n]*\n    使えるもの:[^\n]*/, "")
     : RULES_DESCRIPTION;
   const sandboxBindings = bindingsOf(reader, decide);

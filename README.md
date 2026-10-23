@@ -16,6 +16,7 @@
 | 会話で「〜したら〜して」 | イベントルール(自動化)やギルドコマンドを作る。必要な変更と一緒に1回の承認で登録 |
 | `/settings` | APIキー、モデル(言語モデル・判定モデル、応用で用途別の上書き)、Webツール、読み取りを広げる許可 |
 | `/settings` の「ルール」 | ルールの一覧・有効化・停止・削除・ドライラン・実行履歴・監査ログ・緊急停止 |
+| `/settings` の「Wasm」 | 自分でビルドした Wasm モジュールを登録し、ルールやコマンドのコードとして使う([docs/wasm.md](docs/wasm.md)) |
 
 ## 全体の仕組み
 
@@ -88,12 +89,12 @@ stateDiagram-v2
 
 - **確認**: 戻せる操作は1クリック。戻せない操作(削除・キック・BAN・多数のDMなど)は対象名の入力が必要です。
 - **ルール**: 許す操作(allow)をJSON Schemaで縛ります。Bot自身由来のイベントは既定で無視、1分10回まで、3回続けて失敗で自動停止、全ルールの緊急停止があります。作成者がサーバーを抜けるとその人のルールは止まります。
-- **サンドボックス**: コードは QuickJS(WASM)で動き、読み取りとPlanの出力しかできません(1回30秒・`discord.get` 200回まで)。
+- **サンドボックス**: コードはすべて Wasm として別スレッドで動きます。JavaScript は WASI 向けにビルドした QuickJS の上で、アップロードされたモジュールはそのまま動き、外へ出る口は `secretary.call` だけです。読み取りとPlanの出力しかできません(1回30秒・メモリ64MiB・`discord.get` 200回まで)。
 - **キー**: AES-256-GCM のエンベロープ暗号化で保存し、LLMやログには渡しません。
 
 ## 技術構成
 
-Node.js 24+ / TypeScript、pi-ai + pi-agent-core、@discordjs/core + ws、better-sqlite3、quickjs-emscripten、TypeBox。HTTPポートは開けず、すべてGatewayで受けます。
+Node.js 24+ / TypeScript、pi-ai + pi-agent-core、@discordjs/core + ws、better-sqlite3、TypeBox、QuickJS-ng(WASI ビルド)。HTTPポートは開けず、すべてGatewayで受けます。
 
 ```
 src/
@@ -102,7 +103,10 @@ src/
   llm/       モデル一覧と /settings パネル
   plan/      Planの型・権限対応表(catalog.ts)・検証・確認ダイアログ・実行
   rules/     ルールのきっかけ・allow・エンジン・ルールの管理パネル
-  sandbox.ts QuickJS サンドボックス
+  wasm/      Wasm の実行器(worker・WASI・ホスト関数)・アップロードの検査と管理
+  sandbox.ts JavaScript を js-runner.wasm で動かす
+wasm/js-runner/  JS エンジン(QuickJS)を Wasm にするビルド
+examples/wasm/   Go・Rust のモジュールの例
 ```
 
 ## セットアップ

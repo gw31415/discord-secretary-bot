@@ -13,6 +13,7 @@ import type { WebTool } from "../agent/web.ts";
 import { findModel, isClassifier, judgesOnly, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 import { ruleCustomId } from "../rules/panel.ts";
+import { WASM_SECTION_ID } from "../wasm/panel.ts";
 
 export type { ModelRole };
 
@@ -126,9 +127,10 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
       components: [
         { type: ComponentType.Button, custom_id: ruleCustomId("home"), label: "ルール", style: ButtonStyle.Primary },
         { type: ComponentType.Button, custom_id: ruleCustomId("commands"), label: "コマンド", style: ButtonStyle.Primary },
-        ...(page === "home" ? [] : [navButton("home", "← 設定のトップへ", page)]),
+        { type: ComponentType.Button, custom_id: WASM_SECTION_ID, label: "Wasm", style: ButtonStyle.Primary },
       ],
     },
+    ...(page === "home" ? [] : [{ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] } satisfies APIActionRowComponent<APIButtonComponent>]),
   );
   return {
     flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,

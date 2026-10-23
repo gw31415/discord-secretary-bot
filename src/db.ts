@@ -8,6 +8,7 @@ import { isWebTool } from "./agent/web.ts";
 import type { WebTool } from "./agent/web.ts";
 import type { Actor, Plan, PlanStatus, StepState } from "./plan/types.ts";
 import type { Rule, RuleDefinition, RuleRun, RunOutcome } from "./rules/types.ts";
+import type { ModuleInfo } from "./wasm/module.ts";
 import { triggerEvents } from "./rules/triggers.ts";
 
 // Each entry upgrades the schema by one version. Never edit an applied entry.
@@ -141,6 +142,24 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE rules ADD COLUMN state_json TEXT;
   `,
+  `
+  CREATE TABLE wasm_modules (
+    owner_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    name TEXT NOT NULL,
+    data BLOB NOT NULL,
+    size INTEGER NOT NULL,
+    info_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (owner_id, sha256)
+  );
+  CREATE INDEX wasm_modules_sha ON wasm_modules (sha256);
+  CREATE TABLE js_bytecode (
+    key TEXT PRIMARY KEY,
+    data BLOB NOT NULL,
+    used_at TEXT NOT NULL
+  );
+  `,
 ];
 
 export interface ModelRef {
@@ -212,6 +231,28 @@ export interface AuditEntry {
   detail: Record<string, unknown>;
 }
 
+export interface WasmModule {
+  ownerId: string;
+  sha256: string;
+  name: string;
+  size: number;
+  info: ModuleInfo;
+  createdAt: string;
+}
+
+interface WasmModuleRow {
+  owner_id: string;
+  sha256: string;
+  name: string;
+  size: number;
+  info_json: string;
+  created_at: string;
+}
+
+function toWasmModule(row: WasmModuleRow): WasmModule {
+  return { ownerId: row.owner_id, sha256: row.sha256, name: row.name, size: row.size, info: JSON.parse(row.info_json) as ModuleInfo, createdAt: row.created_at };
+}
+
 interface RuleDbRow {
   id: string;
   guild_id: string;
@@ -226,8 +267,8 @@ interface RuleDbRow {
 }
 
 function definitionOf(rule: RuleDefinition): RuleDefinition {
-  const { name, sourcePrompt, trigger, allow, code, params, summary, limits } = rule;
-  return { name, sourcePrompt, trigger, allow, code, ...(params ? { params } : {}), summary, limits };
+  const { name, sourcePrompt, trigger, allow, code, wasm, params, summary, limits } = rule;
+  return { name, sourcePrompt, trigger, allow, code, ...(wasm ? { wasm } : {}), ...(params ? { params } : {}), summary, limits };
 }
 
 function toRule(row: RuleDbRow): Rule {
@@ -625,6 +666,91 @@ export class Store {
 
   deleteRule(id: string): void {
     this.db.prepare("DELETE FROM rules WHERE id = ?").run(id);
+  }
+
+  // --- Compiled JavaScript -------------------------------------------------
+
+  getBytecode(key: string): Buffer | undefined {
+    const row = this.db.prepare("SELECT data FROM js_bytecode WHERE key = ?").get(key) as { data: Buffer } | undefined;
+    if (row) this.db.prepare("UPDATE js_bytecode SET used_at = ? WHERE key = ?").run(new Date().toISOString(), key);
+    return row?.data;
+  }
+
+  setBytecode(key: string, data: Buffer): void {
+    this.db.prepare("INSERT OR REPLACE INTO js_bytecode (key, data, used_at) VALUES (?, ?, ?)").run(key, data, new Date().toISOString());
+  }
+
+  /** Programs no run has used since `cutoff` (old rule versions, earlier engine builds). */
+  deleteBytecodeBefore(cutoff: Date): void {
+    this.db.prepare("DELETE FROM js_bytecode WHERE used_at < ?").run(cutoff.toISOString());
+  }
+
+  // --- Wasm modules ---------------------------------------------------------
+
+  /** Keeps an uploaded module; the same bytes from the same person just take the new name. */
+  saveWasmModule(ownerId: string, name: string, data: Buffer, info: ModuleInfo): WasmModule {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO wasm_modules (owner_id, sha256, name, data, size, info_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (owner_id, sha256) DO UPDATE SET name = excluded.name, created_at = excluded.created_at`,
+      )
+      .run(ownerId, info.sha256, name, data, data.length, JSON.stringify(info), now);
+    return this.getWasmModule(ownerId, info.sha256)!;
+  }
+
+  /** One person's modules, newest first, without their bytes. */
+  listWasmModules(ownerId: string): WasmModule[] {
+    const rows = this.db.prepare("SELECT owner_id, sha256, name, size, info_json, created_at FROM wasm_modules WHERE owner_id = ? ORDER BY created_at DESC").all(ownerId) as WasmModuleRow[];
+    return rows.map(toWasmModule);
+  }
+
+  getWasmModule(ownerId: string, sha256: string): WasmModule | undefined {
+    const row = this.db.prepare("SELECT owner_id, sha256, name, size, info_json, created_at FROM wasm_modules WHERE owner_id = ? AND sha256 = ?").get(ownerId, sha256) as WasmModuleRow | undefined;
+    return row && toWasmModule(row);
+  }
+
+  /** Everyone who uploaded these bytes, oldest first. */
+  wasmUploaders(sha256: string): WasmModule[] {
+    const rows = this.db.prepare("SELECT owner_id, sha256, name, size, info_json, created_at FROM wasm_modules WHERE sha256 = ? ORDER BY created_at").all(sha256) as WasmModuleRow[];
+    return rows.map(toWasmModule);
+  }
+
+  /** Distinct uploaded builds whose sha256 starts with `prefix` (lowercase hex). */
+  wasmShasWithPrefix(prefix: string): string[] {
+    const rows = this.db.prepare("SELECT DISTINCT sha256 FROM wasm_modules WHERE substr(sha256, 1, ?) = ? LIMIT 5").all(prefix.length, prefix) as Array<{ sha256: string }>;
+    return rows.map((r) => r.sha256);
+  }
+
+  /** The bytes, whoever uploaded them. */
+  wasmBytes(sha256: string): Buffer | undefined {
+    return (this.db.prepare("SELECT data FROM wasm_modules WHERE sha256 = ? LIMIT 1").get(sha256) as { data: Buffer } | undefined)?.data;
+  }
+
+  renameWasmModule(ownerId: string, sha256: string, name: string): void {
+    this.db.prepare("UPDATE wasm_modules SET name = ? WHERE owner_id = ? AND sha256 = ?").run(name, ownerId, sha256);
+  }
+
+  deleteWasmModule(ownerId: string, sha256: string): void {
+    this.db.prepare("DELETE FROM wasm_modules WHERE owner_id = ? AND sha256 = ?").run(ownerId, sha256);
+  }
+
+  /** The code of every enabled JS rule, in any server. */
+  enabledRuleCode(): string[] {
+    const rows = this.db.prepare("SELECT DISTINCT json_extract(rule_json, '$.code') AS code FROM rules WHERE enabled = 1 AND json_extract(rule_json, '$.wasm') IS NULL").all() as Array<{ code: string | null }>;
+    return rows.map((r) => r.code ?? "").filter((c) => c.trim());
+  }
+
+  /** Builds that enabled rules run, in any server. */
+  wasmInUse(): string[] {
+    const rows = this.db.prepare("SELECT DISTINCT json_extract(rule_json, '$.wasm') AS sha FROM rules WHERE enabled = 1 AND json_extract(rule_json, '$.wasm') IS NOT NULL").all() as Array<{ sha: string }>;
+    return rows.map((r) => r.sha);
+  }
+
+  /** Rules in any server that run these bytes. */
+  rulesUsingWasm(sha256: string): Rule[] {
+    const rows = this.db.prepare("SELECT * FROM rules WHERE json_extract(rule_json, '$.wasm') = ? ORDER BY created_at").all(sha256) as RuleDbRow[];
+    return rows.map(toRule);
   }
 
   startRuleRun(run: { ruleId: string; ruleVersion: number; eventId: string }): number {

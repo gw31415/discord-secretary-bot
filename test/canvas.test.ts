@@ -44,9 +44,9 @@ test("only listed drawing calls with plain arguments exist, and sizes and counts
   assert.match((await run(`createCanvas(10, 10).getContext("webgl"); return 1;`)).error!, /"2d" だけ/);
   assert.match((await run(`return attachImage(createCanvas(5000, 10));`)).error!, /2048/);
   assert.match((await run(`for (let i = 0; i < 5; i++) attachImage(createCanvas(4, 4)); return 1;`)).error!, /4回まで/);
-  // Without the binding, there is no canvas at all (rules, plan code).
-  const plain = await runSandboxed(`return typeof createCanvas;`, { guildId: "1", actor: { kind: "user", userId: "1" }, get: async () => null }, LIMITS);
-  assert.equal(plain.value, "undefined");
+  // Without the binding, drawing is refused when the image is handed over (plan code).
+  const plain = await runSandboxed(`return attachImage(createCanvas(4, 4));`, { guildId: "1", actor: { kind: "user", userId: "1" }, get: async () => null }, LIMITS);
+  assert.match(plain.error!, /使えません/);
   // The host checks the record itself, not only the guest's helpers.
   assert.throws(() => renderCanvas(10, 10, [["drawImage", "x", 0, 0]]), /使えません/);
   assert.throws(() => renderCanvas(10, 10, [["fillRect", { toString: 1 }, 0, 1, 1]]), /数値か文字列/);

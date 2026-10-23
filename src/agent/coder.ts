@@ -5,7 +5,7 @@ import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { lightestThinking, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { triggerSummary } from "../rules/triggers.ts";
-import { runSandboxed } from "../sandbox.ts";
+import { compileJs } from "../sandbox.ts";
 import { JUDGE_CODE_LINE } from "./decide.ts";
 import { retryFailedCall } from "./retry.ts";
 
@@ -209,11 +209,11 @@ export function llmCoder(model: Model<Api>, apiKey: string): Coder {
  * The parse happens inside the sandbox too, so rule code is never handed to Node itself.
  */
 export async function syntaxError(code: string): Promise<string | null> {
-  // Defining the function compiles its body without calling it.
-  const result = await runSandboxed(
-    `return typeof function (event, params) {\n${code}\n};`,
-    { guildId: "0", actor: { kind: "user", userId: "0" }, get: async () => { throw new Error("構文チェック中は読めません"); } },
-    { wallTimeMs: 2_000, memoryBytes: 16 * 1024 * 1024, maxGets: 0 },
-  );
-  return result.ok ? null : (result.error ?? "構文エラー");
+  // Compiling builds the program without running it.
+  try {
+    await compileJs(code);
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : "構文エラー";
+  }
 }

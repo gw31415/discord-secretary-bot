@@ -1,5 +1,5 @@
 import type { APIMessage } from "discord-api-types/v10";
-import type { Store } from "./db.ts";
+import type { Store, WasmModule } from "./db.ts";
 import { formatMessage } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
@@ -66,6 +66,11 @@ export interface ConversationDeps {
   rules?: {
     list: (guildId: string, ownerId: string, shareable: Set<string>) => Array<{ rule: Rule; shown: boolean; state?: unknown }>;
     runs: (guildId: string, ownerId: string, ruleId: string, shareable: Set<string>, limit: number) => RuleRun[] | null;
+    /** Uploaded Wasm modules, which are the person's own (not the server's). */
+    wasm?: {
+      list: (ownerId: string) => WasmModule[];
+      upload: (ownerId: string, name: string, bytes: Uint8Array) => Promise<{ module: WasmModule; replaced: number }>;
+    };
   };
   /** Asks the speaker, with buttons, to let one reply read up to their own permissions. Absent keeps reads to the channel's audience. */
   askWiden?: (input: WidenRequest) => Promise<boolean>;
@@ -521,6 +526,9 @@ export class Conversations {
           ? {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
               runs: (ruleId, limit) => this.deps.rules!.runs(input.guildId, speaker, ruleId, reader.shareable(), limit),
+              ...(this.deps.rules.wasm
+                ? { wasm: { list: () => this.deps.rules!.wasm!.list(speaker), upload: (name: string, bytes: Uint8Array) => this.deps.rules!.wasm!.upload(speaker, name, bytes) } }
+                : {}),
             }
           : undefined,
       });
