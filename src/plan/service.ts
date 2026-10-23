@@ -164,8 +164,8 @@ class RuleNotRegistered extends Error {}
 /** A plan's rule as input for proposing the plan again. */
 function ruleInputOf(r: PlanRuleDraft): RuleInput {
   return {
-    name: r.name, trigger: r.trigger, allow: r.allow, code: r.code, summary: r.summary, dry: r.dry, request: r.request,
-    ...(r.wasm ? { wasm: r.wasm.sha256 } : {}),
+    name: r.name, trigger: r.trigger, allow: r.allow, summary: r.summary, dry: r.dry, request: r.request,
+    program: r.program.kind === "wasm" ? { kind: "wasm", module: r.program.module.sha256 } : r.program,
     ...(r.params ? { params: r.params } : {}),
     ...(r.replaces ? { replaces: r.replaces.id } : {}),
     ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),

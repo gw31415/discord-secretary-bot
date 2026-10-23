@@ -422,7 +422,7 @@ export class RuleEngine {
    * Used for real runs and for dry runs, which stop here.
    */
   async evaluate(
-    rule: Pick<Rule, "guildId" | "ownerId" | "code" | "params" | "wasm">,
+    rule: Pick<Rule, "guildId" | "ownerId" | "program" | "params">,
     event: unknown,
     reader?: Pick<Reader, "get">,
     eventName: string | null = null,
@@ -477,11 +477,11 @@ export class RuleEngine {
           },
       };
       let program: Program;
-      if (rule.wasm) {
+      if (rule.program.kind === "wasm") {
         if (!this.deps.wasm) throw new Error("Wasmのルールはここでは動かせません");
-        program = { module: await this.deps.wasm.compiled(rule.wasm) };
+        program = { module: await this.deps.wasm.compiled(rule.program.sha256) };
       } else {
-        program = await jsProgram(rule.code);
+        program = await jsProgram(rule.program.code);
       }
       // A module draws with its own libraries and hands over the image; it is re-encoded so only real images go out.
       const image = async (data: Buffer, name: string) => {

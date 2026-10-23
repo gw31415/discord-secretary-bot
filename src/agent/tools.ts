@@ -648,8 +648,7 @@ function toProposal(r: RuleInput): RuleProposal {
       ...(a.channel ? { channel: a.channel } : {}),
       ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
     })),
-    code: r.wasm ? "" : (r.code ?? ""),
-    ...(r.wasm ? { wasm: r.wasm } : {}),
+    program: r.wasm ? { kind: "wasm", module: r.wasm } : { kind: "js", code: r.code ?? "" },
     ...(r.params ? { params: r.params } : {}),
     ...(r.sample_event !== undefined ? { sampleEvent: r.sample_event } : {}),
     ...(r.replaces_rule ? { replaces: r.replaces_rule } : {}),
@@ -798,7 +797,7 @@ function listRules(rules: RuleTools): AgentTool<any> {
         items
           .map(({ rule, shown, state }) =>
             shown
-              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, ...(rule.wasm ? { wasm: rule.wasm } : { code: rule.code }), state: state ?? null })
+              ? JSON.stringify({ id: rule.id, name: rule.name, enabled: rule.enabled, version: rule.version, trigger: rule.trigger, allow: rule.allow, params: rule.params, ...(rule.program.kind === "wasm" ? { wasm: rule.program.sha256 } : { code: rule.program.code }), state: state ?? null })
               : `${rule.id} ${rule.name}: このチャンネルでは扱えないチャンネルを使うため、内容は表示できません`,
           )
           .join("\n"),

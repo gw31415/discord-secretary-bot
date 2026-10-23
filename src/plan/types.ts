@@ -144,9 +144,7 @@ export interface PlanRuleDraft {
   name: string;
   trigger: RuleTrigger;
   allow: AllowEntry[];
-  code: string;
-  /** The Wasm module that runs instead of `code`. */
-  wasm?: WasmRef;
+  program: { kind: "js"; code: string } | { kind: "wasm"; module: WasmRef };
   /** Values the code reads as `params`. */
   params?: Record<string, unknown>;
   /** Written from the code alone by a model that did not see the request. */

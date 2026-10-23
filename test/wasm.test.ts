@@ -176,12 +176,11 @@ test("an uploaded module runs a rule as its owner, pinned to its build; others i
     sourcePrompt: "",
     trigger: { event: "MESSAGE_CREATE" },
     allow: [{ op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } } }],
-    code: "",
-    wasm: v1.sha256,
+    program: { kind: "wasm", sha256: v1.sha256 },
     summary: null,
     limits: DEFAULT_LIMITS,
   });
-  assert.equal(store.getRule(rule.id)!.wasm, v1.sha256);
+  assert.deepEqual(store.getRule(rule.id)!.program, { kind: "wasm", sha256: v1.sha256 });
 
   engine.dispatch("MESSAGE_CREATE", GUILD, { id: "700", channel_id: "10", guild_id: GUILD, content: "hi", author: { id: "3" } });
   await engine.idle();
@@ -234,4 +233,32 @@ test("run_wasm runs an attached or kept module once, read-only, and points steps
   assert.match((fromModule.content[0] as { text: string }).text, /post\(abababababab\) 終了コード 0/);
   assert.deepEqual(loaded, ["post"]);
   await assert.rejects(run.execute("t", {}), /message_id か module/);
+});
+
+test("rules saved before programs were a union read as a JS or a Wasm program", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { randomBytes } = await import("node:crypto");
+  const { Store } = await import("../src/db.ts");
+  const path = join(mkdtempSync(join(tmpdir(), "rules-")), "bot.db");
+  const key = randomBytes(32);
+  let store = new Store(path, key);
+  const version = store.db.pragma("user_version", { simple: true }) as number;
+  const insert = store.db.prepare("INSERT INTO rules (id, guild_id, owner_id, name, rule_json, version, enabled, consecutive_failures, created_at, updated_at) VALUES (?, '1', '2', ?, ?, 1, 1, 0, '', '')");
+  const old = { sourcePrompt: "", trigger: { event: "MESSAGE_CREATE" }, allow: [], summary: null, limits: { perMinute: 10, maxConsecutiveFailures: 5 } };
+  insert.run("js", "js", JSON.stringify({ ...old, name: "js", code: "return null" }));
+  insert.run("wasm", "wasm", JSON.stringify({ ...old, name: "wasm", code: "", wasm: "ab".repeat(32) }));
+  store.db.pragma(`user_version = ${version - 1}`);
+  store.close();
+  store = new Store(path, key);
+  try {
+    assert.deepEqual(store.getRule("js")!.program, { kind: "js", code: "return null" });
+    assert.deepEqual(store.getRule("wasm")!.program, { kind: "wasm", sha256: "ab".repeat(32) });
+    assert.equal("code" in store.getRule("wasm")!, false);
+    assert.deepEqual(store.enabledRuleCode(), ["return null"]);
+    assert.deepEqual(store.wasmInUse(), ["ab".repeat(32)]);
+  } finally {
+    store.close();
+  }
 });

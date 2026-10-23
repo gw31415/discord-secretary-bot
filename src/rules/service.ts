@@ -32,7 +32,7 @@ import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
 import { ModuleRejected, sizeLabel, wasmRef } from "../wasm/registry.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 import type { WasmRef } from "../plan/types.ts";
-import type { Rule, RuleDefinition, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
+import type { Rule, RuleDefinition, RuleProgram, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
@@ -61,7 +61,7 @@ export interface RuleServiceDeps {
 }
 
 /** `wasm` is the module's sha256 here, already resolved. */
-type DryRunInput = Pick<RuleProposal, "code" | "wasm" | "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { id?: string };
+type DryRunInput = Pick<RuleProposal, "allow" | "trigger" | "params" | "sampleEvent" | "replaces"> & { program: RuleProgram; id?: string };
 
 /** How the dialog and panel describe a module, in place of an explanation of code. */
 export function wasmSummary(ref: WasmRef): string {
@@ -152,7 +152,7 @@ export class RuleService {
     // A saved rule (or a new version of one) is tried on its current state; nothing a dry run sets is kept.
     const saved = rule.id ?? rule.replaces;
     const state = saved && this.deps.store.getRule(saved)?.ownerId === ownerId ? this.deps.store.getRuleState(saved) : null;
-    const result = await this.deps.engine.evaluate({ guildId, ownerId, code: rule.code, ...(rule.wasm ? { wasm: rule.wasm } : {}), ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
+    const result = await this.deps.engine.evaluate({ guildId, ownerId, program: rule.program, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
     const kept = { ...(result.state ? { state: JSON.stringify(result.state.value) } : {}), ...(result.reply !== undefined ? { reply: result.reply } : {}), ...(result.images?.length ? { images: result.images.length } : {}) };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs, ...kept };
@@ -196,21 +196,22 @@ export class RuleService {
       const own: string[] = [];
       if (!proposed.name.trim()) own.push("名前がありません");
       // A module named by the request runs instead of code, pinned to the build found now.
+      const code = proposed.program.kind === "js" ? proposed.program.code : null;
       let wasm: WasmRef | undefined;
-      if (proposed.wasm) {
+      if (proposed.program.kind === "wasm") {
         try {
           if (!this.deps.wasm) throw new ModuleRejected("Wasmのルールはここでは作れません");
-          wasm = wasmRef(this.deps.wasm.resolve(input.ownerId, this.deps.caches.get(input.guildId)?.guild, proposed.wasm));
+          wasm = wasmRef(this.deps.wasm.resolve(input.ownerId, this.deps.caches.get(input.guildId)?.guild, proposed.program.module));
         } catch (e) {
           own.push(e instanceof Error ? e.message : String(e));
         }
-      }
-      else if (!proposed.code.trim()) own.push("code(または wasm)がありません");
-      const r = { ...proposed, ...(wasm ? { wasm: wasm.sha256, code: "" } : {}) };
+      } else if (!code?.trim()) own.push("code(または wasm)がありません");
+      const program: RuleProgram = code !== null ? { kind: "js", code } : { kind: "wasm", sha256: wasm?.sha256 ?? "" };
+      const r = { ...proposed, program };
       const triggerIssues = triggerProblems(r.trigger);
       own.push(...triggerIssues);
       for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
-      const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, code: r.code, ...(r.wasm ? { wasm: r.wasm } : {}), summary: null, limits: ruleLimits(r.limits) };
+      const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, program, summary: null, limits: ruleLimits(r.limits) };
       if (triggerIssues.length === 0) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
       if (r.trigger.command && triggerIssues.length === 0) {
         own.push(...this.commandNameProblems(input.guildId, r.trigger.command.name, r.replaces, input.rules.slice(0, i).map((o) => o.trigger.command?.name)));
@@ -261,11 +262,10 @@ export class RuleService {
         name: r.name.slice(0, 60),
         trigger: await this.#withVisibility(input.ownerId, r, dry),
         allow: r.allow,
-        code: r.code,
-        ...(wasm ? { wasm } : {}),
+        program: wasm ? { kind: "wasm", module: wasm } : { kind: "js", code: code ?? "" },
         ...(r.params ? { params: r.params } : {}),
         ...(r.limits ? { limits: ruleLimits(r.limits) } : {}),
-        summary: wasm ? wasmSummary(wasm) : r.summary !== undefined ? r.summary : await this.#summarize(r.code, input.ownerId, triggerEvents(r.trigger).join("・")),
+        summary: wasm ? wasmSummary(wasm) : r.summary !== undefined ? r.summary : await this.#summarize(code ?? "", input.ownerId, triggerEvents(r.trigger).join("・")),
         ...(replaces ? { replaces } : {}),
         dry,
         ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),
@@ -316,8 +316,7 @@ export class RuleService {
       sourcePrompt: draft.request,
       trigger: draft.trigger,
       allow: draft.allow,
-      code: draft.code,
-      ...(draft.wasm ? { wasm: draft.wasm.sha256 } : {}),
+      program: draft.program.kind === "wasm" ? { kind: "wasm", sha256: draft.program.module.sha256 } : draft.program,
       ...(draft.params ? { params: draft.params } : {}),
       summary: draft.summary,
       limits: draft.limits ?? DEFAULT_LIMITS,
@@ -592,12 +591,13 @@ export class RuleService {
     }
   }
 
-  async #codeFile(interaction: APIInteraction, name: string, definition: Pick<Rule, "trigger" | "allow" | "code" | "params">): Promise<void> {
+  async #codeFile(interaction: APIInteraction, name: string, definition: Pick<Rule, "trigger" | "allow" | "program" | "params">): Promise<void> {
     const json = JSON.stringify({ trigger: definition.trigger, allow: definition.allow, params: definition.params ?? null }, null, 2);
+    const { program } = definition;
     await this.deps.api.interactions.reply(interaction.id, interaction.token, {
       content: `ルール「${name}」のコードと許す操作です`,
       files: [
-        { name: "rule.js", data: Buffer.from(definition.code) },
+        { name: "rule.js", data: Buffer.from(program.kind === "js" ? program.code : `// Wasm sha256 ${program.sha256}`) },
         { name: "rule.json", data: Buffer.from(json) },
       ],
       flags: MessageFlags.Ephemeral,
