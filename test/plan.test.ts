@@ -537,6 +537,22 @@ test("a plan made from steps has no code view", async () => {
 
 // --- Plans made by event rules -------------------------------------------------
 
+test("a channel the dialog showed must still be one its actor can see when they approve", async () => {
+  const { planner, store, calls, roles, channels, cache } = setup();
+  roles[1]!.permissions = String(BigInt(roles[1]!.permissions) | P.ManageChannels);
+  cache.guild!.roles.set(MOD_ROLE, { ...cache.guild!.roles.get(MOD_ROLE)!, permissions: BigInt(roles[1]!.permissions) });
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "2", shareable: new Set(["10", "11"]),
+    drafts: [{ op: "POST /guilds/{guild}/channels", body: { name: "new", parent_id: "11" } }],
+  });
+  // After the proposal, the moderator is shut out of #staff.
+  channels["11"].permission_overwrites = [{ id: "2", type: 1, allow: "0", deny: String(P.ViewChannel) }];
+  await planner.handleInteraction(click(plan, "run", "2"));
+  await settle(() => store.getPlan(plan.id)!.status === "aborted");
+  assert.equal(calls.length, 0);
+  assert.match(store.getPlan(plan.id)!.reason!, /チャンネル 11 を依頼者が見られなくなりました/);
+});
+
 const RULE = {
   id: "r1",
   version: 1,
@@ -680,6 +696,41 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.equal(made.sourcePrompt, "vcを動的に作成削除する仕組みを作りたい");
   assert.equal(rules.find((r) => r.name === "空き部屋を消す")!.trigger.includeBotOrigin, true);
   assert.match(dialogText(t.replies.at(-1)!.body), /ルール2件を登録しました/);
+});
+
+test("the rules a plan registers are checked against the actor's permissions again at approval, before any step runs", async () => {
+  const t = setup();
+  withRules(t);
+  t.roles[1]!.permissions = String(BigInt(t.roles[1]!.permissions) | P.ManageChannels);
+  t.cache.guild!.roles.set(MOD_ROLE, { ...t.cache.guild!.roles.get(MOD_ROLE)!, permissions: BigInt(t.roles[1]!.permissions) });
+  const plan = await t.planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "2", shareable: new Set(["10"]), reader, request: "x",
+    drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "部屋を片付けます" } }],
+    rules: [CLEANUP_RULE],
+  });
+  t.members["2"].roles = [];
+  t.cache.guild!.members.set("2", { userId: "2", roleIds: [], bot: false });
+  await t.planner.handleInteraction(click(plan, "run", "2"));
+  await settle(() => t.store.getPlan(plan.id)!.status === "aborted");
+  assert.equal(t.calls.length, 0);
+  assert.equal(t.store.listRules(GUILD).length, 0);
+  assert.match(t.store.getPlan(plan.id)!.reason!, /ルール「空き部屋を消す」: 許す操作に必要な権限をあなたが持っていません: ManageChannels/);
+});
+
+test("a command's plan needs its rule's owner to still hold what the rule allows, even when someone else ran it", async () => {
+  const { planner, store, calls, members, roles, cache } = setup();
+  roles[1]!.permissions = String(BigInt(roles[1]!.permissions) | P.ManageChannels);
+  cache.guild!.roles.set(MOD_ROLE, { ...cache.guild!.roles.get(MOD_ROLE)!, permissions: BigInt(roles[1]!.permissions) });
+  const rule = { ...RULE, ownerId: "2", allow: [{ op: "PATCH /channels/{channel}", body: { type: "object", properties: { topic: { type: "string" } }, additionalProperties: false } }] };
+  const run = () => planner.runForRule({ guildId: GUILD, actorId: "1", rule, drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { topic: "x" } }] });
+  const first = await run();
+  assert.equal(first.status, "succeeded", first.reason ?? "");
+  members["2"].roles = [];
+  const done = await run();
+  assert.equal(done.status, "aborted");
+  assert.match(done.reason!, /ルールの作成者が持っていません: ManageChannels/);
+  assert.equal(calls.length, 1);
+  assert.equal(store.getPlan(done.plan.id)!.plan.rule!.ownerId, "2");
 });
 
 test("rules are checked at proposal: refs must point to the plan's steps, and a plan may be rules alone", async () => {

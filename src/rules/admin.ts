@@ -6,7 +6,7 @@ import type { AuditEntry, PlanRow, Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { basePermissions, has } from "../discord/permissions.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
-import { allowShapeProblems, missingPermissions } from "./allow.ts";
+import { allowShapeProblems, missingPermissions, ownerAllowProblems } from "./allow.ts";
 import { haltKey } from "./engine.ts";
 import type { Halt } from "./engine.ts";
 import { triggerProblems } from "./triggers.ts";
@@ -101,11 +101,7 @@ export class RuleAdmin {
     const viewer = this.#viewer(guildId, ownerId);
     const problems = [...allowShapeProblems(definition.allow, definition.trigger.event === "COMMAND")];
     problems.push(...triggerProblems(definition.trigger));
-    const missing = missingPermissions(viewer.guild, viewer.member, definition.allow);
-    if (missing.length > 0) problems.push(`許す操作に必要な権限をあなたが持っていません: ${missing.join(", ")}`);
-    const bot = viewer.guild.members.get(this.deps.selfId());
-    const botMissing = bot ? missingPermissions(viewer.guild, bot, definition.allow) : ["(Botの情報がありません)"];
-    if (botMissing.length > 0) problems.push(`許す操作に必要な権限をBotが持っていません: ${botMissing.join(", ")}`);
+    problems.push(...ownerAllowProblems(viewer.guild, ownerId, this.deps.selfId(), definition.allow));
     return problems;
   }
 

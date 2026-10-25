@@ -459,3 +459,43 @@ test("runs go side by side unless they must wait: serial_by, debounce or state",
   await w.engine.idle();
   assert.equal(w.store.recentRuleRuns(rule.id, 5).length, 3);
 });
+
+test("a run checks again that its owner holds what the rule allows, before the code runs", async () => {
+  const w = world();
+  const rule = w.admin.save(GUILD, "2", { ...w.definition, allow: [{ op: "DELETE /channels/{channel}/messages/{message}" }] });
+  // The moderator loses the role that let them delete messages.
+  w.cache.guild!.members.set("2", { userId: "2", roleIds: [], bot: false });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3"));
+  await w.engine.idle();
+  assert.equal(w.seen.length, 0);
+  assert.equal(w.runs.length, 0);
+  const run = w.store.recentRuleRuns(rule.id, 1)[0]!;
+  assert.equal(run.outcome, "rejected");
+  assert.match(run.error!, /ルールの作成者が持っていません: ManageMessages/);
+  // It counts toward switching the rule off: the problem is the rule's own.
+  assert.equal(w.store.getRule(rule.id)!.consecutiveFailures, 1);
+});
+
+test("a run that starts late drops the events its owner can no longer see", async () => {
+  const timers: Array<{ fn: () => void }> = [];
+  const w = world();
+  (w.engine.deps as any).setTimer = (fn: () => void) => (timers.push({ fn }), timers.at(-1));
+  (w.engine.deps as any).clearTimer = () => {};
+  w.admin.save(GUILD, "2", { ...w.definition, trigger: { event: "MESSAGE_CREATE", debounceSeconds: 2 } });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("11", "3", "701"));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "702"));
+  // Before the quiet moment comes, the owner loses the role that showed them #staff.
+  w.cache.guild!.members.set("2", { userId: "2", roleIds: [], bot: false });
+  timers.at(-1)!.fn();
+  await w.engine.idle();
+  assert.equal(w.seen.length, 1);
+  assert.deepEqual(w.seen[0].batch.map((b: any) => b.event.id), ["702"]);
+
+  // With nothing left it can see, it does not run at all.
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "703"));
+  w.cache.guild!.members.set("2", { userId: "2", roleIds: [], bot: false });
+  w.cache.guild!.channels.set("10", { ...w.cache.guild!.channels.get("10")!, overwrites: [{ id: "2", type: 1, allow: 0n, deny: P.ViewChannel }] });
+  timers.at(-1)!.fn();
+  await w.engine.idle();
+  assert.equal(w.seen.length, 1);
+});

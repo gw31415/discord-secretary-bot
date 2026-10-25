@@ -9,7 +9,7 @@ import type { PlanRow, Store, StepRow } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { toChannel, toMember, toRole } from "../discord/cache.ts";
 import { modalValue } from "../discord/modal.ts";
-import { shareableChannels } from "../discord/permissions.ts";
+import { canView, shareableChannels } from "../discord/permissions.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
@@ -20,7 +20,7 @@ import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts
 import { isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
 import type { Reader } from "../discord/reader.ts";
-import { allowProblems, allowRisk, needsChannel, needsTarget } from "../rules/allow.ts";
+import { allowProblems, allowRisk, needsChannel, needsTarget, ownerAllowProblems } from "../rules/allow.ts";
 import type { Targets } from "../rules/allow.ts";
 import type { RuleProposal } from "../rules/types.ts";
 import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
@@ -31,6 +31,8 @@ import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs
 export const APPROVAL_MS = 5 * 60_000;
 export const SNAPSHOT_RETENTION_MS = 90 * 24 * 60 * 60_000;
 const PROGRESS_INTERVAL_MS = 2000;
+/** A long plan reads permissions again this often, so a role taken away mid-run stops the rest. */
+const STATE_REFRESH_MS = 30_000;
 
 export interface PlannerDeps {
   api: API;
@@ -714,7 +716,7 @@ export class Planner {
       channels: new Map(channels.map((c) => [c.id, toChannel(c)])),
       members: new Map(),
     };
-    const memberIds = new Set([plan.actor.userId, this.deps.selfId()]);
+    const memberIds = new Set([plan.actor.userId, this.deps.selfId(), ...(plan.rule?.ownerId ? [plan.rule.ownerId] : [])]);
     for (const step of steps) {
       const param = specOf(step).hierarchy?.member;
       if (param && !isRef(step.pathParams[param])) memberIds.add(String(step.pathParams[param]));
@@ -732,8 +734,12 @@ export class Planner {
   async #addChannel(state: GuildState, step: Step): Promise<void> {
     const param = specOf(step).channel;
     const value = param ? step.pathParams[param] : undefined;
-    if (typeof value !== "string" || state.channels.has(value)) return;
-    const raw = (await this.#get(`/channels/${value}`)) as (APIChannel & { guild_id?: string }) | null;
+    if (typeof value === "string") await this.#addChannelId(state, value);
+  }
+
+  async #addChannelId(state: GuildState, id: string): Promise<void> {
+    if (state.channels.has(id)) return;
+    const raw = (await this.#get(`/channels/${id}`)) as (APIChannel & { guild_id?: string }) | null;
     if (raw?.guild_id === state.id) state.channels.set(raw.id, toChannel(raw));
   }
 
@@ -763,6 +769,45 @@ export class Planner {
       keys.push(key);
     }
     return group.slice(0, batchRun(group.map((g) => g.resolved), keys));
+  }
+
+  /**
+   * What the proposal checked about people, checked again on fresh REST data
+   * once the plan is approved (or a rule's plan is about to run), since roles
+   * and overwrites can change in between: the actor's and the bot's permissions
+   * for every step; for a conversation's plan, that the actor can still see
+   * the channels it names; for the rules it registers, that the
+   * actor still holds what they allow; for a rule's plan, that the rule's owner
+   * still holds what it allows, even when someone else ran its command.
+   */
+  async #currentProblems(plan: Plan, state: GuildState, remaining: Step[]): Promise<string[]> {
+    await Promise.all(remaining.flatMap((step) => this.#namedChannels(step)).map((id) => this.#addChannelId(state, id)));
+    const selfId = this.deps.selfId();
+    const actorId = plan.actor.userId;
+    const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId, selfId }));
+    const actor = state.members.get(actorId);
+    if (plan.actor.via === "conversation" && actor) {
+      // The dialog showed these channels because the actor could read them; one that is gone reveals nothing.
+      for (const step of remaining) {
+        for (const id of new Set(this.#namedChannels(step))) {
+          if (state.channels.has(id) && !canView(state, actor, id)) problems.push(`${step.id}(${specOf(step).label}): チャンネル ${id} を依頼者が見られなくなりました`);
+        }
+      }
+    }
+    for (const draft of plan.rules ?? []) {
+      if (this.deps.store.getMeta(`plan_rule:${plan.id}:${draft.key}`)) continue;
+      problems.push(...ownerAllowProblems(state, actorId, selfId, draft.allow).map((p) => `ルール「${draft.name}」: ${p}`));
+    }
+    if (plan.rule) {
+      const ownerId = plan.rule.ownerId ?? actorId;
+      problems.push(...ownerAllowProblems(state, ownerId, selfId, plan.rule.allow, "ルールの作成者").map((p) => `ルール「${plan.rule!.name}」: ${p}`));
+    }
+    return problems;
+  }
+
+  /** Channels a step names, as the preview showed them. */
+  #namedChannels(step: Step): string[] {
+    return (specOf(step).channels?.(step.pathParams, step.body as Body) ?? []).filter((id): id is string => typeof id === "string");
   }
 
   /** A step's checks right before it is sent: permissions, a rule's allow list on the target as it is now, and the snapshot. */
@@ -856,9 +901,10 @@ export class Planner {
       /** The steps being checked or sent; on an error they are the ones marked failed. */
       let current: Step[] = [];
       try {
-        const state = await this.#freshState(plan, remaining);
+        let state = await this.#freshState(plan, remaining);
+        let stateAt = this.deps.now();
         if (!opts.fresh) await this.#checkPreconditions(plan, remaining, results);
-        const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }));
+        const problems = await this.#currentProblems(plan, state, remaining);
         if (problems.length > 0) throw new Aborted(`権限が足りなくなりました: ${problems.join(" / ")}`);
 
         const referenced = referencedSteps(plan.steps);
@@ -866,6 +912,12 @@ export class Planner {
         let lastRefresh = this.deps.now();
         for (let i = 0; i < remaining.length; ) {
           current = [remaining[i]!];
+          if (this.deps.now() - stateAt >= STATE_REFRESH_MS) {
+            state = await this.#freshState(plan, remaining.slice(i));
+            stateAt = this.deps.now();
+            const lost = await this.#currentProblems(plan, state, remaining.slice(i));
+            if (lost.length > 0) throw new Error(`権限が足りなくなりました: ${lost.join(" / ")}`);
+          }
           const group = this.#nextGroup(remaining, i, results, referenced);
           i += group.length;
           current = group.map((g) => g.step);
