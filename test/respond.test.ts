@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { REST } from "@discordjs/rest";
 import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider, Type } from "@earendil-works/pi-ai";
 import { llm } from "../src/llm/models.ts";
-import { Inbox, ReplyFailed, respond, typicalLength } from "../src/agent/respond.ts";
+import { Inbox, ReplyFailed, respond, takeReactTags, typicalLength } from "../src/agent/respond.ts";
 import { isTransient } from "../src/agent/retry.ts";
 import { attachedResult, ImageBox } from "../src/agent/attachments.ts";
 import { stripComments } from "../src/agent/summarize.ts";
@@ -418,6 +418,28 @@ test("a speaker who says stop at the turn limit gets the limit's message", async
     });
     assert.equal(asked, 1);
     assert.match(result.text, /手順が多くなりすぎた/);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
+test("a react call written as text reacts instead of showing up in the reply", async () => {
+  assert.deepEqual(takeReactTags('<react emoji="🙂">'), { text: "", emojis: ["🙂"] });
+  assert.deepEqual(takeReactTags("いいね <react emoji='👍'/>"), { text: "いいね", emojis: ["👍"] });
+  assert.deepEqual(takeReactTags('<react emoji="🎉"></react>おめでとう'), { text: "おめでとう", emojis: ["🎉"] });
+  assert.deepEqual(takeReactTags("ふつうの返事"), { text: "ふつうの返事", emojis: [] });
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses([fauxAssistantMessage([fauxText('<react emoji="🙂">')])]);
+    const reacted: string[] = [];
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
+      transcript: [], target: "[1] user: ありがとう", web: null, react: async (e) => { reacted.push(e); },
+    });
+    assert.equal(result.text, "");
+    assert.deepEqual(reacted, ["🙂"]);
+    assert.deepEqual(result.reactions, ["🙂"]);
   } finally {
     llm.deleteProvider(faux.provider.id);
   }
