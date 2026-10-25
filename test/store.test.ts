@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
 import { findChatModel, judgeRef, lightestThinking, selectableModels } from "../src/llm/models.ts";
-import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
+import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelModal } from "../src/llm/panel.ts";
 import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
 
 const master = randomBytes(32);
@@ -123,7 +123,8 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:judge:typesafe:0", ["typesafe/jev-latest"])?.kind, "selectModel");
   assert.equal(parseCustomId("llm:model:response:typesafe:0", ["typesafe/jev-latest"]), null);
   assert.equal(parseCustomId("llm:key:mistral"), null);
-  // OpenRouter models are typed in: the select opens a modal for the role.
+  // OpenRouter models are typed in: each role's button opens a modal (the select on older panels too).
+  assert.deepEqual(parseCustomId("llm:typed:code"), { kind: "openTypedModelModal", role: "code" });
   assert.deepEqual(parseCustomId("llm:typed:role", ["judge"]), { kind: "openTypedModelModal", role: "judge" });
   assert.equal(parseCustomId("llm:typed:role", ["boss"]), null);
   assert.deepEqual(parseCustomId("llm:typedmodal:response"), { kind: "submitTypedModel", role: "response" });
@@ -194,7 +195,10 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "openrouter", "sk-or-abcdefgh1357");
   const before = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
-  assert.match(before, /llm:typed:role/);
+  assert.match(before, /llm:typed:response/);
+  assert.match(before, /llm:typed:judge/);
+  const roles = JSON.stringify(renderPanel(store, "u1", undefined, "roles"));
+  for (const role of ["addressee", "code", "reaction"]) assert.match(roles, new RegExp(`llm:typed:${role}`));
   assert.doesNotMatch(before, /"openrouter\//, "hundreds of models stay out of the menus");
   store.setModel("u1", "response", { provider: "openrouter", model: "anthropic/claude-sonnet-5" });
   const after = renderPanel(store, "u1", undefined, "models");
@@ -209,6 +213,10 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   walk(after.components);
   assert.deepEqual(values.filter((o) => o.value.startsWith("openrouter/")), [{ value: "openrouter/anthropic/claude-sonnet-5", default: true, label: values.find((o) => o.value.startsWith("openrouter/"))!.label, description: "OpenRouter · anthropic/claude-sonnet-5" } as never]);
   assert.ok(setupStatus(store, "u1").missing.every((m) => !m.startsWith("言語")));
+  // The modal holds the model typed before, so it can be changed.
+  const modal = JSON.stringify(typedModelModal("response", "anthropic/claude-sonnet-5"));
+  assert.match(modal, /"value":"anthropic\/claude-sonnet-5"/);
+  assert.doesNotMatch(JSON.stringify(typedModelModal("judge")), /"value"/);
 });
 
 test("the settings panel moves between its pages with buttons, each well within Discord's limits", () => {

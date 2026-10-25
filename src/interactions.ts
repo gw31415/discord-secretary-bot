@@ -74,9 +74,11 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, pageOf(action.role)));
         return;
       }
-      case "openTypedModelModal":
-        await api.interactions.createModal(interaction.id, interaction.token, typedModelModal(action.role));
+      case "openTypedModelModal": {
+        const current = store.getSettings(userId)[action.role];
+        await api.interactions.createModal(interaction.id, interaction.token, typedModelModal(action.role, current?.provider === "openrouter" ? current.model : undefined));
         return;
+      }
       case "selectWeb": {
         store.setWebTool(userId, action.tool);
         store.audit(actor, "llm.web.set", { tool: action.tool });

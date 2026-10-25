@@ -33,7 +33,7 @@ export const CUSTOM_ID = {
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
   modelSelect: (role: ModelRole, p: ProviderId | "all", page: number) => `llm:model:${role}:${p}:${page}`,
   webSelect: "llm:web:tool",
-  typedModelSelect: "llm:typed:role",
+  typedModelButton: (role: ModelRole) => `llm:typed:${role}`,
   typedModelModal: (role: ModelRole) => `llm:typedmodal:${role}`,
   readScopeSelect: "llm:read:scope",
   page: (page: PanelPage) => `llm:page:${page}`,
@@ -245,7 +245,7 @@ function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
       content: "**判定モデル**\n発言がBot宛てかどうか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めるときに使います。コードやルールの judge()・rank() もこのモデルが答えます。軽いモデルか、判定専用のJevやGPT-6 Lunaが向いています。",
     },
     ...roleSelects(store, userId, "judge", "判定モデル", "言語モデルと同じ"),
-    ...typedModelSelect(store, userId, ["response", "judge"]),
+    ...typedModelButtons(store, userId, ["response", "judge"]),
     { type: ComponentType.ActionRow, components: [navButton("roles", "用途別のモデル", "models")] },
   );
   return body;
@@ -273,7 +273,7 @@ function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
       content: "**リアクション**\n文章で返すかリアクションだけで返すか、どの絵文字を付けるかを決めます。Botの発言にあなたが付けたリアクションへの応じ方も決めます。判定専用のモデルが向いています。",
     },
     ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", "判定モデルと同じ"),
-    ...typedModelSelect(store, userId, ["addressee", "code", "reaction"]),
+    ...typedModelButtons(store, userId, ["addressee", "code", "reaction"]),
   );
   return body;
 }
@@ -346,25 +346,25 @@ export function roleLabel(role: ModelRole): string {
 }
 
 // OpenRouter has hundreds of models, so its models are typed in rather than listed.
-function typedModelSelect(store: Store, userId: string, roles: ModelRole[]): APIComponentInContainer[] {
+// Buttons, not a select: a select keeps showing the role picked last, and picking it
+// again sends nothing, so a typed model could not be changed.
+function typedModelButtons(store: Store, userId: string, roles: ModelRole[]): APIComponentInContainer[] {
   const providers = [...TYPED_MODEL_PROVIDERS].filter((p) => store.listKeys(userId).some((k) => k.provider === p));
   if (providers.length === 0) return [];
   const label = providers.map((p) => PROVIDERS[p].label).join("・");
   return [{
     type: ComponentType.ActionRow,
-    components: [{
-      type: ComponentType.StringSelect,
-      custom_id: CUSTOM_ID.typedModelSelect,
-      placeholder: `${label}のモデルをIDで選ぶ`.slice(0, 150),
-      options: roles.map((role) => ({
-        label: `${ROLE_LABEL[role]}モデル`.slice(0, 100),
-        value: role,
-      })),
-    }],
+    components: roles.map((role) => ({
+      type: ComponentType.Button,
+      custom_id: CUSTOM_ID.typedModelButton(role),
+      label: `${label}の${ROLE_LABEL[role]}モデルをIDで選ぶ`.slice(0, 80),
+      style: ButtonStyle.Secondary,
+    })),
   }];
 }
 
-export function typedModelModal(role: ModelRole): APIModalInteractionResponseCallbackData {
+/** current is the OpenRouter model the role uses now, filled in so it can be edited. */
+export function typedModelModal(role: ModelRole, current?: string): APIModalInteractionResponseCallbackData {
   return {
     custom_id: CUSTOM_ID.typedModelModal(role),
     title: `OpenRouter: ${ROLE_LABEL[role]}モデル`.slice(0, 45),
@@ -381,6 +381,7 @@ export function typedModelModal(role: ModelRole): APIModalInteractionResponseCal
             min_length: 3,
             max_length: 90,
             placeholder: judgesOnly(role) ? "~typesafe/jev-latest" : "anthropic/claude-sonnet-5",
+            ...(current ? { value: current.slice(0, 90) } : {}),
           },
         ],
       },
@@ -438,6 +439,8 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
   if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
   const isRole = (r: string | undefined): r is ModelRole => r === "response" || r === "judge" || r === "addressee" || r === "code" || r === "reaction";
+  if (kind === "typed" && isRole(arg)) return { kind: "openTypedModelModal", role: arg };
+  // The select on panels opened before the buttons.
   if (kind === "typed" && arg === "role") return isRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
   if (kind === "typedmodal" && isRole(arg)) return { kind: "submitTypedModel", role: arg };
   // "advanced" is the per-use page's id on panels opened before it moved under the models page.
