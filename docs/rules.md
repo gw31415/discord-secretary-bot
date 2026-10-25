@@ -1,0 +1,275 @@
+# ルール
+
+ルールは「決まったことが起きたら、決まった範囲の変更をする」自動化です。きっかけ(イベント・時刻・起動・スラッシュコマンド)が来るたびに、登録したコード(JavaScript か Wasm)がサンドボックスで動き、変更の並びを返します。変更は作成者の権限で、許す操作(allow)の範囲だけ、確認なしに実行されます。ルールの実行に LLM は使いません(コードが `judge()`・`rank()` を呼んだときだけ判定モデルを使います)。
+
+## 作り方
+
+ルールを作る専用のコマンドはありません。会話で「〜したら〜して」と頼みます。
+
+1. Botが要る変更(チャンネルを作るなど)とルールをまとめて1つの変更案にします。1つの案に入るルールは5件までです。
+2. 案を出す前に、ルールごとにドライランをします([ドライラン](#ドライラン))。
+3. 確認ダイアログに、ルールの要約・許す操作・コード・ドライランの結果が出ます。要約は、依頼を見ていない別のAIがコードだけを読んで書きます。
+4. 本人が「実行」を押すと、変更のステップを実行してからルールを登録します。
+
+承認したルールは、そのバージョンのまま動きます。中身を少しでも変えると新しいバージョンになり、もう一度承認します。直したいときも会話で頼みます(Botが `replaces_rule` に今のルールのIDを入れて案を出します)。
+
+## ルールの項目
+
+Botが変更案に書く項目です。会話で頼めばBotが決めますが、細かく指定することもできます。
+
+| 項目 | 中身 |
+|---|---|
+| `name` | 短い名前(60文字まで) |
+| `trigger_event` | きっかけ([きっかけの一覧](#きっかけの一覧)) |
+| `more_trigger_events` | 同じルールを動かすほかのきっかけ。合わせて5種類まで |
+| `include_bot_origin` | Bot自身が起こしたイベントでも動くか(`true`・`false`・`"other_rules"`) |
+| `schedule` / `timezone` | `SCHEDULE` の cron と時間帯(既定 `Asia/Tokyo`) |
+| `debounce_seconds` | 最後のイベントから何秒待ってまとめて1回動くか(1〜300) |
+| `serial_by` | 実行を順番にする単位(`"rule"` かイベントの項目のパス) |
+| `limits` | `{ per_minute, max_consecutive_failures }` |
+| `command` | `COMMAND` のときのスラッシュコマンド([コマンド](#コマンド)) |
+| `allow` | 許す操作(10個まで、[許す操作](#許す操作allow)) |
+| `code` | JavaScript の関数本体(8000文字まで、[JavaScript の API](js-api.md#ルールだけの関数)) |
+| `wasm` | `code` の代わりに動かす Wasm モジュール(自分のモジュール名か、同じサーバーの人のモジュールの sha256 12文字以上) |
+| `params` | コードが `params` として読む値 |
+| `sample_event` | ドライランに使うイベントの例 |
+| `replaces_rule` | 直す既存のルールのID |
+
+## きっかけの一覧
+
+コードは発火したイベントを `event` で、どのきっかけかを `eventName` で読みます。下の「event の主な項目」は Discord の Gateway のイベントの中身です。
+
+| きっかけ | いつ | event の主な項目 |
+|---|---|---|
+| `MESSAGE_CREATE` | メッセージが投稿された | id, channel_id, guild_id, content, author { id, username, global_name, bot }, member { roles, nick }, mentions[], mention_roles[], attachments[], message_reference, timestamp |
+| `MESSAGE_UPDATE` | メッセージが編集された | 上と同じ、と edited_timestamp |
+| `MESSAGE_DELETE` | メッセージが削除された | id, channel_id, guild_id(本文と投稿者はない) |
+| `MESSAGE_REACTION_ADD` | リアクションが付いた | user_id, channel_id, message_id, guild_id, member { roles, user }, emoji { id, name }, message_author_id |
+| `MESSAGE_REACTION_REMOVE` | リアクションが外れた | user_id, channel_id, message_id, guild_id, emoji { id, name } |
+| `GUILD_MEMBER_ADD` | メンバーが参加した | guild_id, user { id, username, global_name, bot }, roles[], nick, joined_at, communication_disabled_until |
+| `GUILD_MEMBER_UPDATE` | ロールやニックネームが変わった | 上と同じ(変更前の値はない) |
+| `GUILD_MEMBER_REMOVE` | メンバーが抜けた | guild_id, user { … } |
+| `GUILD_BAN_ADD` / `GUILD_BAN_REMOVE` | BAN された / 解除された | guild_id, user { … } |
+| `CHANNEL_CREATE` | チャンネルが作られた | id, guild_id, name, type, parent_id, topic, permission_overwrites[] |
+| `CHANNEL_UPDATE` | チャンネルが変わった | 上と同じ(変更前の値はない) |
+| `CHANNEL_DELETE` | チャンネルが削除された | id, guild_id, name, type, parent_id |
+| `THREAD_CREATE` | スレッドが作られた | id, guild_id, name, type, parent_id, owner_id, newly_created |
+| `GUILD_ROLE_CREATE` / `GUILD_ROLE_UPDATE` | ロールが作られた / 変わった | guild_id, role { id, name, permissions, position, color } |
+| `GUILD_ROLE_DELETE` | ロールが削除された | guild_id, role_id |
+| `GUILD_UPDATE` | サーバーの設定が変わった | id(サーバーID), name, icon, owner_id, system_channel_id, rules_channel_id, afk_channel_id |
+| `VOICE_STATE_UPDATE` | ボイスチャンネルに入った・出た・移った | guild_id, user_id, channel_id(抜けたら null), before_channel_id, member { roles, user }, self_mute, self_deaf |
+| `SCHEDULE` | 決まった時刻になった | guild_id, scheduled_at(発火した分の ISO 時刻), schedule, timezone |
+| `BOT_READY` | Botが起動・再接続してサーバーの情報を受け取った | guild_id |
+| `COMMAND` | ルールのスラッシュコマンドが実行された | guild_id, channel_id, command, user { id, username, global_name }, member { roles, nick }, options |
+
+`BOT_READY` は、Botが止まっていた間の変化をまとめて反映するのに使います。`VOICE_STATE_UPDATE` の `before_channel_id` はBotが足した項目です。
+
+チャンネルで起きたイベントは、作成者がそのチャンネルを見られるときだけルールを動かします。チャンネルのないイベント(メンバー・ロール・サーバー)はサーバー全体のものとして扱います。
+
+### Botが起こしたイベント
+
+Bot自身の変更で起きたイベントでは、既定でルールは動きません。ルールが自分の結果でまた動き続けるのを防ぐためです。
+
+| `include_bot_origin` | 動くイベント |
+|---|---|
+| なし・`false` | Bot由来のイベントでは動かない |
+| `"other_rules"` | ほかのルールや会話からの変更では動く。このルール自身の変更と、Botの投稿・リアクション(だれの変更か区別できない)では動かない |
+| `true` | Botの変更すべてで動く |
+
+何度動いても結果が同じになるルールにだけ付けます。ほかのルールの結果に合わせて直すルール(並べ替えのあとに一覧を作り直すなど)は `"other_rules"` にします。
+
+Bot由来かどうかは、Botが直前15秒に書いた対象かで決めます。
+
+### 時刻(SCHEDULE)
+
+`schedule` に cron の5つの欄「分 時 日 月 曜日」を書きます。
+
+- 書ける形は `*`、`,` の並び、`-` の範囲、`/` の間隔です。曜日は0〜7(0と7が日曜)。
+- `@hourly`・`@daily`・`@weekly`・`@monthly` も使えます。
+- 日と曜日の両方を指定すると、どちらかに合えば動きます(ふつうの cron と同じ)。
+- `timezone` は IANA の名前(`Asia/Tokyo` など)です。
+
+例: 毎朝4時は `0 4 * * *`、10分おきは `*/10 * * * *`。`SCHEDULE` はほかのきっかけと一緒に使えます(チャンネルの作成・変更と、毎日4時の作り直しなど)。
+
+## まとめて実行(debounce と batch)
+
+`debounce_seconds` を付けると、最後のイベントからその秒数だけ待ち、その間に来たイベントをまとめて1回で動かします。並べ替えで `CHANNEL_UPDATE` が何件も届くときなどに使います。
+
+- コードはその間のイベントを `batch`(古い順の `[{ eventName, event }]`、50件まで)で読みます。`event` は最後のものです。
+- イベントが続いても、最初のイベントから `debounce_seconds` の5倍たてば動きます。
+- `batch` はいつもあります。まとめないルールでは1件です。
+
+## 実行の順番(serial_by)
+
+同じルールの実行は既定で並行に動きます。次のルールは自動で1回ずつ順番に動きます。
+
+- `debounce_seconds` があるルール
+- state を書くルール(JavaScript で `setState` を呼ぶもの。Wasm は書くかどうか分からないので、いつも順番)
+
+前の実行の結果を前提にするときは `serial_by` を付けます。
+
+| `serial_by` | 順番にする単位 |
+|---|---|
+| `"rule"` | このルールの実行すべて |
+| イベントの項目のパス(`user_id`、`member.user.id` など) | その値が同じ実行どうし。値がなければルール全体 |
+
+例: ボイスチャンネルに入ったら部屋を作り、出たら消すルールは、同じ人の入室と退室が入れ替わらないように `serial_by: "user_id"` にします。部屋の番号や掃除がほかの人の実行とぶつかるなら `"rule"` にします。
+
+## 回数の上限と自動停止
+
+| 項目 | 既定 | 上限 |
+|---|---|---|
+| `per_minute`(1分の実行回数) | 10 | 60 |
+| `max_consecutive_failures`(続けて失敗したら止める回数) | 3 | 20 |
+
+1分の回数を超えたイベントは捨てずに取っておき、枠が空いたときにまとめて1回で動かします(`batch` に入ります)。実行履歴には「回数制限」として1分に1行だけ残ります。コマンドでは、超えると実行した人に「少し待ってから」と返します。
+
+続けて失敗すると、ルールは自分で止まり、作成者にDMで知らせます。直したら `/settings` の「ルール」から有効にします。作成者がサーバーを抜けると、その人のルールはすべて止まります。
+
+## 許す操作(allow)
+
+ルールが出せる変更を決める一覧です。コードが出したステップは、どれか1つの項目に合わないと実行されません。コードが何をしても、この一覧を広げることはできません。
+
+各項目は次の形です。値はどれも JSON Schema です。
+
+```json
+{
+  "op": "POST /channels/{channel}/messages",
+  "path": { "channel": { "enum": ["123456789012345678"] } },
+  "body": { "properties": { "content": { "type": "string", "maxLength": 200 } }, "required": ["content"], "additionalProperties": false },
+  "max_steps_per_run": 1
+}
+```
+
+| 項目 | 中身 |
+|---|---|
+| `op` | 操作([書き込み操作の一覧](operations.md)) |
+| `path` | パスパラメータごとの条件。`guild` は書かない |
+| `body` | 本文の条件 |
+| `target` | 対象(チャンネル・ロール・メンバーなど)の、実行直前の状態の条件。例: 名前が📞で始まるチャンネルだけ消す `{ "properties": { "name": { "pattern": "^📞" } }, "required": ["name"] }` |
+| `channel` | ステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の、実行直前の状態の条件。例: あるカテゴリの中だけに投稿させる `{ "properties": { "parent_id": { "const": "<カテゴリID>" } }, "required": ["parent_id"] }` |
+| `max_steps_per_run` | この項目に合うステップを1回に何件まで出せるか(1〜100)。ないときは1回の上限の100件 |
+
+できるだけ狭くします。チャンネルやロールが決まっていれば `enum` で固定し、本文は使うフィールドだけを書いて `additionalProperties: false` にします。投稿に画像を付けるルールは、`body` に `files: { "type": "array", "maxItems": 4 }` を足します。
+
+`target` と `channel` は実行の直前に REST で状態を読んで確かめます。`target` を付けられる操作と `channel` を付けられる操作は決まっていて、付けられない操作に付けると案が通りません。一覧全体は JSON で6000文字までです。
+
+### 同じ回に作ったもの(madeInRun)
+
+ルールのコードが同じ回の前のステップで作ったもの(作った部屋へ人を移すときの `channel_id` など)は、IDが前もって分かりません。このフィールドは `{ "madeInRun": true }` にします。コードの中で `$ref` を使って前のステップを指したときだけ通ります。
+
+```json
+{ "op": "PATCH /guilds/{guild}/members/{user}",
+  "body": { "properties": { "channel_id": { "madeInRun": true } }, "required": ["channel_id"], "additionalProperties": false } }
+```
+
+### 権限
+
+ルールは作成者の権限で動きます。登録のとき、作成者が allow の最悪の場合に要る権限をすべて持っているかを確かめます(チャンネルを `enum` で固定した項目は、そのチャンネルでの権限で確かめます)。実行のたびに、実際の値で権限とロールの上下をもう一度確かめます。作成者が権限を失えば、そのステップは拒否されます。
+
+## params と $ref
+
+`params` はコードが `params` として読む値です。ルールと一緒に作るもの(チャンネルなど)のIDは、変更案のステップの結果を `{ "$ref": "steps.<id>.result.id" }` で書きます。登録のときに実際のIDになります。`allow` の中でも同じように書けます。
+
+```json
+{
+  "steps": [{ "id": "s1", "op": "POST /guilds/{guild}/channels", "body": { "name": "ログ" } }],
+  "rules": [{
+    "name": "入室のログ",
+    "trigger_event": "GUILD_MEMBER_ADD",
+    "params": { "log": { "$ref": "steps.s1.result.id" } },
+    "allow": [{ "op": "POST /channels/{channel}/messages", "path": { "channel": { "enum": [{ "$ref": "steps.s1.result.id" }] } }, "max_steps_per_run": 1 }],
+    "code": "return plan([call(\"POST /channels/{channel}/messages\", { path: { channel: params.log }, body: { content: `<@${event.user.id}> が参加しました` } })]);"
+  }]
+}
+```
+
+`madeInRun` は「実行のたびに、その回に作るもの」、変更案の `$ref` は「登録のときに一度だけ決まるもの」です。別物なので混ぜません。
+
+## state
+
+ルールごとに、次の実行へ値を持ち越せます。
+
+- コードは前回の値を `state`(最初は `null`)で読み、`setState(値)` で次の値を決めます。Wasm は出力の `state` に書きます([Wasm](wasm.md#出力))。
+- 保存するのは、実行が通ったとき(変更なし・実行済み)だけです。失敗した回は前の値のままなので、同じ状態からやり直せます。
+- 書かなければ変わりません。JSON で16,000文字までです。
+- `/settings` の「ルール」で中身を見たり消したりできます。
+
+使い道: 前回作った一覧を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。
+
+## コマンド
+
+`trigger_event` を `COMMAND` だけにして `command` を付けると、ルールがそのサーバーのスラッシュコマンドになります。`COMMAND` はほかのきっかけと一緒にできず、`debounce_seconds` も付けられません。
+
+```json
+{
+  "name": "hello",
+  "description": "あいさつを返す",
+  "options": [{ "name": "who", "description": "相手", "type": "user", "required": true }],
+  "permissions": ["ManageChannels"],
+  "visibility": "public"
+}
+```
+
+| 項目 | 中身 |
+|---|---|
+| `name` | 小文字・数字・`-`・`_` の32文字まで。`settings` と、同じサーバーのほかのルールのコマンド名は使えない |
+| `description` | 1〜100文字 |
+| `options` | 10個まで。`type` は `string`・`integer`・`number`・`boolean`・`user`・`channel`・`role`。必須のものを先に並べる。`choices`(1〜25個の `{ name, value }`)は `string`・`integer`・`number` だけ |
+| `permissions` | 実行する人に要る Discord の権限名(`ManageChannels` など)。持っていない人にはコマンドが表示されず、実行のときにも確かめる |
+| `visibility` | 返事を見せる相手。`auto`(既定)は返事ごとに作成者の判定モデルが決め、迷えば本人だけ。`private` は本人だけ、`public` はチャンネルの全員 |
+
+実行されると、コードは `event.options`(名前から値。`user`・`channel`・`role` はID、省いたオプションは入らない)と、実行した人の `event.user`・`event.member` を読みます。`reply("文")` で返事をします(合わせて1900文字まで)。画像を作れば返事に付きます。
+
+- 変更は作成者の権限で、allow の範囲だけ実行します。実行した人の権限で絞りたいときは `permissions` を付けます。
+- 読み取りは、そのチャンネルを見られる全員が読めるものに限ります。返事がそのチャンネルに出るためです。
+- 作成者がそのチャンネルを見られないときは動きません。
+- 変更をせず返事だけのコマンドは `allow` を空にできます。
+- 確認ダイアログで返事を見せる相手を3つから選べます。指定がなければ、判定モデルがドライランの返事から既定値を選びます。あとから `/settings` の「コマンド」でも変えられます。
+
+コマンドは、ルールが変わるたびにサーバーへ登録し直します。1つのサーバーで50個までです。
+
+## 読み取りの範囲
+
+イベントと時刻のルールのコードが読めるのは、作成者とBotの両方が読めるものです。コマンドのルールは、そのチャンネルを見られる全員(と作成者)が読めるものです。読めるルートは [JavaScript の API](js-api.md#読めるルート) にあります。
+
+## ドライラン
+
+案を出すときと、管理画面の「ドライラン」で、ルールのコードを1回動かします。何も変更せず、state も保存しません。使うイベントは次の順に選びます。
+
+| きっかけ | 試すイベント |
+|---|---|
+| `COMMAND` | 依頼者がこのチャンネルで実行したとき(オプションは `sample_event.options`、なければ選択肢の最初か仮の値) |
+| `SCHEDULE`・`BOT_READY` | いま発火したとしたときのイベント |
+| `MESSAGE_CREATE`・`MESSAGE_UPDATE` | このチャンネルの直近の(人の)メッセージ |
+| `GUILD_MEMBER_ADD`・`GUILD_MEMBER_UPDATE` | 依頼者のメンバー情報 |
+| そのほか | `sample_event` |
+
+試せるイベントがなく `sample_event` もないときは、案が通りません(Botが例のイベントを付けて出し直します)。ドライランは、出したステップが allow と権限に合うかも確かめます。合わなければ案は通りません。ルールと一緒に作るものの値(`$ref`)を使うルールは、登録まで試せないので、コードがエラーにならないことだけを確かめます。
+
+## 実行の結果
+
+実行履歴の結果は次のどれかです。
+
+| 結果 | 意味 |
+|---|---|
+| `no_change` | 変更なし(コードが何も返さなかった、または空の `plan([])`) |
+| `executed` | 実行した |
+| `rejected` | allow・権限・形の検査で拒否した |
+| `failed` | コードのエラー、時間切れ、実行の失敗など |
+| `rate_limited` | 回数制限で後回しにした |
+
+会話でBotに「ルールが動かない」と聞くと、Botが `list_rules`・`rule_runs` で中身と履歴を読んで調べます。
+
+## 管理画面
+
+`/settings` の「ルール」で開きます。ルールを選ぶと概要が出て、「詳しく見る」から許す操作・コード・実行履歴に移れます。
+
+| できること | だれが |
+|---|---|
+| 自分のルールを見る・有効にする・止める・削除する・ドライラン・state を消す | 作成者 |
+| ほかの人のルールと、サーバー全体の監査ログを見る | 監査ログ表示(View Audit Log)の権限を持つ人 |
+| ほかの人のルールを止める | サーバー管理(Manage Server)と、そのルールの allow に要る権限をすべて持つ人 |
+| 全ルールの緊急停止・再開 | サーバー管理の権限を持つ人。すぐに効く |
+
+一覧の下に「変更の履歴」(Planの履歴)と「監査ログ」もあります。削除しても実行履歴と監査ログは残ります。
