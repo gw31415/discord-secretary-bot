@@ -2,6 +2,7 @@
 # Go with TinyGo (-target=wasip1). Runs in the box: sources in /work/src, writes /work/out/module.wasm.
 set -eu
 cd /work/src
+mkdir -p /work/out
 cp /lang/template/go.mod go.mod
 mkdir -p secretary
 [ -e secretary/secretary.go ] || cp /lang/sdk/secretary.go secretary/secretary.go

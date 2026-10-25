@@ -3,6 +3,7 @@
 # main.zig is the root; the SDK is the module "secretary".
 set -eu
 cd /work/src
+mkdir -p /work/out
 . /lang/env.sh
 mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
 cp -a /toolchain/prewarm/cache/. "$ZIG_GLOBAL_CACHE_DIR/"

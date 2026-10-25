@@ -14,7 +14,7 @@
 
 wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソースを渡すだけで済みます。会話で「C で書いて /hello にして」のように頼むと、Botが `wasm_language_guide` で書き方を読み、`compile_wasm` でコンパイルします。エラーは行番号つきで返るので、Botが直して出し直します。できたモジュールは `run_wasm` で試したり、そのままルールに使ったりでき(30分以内)、登録するとソースも一緒に残ります。確認画面と `/settings` の「Wasm」では、sha256 の代わりにこのソースが見られます。
 
-使える言語は C/C++(wasi-sdk、cJSON 同梱)・Rust(serde・serde_json)・Go(標準ライブラリ)・MoonBit(core)です。渡せるのはソースだけで、Cargo.toml・go.mod・moon.pkg・build.rs などのビルド設定や依存の追加はできません。コンパイルは1人1件ずつ、1時間に30回までです。
+使える言語は C/C++(wasi-sdk、cJSON 同梱)・Rust(serde・serde_json)・Go(TinyGo、標準ライブラリ)・MoonBit(core)・Zig(標準ライブラリ)・Nim(標準ライブラリ、C 経由で clang)です。渡せるのはソースだけで、Cargo.toml・go.mod・moon.pkg・build.zig・nim.cfg・build.rs などのビルド設定や依存の追加はできません。コンパイルは1人1件ずつ、1時間に30回までです。
 
 コンパイラは Bot とは別のサービス(別ユーザー・Unix ソケット)で、1回のビルドごとに使い捨ての箱(bubblewrap)で動きます。箱にはネットワークがなく(ループバックだけ)、ホストのファイルもほかのプロセスも見えません。入れ方と隔離の中身は [compiler/README.md](../compiler/README.md) にあります。
 

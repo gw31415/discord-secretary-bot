@@ -4,6 +4,7 @@
 # only .nim files come from the request, so no nim.cfg or config.nims can change them.
 set -eu
 cd /work/src
+mkdir -p /work/out
 case "${OPTIMIZE:-size}" in speed) OPT=speed ;; *) OPT=size ;; esac
 CC=/toolchain/wasi-sdk/bin/clang
 status=0
