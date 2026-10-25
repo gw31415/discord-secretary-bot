@@ -69,8 +69,8 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setWebTool("u1", "tavily");
   store.setModel("u1", "code", { provider: "anthropic", model: selectableModels("anthropic", "code")[0]!.id });
   const models = renderPanel(store, "u1", undefined, "models");
-  const advanced = renderPanel(store, "u1", undefined, "advanced");
-  assert.match(JSON.stringify(advanced), /Tavilyのキーがない/);
+  const roles = renderPanel(store, "u1", undefined, "roles");
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "home")), /Tavilyのキーがない/);
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
   const walk = (node: unknown): void => {
@@ -82,7 +82,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
     if (c.type === 1 && Array.isArray(c.components)) assert.ok(c.components.length <= 5, "action row over five components");
     walk(c.components);
   };
-  for (const panel of [models, advanced]) {
+  for (const panel of [models, roles]) {
     components = 0;
     const before = selects.length;
     walk(panel.components);
@@ -219,16 +219,17 @@ test("the settings panel moves between its pages with buttons, each well within 
   const home = JSON.stringify(renderPanel(store, "u1"));
   assert.match(home, /llm:page:keys/);
   assert.match(home, /llm:page:models/);
-  assert.match(home, /判定モデル\*\*: 言語モデルを使う/);
+  assert.match(home, /判定モデル\*\*: 言語モデルと同じ/);
   assert.match(home, /llm:read:scope/);
-  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "advanced")), /llm:web:tool/);
-  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "advanced")), /llm:model:addressee:/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "home")), /llm:web:tool/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "roles")), /llm:model:addressee:/);
+  assert.deepEqual(parseCustomId("llm:page:advanced"), { kind: "page", page: "roles" }, "panels opened before the move");
   assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1", undefined, "models")), /llm:model:(addressee|code|reaction):/);
   assert.doesNotMatch(home, /llm:model:/);
   const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
   assert.match(keys, /llm:key:set/);
   assert.match(keys, /llm:page:home/);
-  for (const page of ["home", "keys", "models", "advanced"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
+  for (const page of ["home", "keys", "models", "roles"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
   // The rules are a section of the panel, and their panel leads back here.
   assert.match(home, /rule:home:/);
   assert.equal(SETTINGS_HOME_ID, CUSTOM_ID.page("home"));

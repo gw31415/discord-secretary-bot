@@ -4,15 +4,15 @@ import type { KeyProviderId, ProviderId } from "../llm/models.ts";
 
 // Web access for the agent. Each person picks the service in /settings; the keys are theirs.
 // Claude's and OpenAI's own tools run on the provider's servers, so they come only with a
-// response model of that provider: they are what "応答モデルの標準" means, not choices of
+// response model of that provider: they are what "言語モデルの標準" means, not choices of
 // their own. The others are ordinary tools the bot calls, so they work with any model:
 // GLM Coding Plan's Web Search / Web Reader MCP servers, and Tavily's search and extract API.
 
 export const WEB_TOOLS = {
-  auto: { label: "応答モデルの標準", description: "Claude・OpenAI・GLMなら、それぞれの検索を使います" },
-  zai: { label: "GLM Coding Plan", description: "GLMのWeb Search / Web Reader。GLM Coding Planのキーが要ります" },
-  tavily: { label: "Tavily", description: "どのモデルでも使えます。Tavilyのキーが要ります(月1,000回まで無料)" },
-  off: { label: "使わない", description: "BotはWebを調べません" },
+  auto: { label: "言語モデルの標準", description: "言語モデルがClaude・OpenAI・GLMなら、その検索を使います" },
+  zai: { label: "GLM Coding Plan", description: "GLM Coding Planのキーが要ります" },
+  tavily: { label: "Tavily", description: "Tavilyのキーが要ります。月1,000回まで無料です" },
+  off: { label: "使わない", description: "" },
 } as const;
 
 export type WebTool = keyof typeof WEB_TOOLS;
@@ -50,10 +50,11 @@ export function resolveWebAccess(choice: WebTool, model: ProviderId, keyOf: (p: 
 /** Why the chosen web tool will not work with these settings, or null if it will. */
 export function webToolWarning(choice: WebTool, model: ProviderId | undefined, keys: ReadonlySet<KeyProviderId>): string | null {
   if (choice === "off" || !model) return null;
-  if (choice === "auto" && !hasOwnWebTools(model)) return "応答モデルの標準のWebツールがないため、Webは使われません。Tavilyを選ぶと使えます。";
-  if (choice === "auto" && model === "zai" && !keys.has("zai")) return "GLM Coding Planのキーがないため、Webは使われません。";
-  if (choice === "zai" && !keys.has("zai")) return "GLM Coding Planのキーがないため、Webは使われません。";
-  if (choice === "tavily" && !keys.has("tavily")) return "Tavilyのキーがないため、Webは使われません。";
+  if (choice === "auto" && !hasOwnWebTools(model)) return "この言語モデルには標準のWebツールがないので、Webを使いません。Tavilyなら使えます。";
+  if ((choice === "auto" && model === "zai") || choice === "zai") {
+    if (!keys.has("zai")) return "GLM Coding Planのキーがないので、Webを使いません。";
+  }
+  if (choice === "tavily" && !keys.has("tavily")) return "Tavilyのキーがないので、Webを使いません。";
   return null;
 }
 

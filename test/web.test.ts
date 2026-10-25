@@ -15,7 +15,7 @@ test("the web choice resolves against the response model and the person's keys",
   assert.equal(resolveWebAccess("tavily", "anthropic", keys({})), null);
   assert.deepEqual(resolveWebAccess("zai", "anthropic", keys({ zai: "z" })), { kind: "zai", apiKey: "z" }, "GLM's tools work with Claude too");
   assert.equal(resolveWebAccess("off", "anthropic", keys({ tavily: "t" })), null);
-  assert.equal(webToolWarning("tavily", "anthropic", new Set()), "Tavilyのキーがないため、Webは使われません。");
+  assert.equal(webToolWarning("tavily", "anthropic", new Set()), "Tavilyのキーがないので、Webを使いません。");
   assert.equal(webToolWarning("tavily", "anthropic", new Set(["tavily"])), null);
   assert.equal(webToolWarning("auto", "openai", new Set()), null);
   assert.match(webToolWarning("auto", "openrouter", new Set()) ?? "", /標準のWebツールがない/);

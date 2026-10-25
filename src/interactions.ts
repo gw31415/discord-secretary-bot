@@ -19,7 +19,7 @@ function panelUpdate(store: Store, userId: string, notice: string | undefined, p
 
 /** The language and judge models are the basics; the rest override them for one use. */
 function pageOf(role: ModelRole): PanelPage {
-  return role === "response" || role === "judge" ? "models" : "advanced";
+  return role === "response" || role === "judge" ? "models" : "roles";
 }
 
 // LLM settings belong to the person, not the server, so the panel is the same in every server.
@@ -70,7 +70,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
       case "clearModel": {
         store.setModel(userId, action.role, null);
         store.audit(actor, "llm.model.set", { role: action.role, provider: null, model: null });
-        const notice = { judge: "判定は言語モデルがするようにしました", addressee: "宛先の判定は判定モデルがするようにしました", code: "コードは言語モデルが書くようにしました", reaction: "リアクションは判定モデルが選ぶようにしました" }[action.role];
+        const notice = { judge: "判定には言語モデルを使います", addressee: "宛先の判定には判定モデルを使います", code: "コードは言語モデルが書きます", reaction: "リアクションは判定モデルが選びます" }[action.role];
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, pageOf(action.role)));
         return;
       }
@@ -83,7 +83,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`, "advanced"),
+          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`, "home"),
         );
         return;
       }
@@ -93,7 +93,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `読み取りを広げる許可を「${readScopeLabel(action.scope)}」にしました`, "home"),
+          panelUpdate(store, userId, `読み取りの範囲を「${readScopeLabel(action.scope)}」にしました`, "home"),
         );
         return;
       }
