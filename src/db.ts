@@ -245,6 +245,16 @@ export interface WasmModule {
   size: number;
   info: ModuleInfo;
   createdAt: string;
+  /** Set when the bot built it from source (the files themselves: wasmSource). */
+  source?: { language: string; files: number };
+}
+
+/** The sources a module was compiled from, kept with it. */
+export interface WasmSource {
+  language: string;
+  /** The language build that compiled it. */
+  version: string;
+  files: Array<{ path: string; content: string }>;
 }
 
 interface WasmModuleRow {
@@ -254,10 +264,22 @@ interface WasmModuleRow {
   size: number;
   info_json: string;
   created_at: string;
+  source_language: string | null;
+  source_files: number | null;
 }
 
+const WASM_COLUMNS = "owner_id, sha256, name, size, info_json, created_at, json_extract(source_json, '$.language') AS source_language, json_array_length(source_json, '$.files') AS source_files";
+
 function toWasmModule(row: WasmModuleRow): WasmModule {
-  return { ownerId: row.owner_id, sha256: row.sha256, name: row.name, size: row.size, info: JSON.parse(row.info_json) as ModuleInfo, createdAt: row.created_at };
+  return {
+    ownerId: row.owner_id,
+    sha256: row.sha256,
+    name: row.name,
+    size: row.size,
+    info: JSON.parse(row.info_json) as ModuleInfo,
+    createdAt: row.created_at,
+    ...(row.source_language ? { source: { language: row.source_language, files: row.source_files ?? 0 } } : {}),
+  };
 }
 
 interface RuleDbRow {
@@ -307,6 +329,7 @@ export class Store {
     this.#ensureColumn("user_settings", "read_scope", "TEXT");
     this.#ensureColumn("user_settings", "addressee_provider", "TEXT");
     this.#ensureColumn("user_settings", "addressee_model", "TEXT");
+    this.#ensureColumn("wasm_modules", "source_json", "TEXT");
     // Claude's web tools are no longer a choice of their own: they are the standard for a Claude model.
     this.db.exec("UPDATE user_settings SET web_tool = 'auto' WHERE web_tool = 'anthropic'");
   }
@@ -696,32 +719,32 @@ export class Store {
 
   // --- Wasm modules ---------------------------------------------------------
 
-  /** Keeps an uploaded module; the same bytes from the same person just take the new name. */
-  saveWasmModule(ownerId: string, name: string, data: Buffer, info: ModuleInfo): WasmModule {
+  /** Keeps an uploaded module; the same bytes from the same person just take the new name (and the sources, when given). */
+  saveWasmModule(ownerId: string, name: string, data: Buffer, info: ModuleInfo, source?: WasmSource): WasmModule {
     const now = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO wasm_modules (owner_id, sha256, name, data, size, info_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (owner_id, sha256) DO UPDATE SET name = excluded.name, created_at = excluded.created_at`,
+        `INSERT INTO wasm_modules (owner_id, sha256, name, data, size, info_json, created_at, source_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (owner_id, sha256) DO UPDATE SET name = excluded.name, created_at = excluded.created_at, source_json = coalesce(excluded.source_json, source_json)`,
       )
-      .run(ownerId, info.sha256, name, data, data.length, JSON.stringify(info), now);
+      .run(ownerId, info.sha256, name, data, data.length, JSON.stringify(info), now, source ? JSON.stringify(source) : null);
     return this.getWasmModule(ownerId, info.sha256)!;
   }
 
   /** One person's modules, newest first, without their bytes. */
   listWasmModules(ownerId: string): WasmModule[] {
-    const rows = this.db.prepare("SELECT owner_id, sha256, name, size, info_json, created_at FROM wasm_modules WHERE owner_id = ? ORDER BY created_at DESC").all(ownerId) as WasmModuleRow[];
+    const rows = this.db.prepare(`SELECT ${WASM_COLUMNS} FROM wasm_modules WHERE owner_id = ? ORDER BY created_at DESC`).all(ownerId) as WasmModuleRow[];
     return rows.map(toWasmModule);
   }
 
   getWasmModule(ownerId: string, sha256: string): WasmModule | undefined {
-    const row = this.db.prepare("SELECT owner_id, sha256, name, size, info_json, created_at FROM wasm_modules WHERE owner_id = ? AND sha256 = ?").get(ownerId, sha256) as WasmModuleRow | undefined;
+    const row = this.db.prepare(`SELECT ${WASM_COLUMNS} FROM wasm_modules WHERE owner_id = ? AND sha256 = ?`).get(ownerId, sha256) as WasmModuleRow | undefined;
     return row && toWasmModule(row);
   }
 
   /** Everyone who uploaded these bytes, oldest first. */
   wasmUploaders(sha256: string): WasmModule[] {
-    const rows = this.db.prepare("SELECT owner_id, sha256, name, size, info_json, created_at FROM wasm_modules WHERE sha256 = ? ORDER BY created_at").all(sha256) as WasmModuleRow[];
+    const rows = this.db.prepare(`SELECT ${WASM_COLUMNS} FROM wasm_modules WHERE sha256 = ? ORDER BY created_at`).all(sha256) as WasmModuleRow[];
     return rows.map(toWasmModule);
   }
 
@@ -729,6 +752,12 @@ export class Store {
   wasmShasWithPrefix(prefix: string): string[] {
     const rows = this.db.prepare("SELECT DISTINCT sha256 FROM wasm_modules WHERE substr(sha256, 1, ?) = ? LIMIT 5").all(prefix.length, prefix) as Array<{ sha256: string }>;
     return rows.map((r) => r.sha256);
+  }
+
+  /** The sources a build was compiled from, from whoever kept them. */
+  wasmSource(sha256: string): WasmSource | undefined {
+    const row = this.db.prepare("SELECT source_json FROM wasm_modules WHERE sha256 = ? AND source_json IS NOT NULL LIMIT 1").get(sha256) as { source_json: string } | undefined;
+    return row ? (JSON.parse(row.source_json) as WasmSource) : undefined;
   }
 
   /** The bytes, whoever uploaded them. */

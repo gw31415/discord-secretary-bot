@@ -111,7 +111,7 @@ test("the box shares no namespace and mounts nothing of the host but what it is 
   const spec: BoxSpec = { rootfs: "/opt/r/base", toolchain: "/opt/t/rust", language: "/app/languages/rust", work: "/jobs/job-1", env: { OPTIMIZE: "size" }, command: ["/bin/sh", "/lang/build.sh"] };
   const args = boxArgs(spec, { bwrap: "/usr/bin/bwrap", prlimit: "/usr/bin/prlimit", seccompPath: "/x/seccomp.bpf", tmpBytes: 1024, maxFileBytes: 2048 });
   assert.deepEqual(args.slice(0, 5), ["/usr/bin/prlimit", "--fsize=2048", "--nofile=1024", "--core=0", "--"]);
-  for (const flag of ["--unshare-all", "--disable-userns", "--die-with-parent", "--new-session", "--clearenv"]) assert.ok(args.includes(flag), flag);
+  for (const flag of ["--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--clearenv"]) assert.ok(args.includes(flag), flag);
   assert.ok(!args.includes("--share-net"));
   const mounts: string[][] = [];
   args.forEach((a, i) => {

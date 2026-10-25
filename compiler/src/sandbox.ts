@@ -42,6 +42,8 @@ export function boxArgs(spec: BoxSpec, options: SandboxOptions): string[] {
     ...(options.prlimit ? [options.prlimit, `--fsize=${options.maxFileBytes}`, "--nofile=1024", "--core=0", "--"] : []),
     options.bwrap,
     "--unshare-all",
+    // Explicit, so a setup run as root gets its own user namespace too (--unshare-all only tries).
+    "--unshare-user",
     "--disable-userns",
     "--die-with-parent",
     "--new-session",
