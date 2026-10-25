@@ -116,7 +116,7 @@ export type Decision =
   | { kind: "ignore" }
   | { kind: "notify-unregistered" }
   | { kind: "reply"; wake: boolean }
-  | { kind: "judge"; judgeUserId: string };
+  | { kind: "judge" };
 
 /** The DM to someone who has not set up; with the command's id, /settings is a link that opens it. */
 export function setupNotice(settingsCommandId?: string): string {
@@ -197,7 +197,8 @@ export class Conversations {
       return { kind: "notify-unregistered" };
     }
     if (direct) return { kind: "reply", wake: !awake };
-    return { kind: "judge", judgeUserId: conv!.startedBy };
+    // Judged with the speaker's own key and model, so nobody pays for others' messages.
+    return { kind: "judge" };
   }
 
   handle(message: GuildMessage): Promise<void> {
@@ -228,7 +229,7 @@ export class Conversations {
       }
       case "judge": {
         const context = await this.#context(message);
-        if (!(await this.#addressed(decision.judgeUserId, context.transcript, message))) return;
+        if (!(await this.#addressed(context.transcript, message))) return;
         return this.#reply(message, context, false);
       }
       case "reply":
@@ -251,13 +252,14 @@ export class Conversations {
     return { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
   }
 
-  async #addressed(judgeUserId: string, transcript: string[], message: GuildMessage): Promise<boolean> {
+  async #addressed(transcript: string[], message: GuildMessage): Promise<boolean> {
     const { store } = this.deps;
-    const settings = store.getSettings(judgeUserId);
+    const speaker = message.author.id;
+    const settings = store.getSettings(speaker);
     const ref = settings.addressee ?? judgeRef(settings);
     const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(judgeUserId, ref.provider);
-    if (!model || !apiKey) return false; // The waker's setup broke; stay quiet rather than guess.
+    const apiKey = ref && store.getApiKey(speaker, ref.provider);
+    if (!model || !apiKey) return false; // The speaker's setup broke; stay quiet rather than guess.
     const verdict = await this.deps.judge({
       model,
       apiKey,
