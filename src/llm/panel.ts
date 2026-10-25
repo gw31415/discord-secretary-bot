@@ -220,14 +220,13 @@ function keysPage(store: Store, userId: string): APIComponentInContainer[] {
 
 function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## モデル\nBotがあなたの代わりに使うモデルです。用途ごとに変えたいときは「用途別のモデル」で選びます。" },
+    { type: ComponentType.TextDisplay, content: "## モデル\nBotがあなたのキーで使うモデルです。用途ごとに変えたいときは「用途別のモデル」で選びます。" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
     body.push({ type: ComponentType.TextDisplay, content: NO_KEY });
     return body;
   }
-  const settings = store.getSettings(userId);
   const response = roleSelects(store, userId, "response", "言語モデル");
   body.push(
     { type: ComponentType.TextDisplay, content: "**言語モデル**\n返事を書く、調べものをする、変更案やコードを作るときに使います。" },
@@ -236,7 +235,7 @@ function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
       : [{ type: ComponentType.TextDisplay, content: "-# 言語モデルに使えるモデルがありません。Claude API、GLM Coding Plan、OpenAI、OpenRouterのどれかのキーを登録してください。" } satisfies APIComponentInContainer]),
     {
       type: ComponentType.TextDisplay,
-      content: `**判定モデル**\n発言がBot宛てかどうか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めるときに使います。コードやルールの judge()・rank() もこのモデルが答えます。${settings.judge ? "" : "選ばなければ言語モデルが判定します。"}軽いモデルか、判定専用のJevやGPT-6 Lunaが向いています。`,
+      content: "**判定モデル**\n発言がBot宛てかどうか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めるときに使います。コードやルールの judge()・rank() もこのモデルが答えます。軽いモデルか、判定専用のJevやGPT-6 Lunaが向いています。",
     },
     ...roleSelects(store, userId, "judge", "判定モデル", "言語モデルと同じ"),
     ...typedModelSelect(store, userId, ["response", "judge"]),
