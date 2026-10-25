@@ -18,8 +18,8 @@ curl -fsSL -o "$TMP/moonbit.tar.gz" "$BASE/binaries/latest/moonbit-linux-$ARCH.t
 curl -fsSL -o "$TMP/core.tar.gz" "$BASE/cores/core-latest.tar.gz"
 echo "$SUM  $TMP/moonbit.tar.gz" | sha256sum -c -
 echo "$CORE_SUM  $TMP/core.tar.gz" | sha256sum -c -
-tar xzf "$TMP/moonbit.tar.gz" -C "$DEST"
-tar xzf "$TMP/core.tar.gz" -C "$DEST/lib"
+tar --no-same-owner -xzf "$TMP/moonbit.tar.gz" -C "$DEST"
+tar --no-same-owner -xzf "$TMP/core.tar.gz" -C "$DEST/lib"
 # The archive's files come without the execute bit (the upstream installer adds it).
 chmod -R a+rX "$DEST"
 chmod a+x "$DEST"/bin/* "$DEST"/bin/internal/*
