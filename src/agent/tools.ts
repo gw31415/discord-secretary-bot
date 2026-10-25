@@ -800,6 +800,20 @@ async function attachedSources(reader: Reader, ref: { message_id: string; channe
   );
 }
 
+/**
+ * The secretary.call ABI and its host functions, from docs/wasm.md, for every
+ * language guide: the SDKs wrap them, but code without the SDK needs them.
+ */
+async function hostCallGuide(): Promise<string> {
+  try {
+    const docs = await loadDocs();
+    const sections = ["secretary.call", "ホスト関数"].map((s) => readDoc(docs, "wasm", s).replace(/^###/gm, "##"));
+    return ["# secretary.call の受け渡し(全言語共通)", "SDK の Call・Get などはこれを包んでいます。SDK を使わずに呼ぶときや、ホスト関数の引数を確かめるときに読みます。入出力の JSON など残りは read_docs の wasm にあります。", ...sections].join("\n\n");
+  } catch {
+    return "secretary.call の受け渡しは read_docs の wasm(見出し「secretary.call」「ホスト関数」)にあります。";
+  }
+}
+
 /** Building Wasm modules from source with the compiler service. */
 function compileTools(reader: Reader, compiler: NonNullable<WasmTools["compiler"]>, fetchFn: typeof fetch): AgentTool<any>[] {
   const languages = compiler.languages();
@@ -811,7 +825,7 @@ function compileTools(reader: Reader, compiler: NonNullable<WasmTools["compiler"
       label: "Wasmの書き方を見る",
       description: `compile_wasm でソースを書く前に、その言語の書き方(SDK・入出力・置けるファイル・例)を読みます。言語: ${summary}`,
       parameters: Type.Object({ language: Type.String() }),
-      execute: async (_id, params) => text(await compiler.guide(params.language)),
+      execute: async (_id, params) => text([await compiler.guide(params.language), await hostCallGuide()].join("\n\n")),
     }),
     tool({
       name: "compile_wasm",

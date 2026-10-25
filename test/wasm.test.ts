@@ -421,7 +421,10 @@ test("the agent compiles, reads the errors, and keeps or runs what it built", as
     },
   });
   const compile = tools.find((t) => t.name === "compile_wasm")!;
-  assert.ok(tools.some((t) => t.name === "wasm_language_guide"));
+  const guide = ((await tools.find((t) => t.name === "wasm_language_guide")!.execute("t", { language: "rust" })).content[0] as { text: string }).text;
+  assert.match(guide, /^# guide\n\n# secretary\.call の受け渡し/);
+  assert.match(guide, /int32_t call\(/);
+  assert.match(guide, /^## ホスト関数$/m);
   assert.match(compile.description, /rust\(Rust/);
 
   const failed = (await compile.execute("t", { language: "rust", files: [{ path: "src/main.rs", content: "fn main() { broken }" }] })).content[0] as { text: string };
