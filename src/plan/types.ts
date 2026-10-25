@@ -13,7 +13,7 @@ export function maxRisk(risks: Risk[]): Risk {
   return risks.reduce<Risk>((a, b) => (RISK_ORDER.indexOf(b) > RISK_ORDER.indexOf(a) ? b : a), "read");
 }
 
-/** Who a write is for. A rule acts with its owner's permissions, never its own. */
+/** Who a write is for. A rule acts with its owner's permissions (a command with its runner's), never its own. */
 export type Actor = { kind: "user"; userId: string; via: "conversation" | "panel" | "rule" };
 
 /** A value taken from an earlier step's response, e.g. "steps.s1.result.id". */

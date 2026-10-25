@@ -55,10 +55,10 @@ export interface RuleServiceDeps {
   /** Explains rule code from the code alone, paid for by the owner. */
   /** `language` is set for sources compiled to Wasm; JavaScript otherwise. */
   summarize?: (code: string, ownerId: string, trigger: string, language?: string) => Promise<string | null>;
-  /** How likely a command's reply is meant for everyone (0 to 1), by the owner's judge model; null without one. */
+  /** How likely a command's reply is meant for everyone (0 to 1), by that person's judge model (the owner's at approval, the runner's when run); null without one. */
   /** Uploaded Wasm modules a rule may run instead of code. */
   wasm?: Pick<WasmRegistry, "resolve" | "source">;
-  visibilityScore?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<number | null>;
+  visibilityScore?: (input: { userId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<number | null>;
 }
 
 /** `wasm` is the module's sha256 here, already resolved. */
@@ -295,7 +295,7 @@ export class RuleService {
     let visibility: CommandVisibility = "private";
     try {
       const score = await this.deps.visibilityScore?.({
-        ownerId,
+        userId: ownerId,
         command,
         options: ((r.sampleEvent as { options?: Record<string, unknown> } | undefined)?.options ?? {}),
         reply: dry.reply ?? "",
@@ -392,7 +392,7 @@ export class RuleService {
     const event = commandEvent(interaction);
     let report: CommandReport;
     try {
-      report = await this.deps.engine.runCommand(rule, event);
+      report = await this.deps.engine.runCommand(rule, event, member.user.id);
     } catch (e) {
       this.deps.log(`コマンド /${name} の実行に失敗`, e);
       report = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, images: [], steps: 0 };
@@ -400,7 +400,7 @@ export class RuleService {
     const content = commandReplyText(rule.name, report);
     const files = commandFailed(report) ? [] : await toUploadable(report.images.map((i) => ({ name: i.name, data: i.data })));
     const body = { content, allowed_mentions: { parse: [] }, ...(files.length ? { files } : {}) };
-    if (visibility === "auto" && (report.reply || files.length) && !commandFailed(report) && (await this.#showToAll(rule, spec, event, report))) {
+    if (visibility === "auto" && (report.reply || files.length) && !commandFailed(report) && (await this.#showToAll(member.user.id, spec, event, report))) {
       await api.interactions.followUp(interaction.application_id, interaction.token, body);
       await api.interactions.deleteReply(interaction.application_id, interaction.token);
     } else {
@@ -409,11 +409,11 @@ export class RuleService {
     return true;
   }
 
-  /** The owner's judge model decides; without one, or on any error, the reply stays private. */
-  async #showToAll(rule: Rule, spec: CommandSpec, event: Record<string, unknown>, report: CommandReport): Promise<boolean> {
+  /** The judge model of whoever ran the command decides; without one, or on any error, the reply stays private. */
+  async #showToAll(userId: string, spec: CommandSpec, event: Record<string, unknown>, report: CommandReport): Promise<boolean> {
     if (!this.deps.visibilityScore) return false;
     try {
-      return showsToAll((await this.deps.visibilityScore({ ownerId: rule.ownerId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", images: report.images.length, steps: report.steps })) ?? 0);
+      return showsToAll((await this.deps.visibilityScore({ userId, command: spec, options: (event.options ?? {}) as Record<string, unknown>, reply: report.reply ?? "", images: report.images.length, steps: report.steps })) ?? 0);
     } catch (e) {
       this.deps.log(`コマンド /${spec.name} の公開判定に失敗`, e);
       return false;

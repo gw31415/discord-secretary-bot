@@ -201,7 +201,7 @@ test("an uploaded module runs a rule as its owner, pinned to its build; others i
   engine.dispatch("MESSAGE_CREATE", GUILD, { id: "700", channel_id: "10", guild_id: GUILD, content: "hi", author: { id: "3" } });
   await engine.idle();
   assert.equal(runs.length, 1, JSON.stringify(store.recentRuleRuns(rule.id, 1)));
-  assert.equal(runs[0].ownerId, "1");
+  assert.equal(runs[0].actorId, "1");
   assert.deepEqual(runs[0].drafts, [step]);
   assert.deepEqual(store.getRuleState(rule.id), { n: 1 });
 

@@ -20,7 +20,7 @@ import { fetchImage, imageRefs } from "../agent/images.ts";
 import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { APIMessage } from "discord-api-types/v10";
 import type { Rule, RunOutcome } from "./types.ts";
-import { runModule } from "../wasm/run.ts";
+import { NO_DECIDE, runModule } from "../wasm/run.ts";
 import type { Program } from "../wasm/run.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 
@@ -32,7 +32,9 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // and anyone with Manage Server can stop every rule in the server at once.
 // SCHEDULE rules fire from tick() once a minute; rules with a debounce wait for
 // a quiet moment and run once on the batch of events. COMMAND rules run when
-// someone uses their slash command, and the outcome goes back to that person.
+// someone uses their slash command, as that person: their read scope, their
+// permissions (within the allow list) and their judge model, and the outcome
+// goes back to them.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
@@ -55,8 +57,8 @@ export interface RuleEngineDeps {
   run?: typeof runModule;
   /** Compiled uploaded modules, for rules that run one instead of JS. */
   wasm?: Pick<WasmRegistry, "compiled">;
-  /** The owner's judge model, for judge() and rank() in rule code. */
-  decide?: (ownerId: string) => Decide | undefined;
+  /** The judge model of whoever the run acts as, for judge() and rank() in rule code. */
+  decide?: (userId: string) => Decide | undefined;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -198,10 +200,10 @@ export class RuleEngine {
     return false;
   }
 
-  /** The owner must be able to view where the event happened. Events with no channel are server-wide. */
-  #visible(rule: Rule, guild: GuildState, event: string, data: Data): boolean {
+  /** The owner (for a command, whoever ran it) must be able to view where the event happened. Events with no channel are server-wide. */
+  #visible(rule: Rule, guild: GuildState, event: string, data: Data, userId = rule.ownerId): boolean {
     const spec = TRIGGERS[event]!;
-    const owner = guild.members.get(rule.ownerId);
+    const owner = guild.members.get(userId);
     if (!owner) return false;
     const channelId = spec.channel?.(data);
     if (!channelId) return true;
@@ -373,14 +375,17 @@ export class RuleEngine {
     while (this.#queues.size > 0) await Promise.all(this.#queues.values());
   }
 
-  async #run(ruleId: string, version: number, eventId: string, batch: BatchItem[], reader?: Pick<Reader, "get">): Promise<CommandReport | null> {
+  /** `actorId` is whose permissions and models the run uses: the owner's, or for a command whoever ran it. */
+  async #run(ruleId: string, version: number, eventId: string, batch: BatchItem[], reader?: Pick<Reader, "get">, actorId?: string): Promise<CommandReport | null> {
     const { store } = this.deps;
     // The rule may have been switched off, changed or stopped while queued.
     const rule = store.getRule(ruleId);
     if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId)) return null;
+    const actor = actorId ?? rule.ownerId;
+    const command = actorId !== undefined;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
     const last = batch.at(-1)!;
-    const result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND");
+    const result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND", actor);
     const reply = result.reply ?? null;
     const images = result.images ?? [];
     // Kept only when the run went through, so a failed run is retried from the same state.
@@ -392,7 +397,8 @@ export class RuleEngine {
       const outcome = result.kind === "none" ? "no_change" : "failed";
       const error = result.kind === "error" ? result.error : null;
       store.finishRuleRun(runId, { outcome, error, logs: result.logs });
-      this.#settle(rule, result.kind === "error", error);
+      // A command run that failed only because whoever ran it has no judge model is not the rule's fault.
+      this.#settle(rule, result.kind === "error" && !(command && error?.includes(NO_DECIDE)), error);
       return { outcome, error, reply, images, steps: 0 };
     }
     let outcome: RunOutcome;
@@ -401,7 +407,7 @@ export class RuleEngine {
     try {
       const done = await this.deps.planner.runForRule({
         guildId: rule.guildId,
-        ownerId: rule.ownerId,
+        actorId: actor,
         rule: { id: rule.id, version: rule.version, name: rule.name, eventId, allow: rule.allow },
         drafts: result.drafts,
         ...(images.length ? { images: Object.fromEntries(images.map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }])) } : {}),
@@ -415,29 +421,32 @@ export class RuleEngine {
     }
     if (outcome === "executed") keepState();
     store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
-    store.audit({ kind: "user", userId: rule.ownerId, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
-    this.#settle(rule, outcome === "failed" || outcome === "rejected", error);
+    store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
+    // A command turned down for what its runner may not do says nothing about the rule, and must not let anyone switch it off.
+    this.#settle(rule, outcome === "failed" || (outcome === "rejected" && !command), error);
     return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length };
   }
 
   /**
    * Someone ran a COMMAND rule's slash command. The run waits its turn like any
-   * other in the server; what the code reads is limited to what everyone in the
-   * channel (and the owner) may see, since the reply goes back there.
+   * other in the server and acts as that person: what the code reads is limited
+   * to what everyone in the channel (and they) may see, since the reply goes
+   * back there; its steps are checked against the allow list and their
+   * permissions; judge() and rank() use their judge model.
    */
-  async runCommand(rule: Rule, event: Data): Promise<CommandReport> {
+  async runCommand(rule: Rule, event: Data, userId: string): Promise<CommandReport> {
     const skipped = (error: string): CommandReport => ({ outcome: "skipped", error, reply: null, images: [], steps: 0 });
     if (!rule.enabled) return skipped("このコマンドのルールは止まっています");
     if (this.halted(rule.guildId)) return skipped("このサーバーの全ルールが止められています");
     const guild = this.deps.caches.get(rule.guildId)?.guild;
     const channelId = typeof event.channel_id === "string" ? event.channel_id : "";
-    if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event)) return skipped("ルールの作成者がこのチャンネルを見られないため、ここでは動きません");
+    if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event, userId)) return skipped("このチャンネルを見られる人として確認できないため、ここでは動きません");
     if (this.#allowRun(rule) !== 0) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
-    const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: rule.ownerId, audience: "channel" });
+    const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: userId, audience: "channel" });
     return new Promise((resolve) => {
       this.#enqueue(serialKey(rule, event), async () => {
         try {
-          resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader)) ?? skipped("このコマンドのルールは止まっています"));
+          resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader, userId)) ?? skipped("このコマンドのルールは止まっています"));
         } catch (e) {
           resolve(skipped(e instanceof Error ? e.message : String(e)));
           throw e;
@@ -463,7 +472,8 @@ export class RuleEngine {
 
   /**
    * Runs the rule's code on one event and returns the steps it asks for.
-   * Used for real runs and for dry runs, which stop here.
+   * Used for real runs and for dry runs, which stop here. `actorId` is whose
+   * read scope and judge model the code gets; by default the owner's.
    */
   async evaluate(
     rule: Pick<Rule, "guildId" | "ownerId" | "program" | "params">,
@@ -473,12 +483,13 @@ export class RuleEngine {
     batch: BatchItem[] = eventName ? [{ eventName, event: event as Data }] : [],
     state: unknown = null,
     command = eventName === "COMMAND",
+    actorId = rule.ownerId,
   ): Promise<Evaluation> {
     let result: SandboxResult;
     let replied: string | null = null;
     const images: CommandImage[] = [];
     try {
-      const source = reader ?? this.ownerReader(rule.guildId, rule.ownerId);
+      const source = reader ?? this.ownerReader(rule.guildId, actorId);
       // Images for a command's reply or the run's posts (`files: ["img1"]`):
       // drawn, formulas, or converted from this run's images or a message's
       // attachments the reader may open.
@@ -499,10 +510,10 @@ export class RuleEngine {
         if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
         return image.data;
       };
-      const decider = this.deps.decide?.(rule.ownerId);
+      const decider = this.deps.decide?.(actorId);
       const bindings: SandboxBindings = {
           guildId: rule.guildId,
-          actor: { kind: "user", userId: rule.ownerId, via: "rule" },
+          actor: { kind: "user", userId: actorId, via: "rule" },
           event,
           eventName,
           batch,
