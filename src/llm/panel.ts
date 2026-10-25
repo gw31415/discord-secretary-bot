@@ -98,8 +98,10 @@ function roleSelects(store: Store, userId: string, role: ModelRole, placeholder:
   }) satisfies APIActionRowComponent<APIStringSelectComponent>);
 }
 
-/** "roles" holds the per-use models, a part of the models page. */
-export type PanelPage = "home" | "keys" | "models" | "roles";
+/** "roles" holds the per-use models, a part of the models page; "lookup" the web tool and the read scope. */
+export type PanelPage = "home" | "keys" | "models" | "roles" | "lookup";
+
+const LOOKUP_TITLE = "調べもの";
 
 function navButton(page: PanelPage, label: string, current: PanelPage): APIButtonComponent {
   return { type: ComponentType.Button, custom_id: CUSTOM_ID.page(page), label, style: page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, disabled: page === current };
@@ -109,7 +111,7 @@ function navButton(page: PanelPage, label: string, current: PanelPage): APIButto
 export function renderPanel(store: Store, userId: string, notice?: string, page: PanelPage = "home"): { flags: number; components: APIMessageTopLevelComponent[] } {
   const status = setupStatus(store, userId);
   const body: APIComponentInContainer[] =
-    page === "keys" ? keysPage(store, userId) : page === "models" ? modelsPage(store, userId) : page === "roles" ? rolesPage(store, userId) : homePage(store, userId);
+    page === "keys" ? keysPage(store, userId) : page === "models" ? modelsPage(store, userId) : page === "roles" ? rolesPage(store, userId) : page === "lookup" ? lookupPage(store, userId) : homePage(store, userId);
   body.push(
     { type: ComponentType.Separator },
     {
@@ -122,7 +124,7 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
   if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
   // At most three buttons a row; the rules and the commands open their own panels in this message.
   body.push(
-    { type: ComponentType.ActionRow, components: [navButton("keys", "APIキー", page), navButton("models", "モデル", page)] },
+    { type: ComponentType.ActionRow, components: [navButton("keys", "APIキー", page), navButton("models", "モデル", page), navButton("lookup", LOOKUP_TITLE, page)] },
     {
       type: ComponentType.ActionRow,
       components: [
@@ -163,8 +165,17 @@ function homePage(store: Store, userId: string): APIComponentInContainer[] {
         `**言語モデル**: ${language ?? "未設定"}`,
         `**判定モデル**: ${modelName(settings.judge) ?? (language ? "言語モデルと同じ" : "未設定")}`,
         ...(overrides.length > 0 ? [`**用途別のモデル**: ${overrides.join("、")}`] : []),
+        `**Webツール**: ${WEB_TOOLS[settings.web].label}`,
+        `**読み取りの範囲**: ${READ_SCOPES[settings.readScope].label}`,
       ].join("\n"),
     },
+  ];
+}
+
+// How the bot gathers information: the web outside the server, and how far it reads inside.
+function lookupPage(store: Store, userId: string): APIComponentInContainer[] {
+  return [
+    { type: ComponentType.TextDisplay, content: `## ${LOOKUP_TITLE}` },
     ...webSection(store, userId),
     { type: ComponentType.Separator },
     {
@@ -431,7 +442,7 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "typedmodal" && isRole(arg)) return { kind: "submitTypedModel", role: arg };
   // "advanced" is the per-use page's id on panels opened before it moved under the models page.
   if (kind === "page" && arg === "advanced") return { kind: "page", page: "roles" };
-  if (kind === "page" && (arg === "home" || arg === "keys" || arg === "models" || arg === "roles")) return { kind: "page", page: arg };
+  if (kind === "page" && (arg === "home" || arg === "keys" || arg === "models" || arg === "roles" || arg === "lookup")) return { kind: "page", page: arg };
   if (kind === "read" && arg === "scope") {
     const scope = values[0];
     return scope === "ask" || scope === "always" ? { kind: "selectReadScope", scope } : null;

@@ -83,7 +83,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`, "home"),
+          panelUpdate(store, userId, `Webツールを「${WEB_TOOLS[action.tool].label}」にしました`, "lookup"),
         );
         return;
       }
@@ -93,7 +93,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(
           interaction.id,
           interaction.token,
-          panelUpdate(store, userId, `読み取りの範囲を「${readScopeLabel(action.scope)}」にしました`, "home"),
+          panelUpdate(store, userId, `読み取りの範囲を「${readScopeLabel(action.scope)}」にしました`, "lookup"),
         );
         return;
       }

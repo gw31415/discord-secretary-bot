@@ -70,7 +70,7 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setModel("u1", "code", { provider: "anthropic", model: selectableModels("anthropic", "code")[0]!.id });
   const models = renderPanel(store, "u1", undefined, "models");
   const roles = renderPanel(store, "u1", undefined, "roles");
-  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "home")), /Tavilyのキーがない/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "lookup")), /Tavilyのキーがない/);
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
   const walk = (node: unknown): void => {
@@ -220,8 +220,9 @@ test("the settings panel moves between its pages with buttons, each well within 
   assert.match(home, /llm:page:keys/);
   assert.match(home, /llm:page:models/);
   assert.match(home, /判定モデル\*\*: 言語モデルと同じ/);
-  assert.match(home, /llm:read:scope/);
-  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "home")), /llm:web:tool/);
+  assert.match(home, /読み取りの範囲\*\*: 毎回確認する/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "lookup")), /llm:read:scope/);
+  assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "lookup")), /llm:web:tool/);
   assert.match(JSON.stringify(renderPanel(store, "u1", undefined, "roles")), /llm:model:addressee:/);
   assert.deepEqual(parseCustomId("llm:page:advanced"), { kind: "page", page: "roles" }, "panels opened before the move");
   assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1", undefined, "models")), /llm:model:(addressee|code|reaction):/);
@@ -229,9 +230,9 @@ test("the settings panel moves between its pages with buttons, each well within 
   const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
   assert.match(keys, /llm:key:set/);
   assert.match(keys, /llm:page:home/);
-  for (const page of ["home", "keys", "models", "roles"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
+  for (const page of ["home", "keys", "models", "roles", "lookup"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
   // Discord rejects a message whose components share a custom_id.
-  for (const page of ["home", "keys", "models", "roles"] as const) {
+  for (const page of ["home", "keys", "models", "roles", "lookup"] as const) {
     const ids = [...JSON.stringify(renderPanel(store, "u1", undefined, page)).matchAll(/"custom_id":"([^"]+)"/g)].map((m) => m[1]);
     assert.equal(new Set(ids).size, ids.length, `duplicate custom_id on ${page}`);
   }
