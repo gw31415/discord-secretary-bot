@@ -9,7 +9,7 @@ import type {
 } from "discord-api-types/v10";
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
-import { limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
+import { fenceLanguage, limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
 import { VISIBILITY_CHOICES } from "../rules/command.ts";
 import type { Body } from "./catalog.ts";
 import { dialogFileName } from "./files.ts";
@@ -332,10 +332,6 @@ function codeBody(plan: Plan, room: number): string[] {
 }
 
 /** The code block language for a compiler language id. */
-function fenceLanguage(language: string): string {
-  return language === "c" ? "c" : language === "rust" ? "rust" : language === "go" ? "go" : "";
-}
-
 function replyLine(r: PlanRuleDraft): string {
   const images = r.dry.images ? `(画像${r.dry.images}枚)` : "";
   return r.dry.reply || images ? `\n　返事: ${(r.dry.reply ?? "").slice(0, 200)}${images}` : "";

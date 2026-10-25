@@ -4,7 +4,7 @@ import { InteractionType, MessageFlags, PermissionFlagsBits } from "discord-api-
 import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
 import type { CommandReport } from "./engine.ts";
 import type { APIInteraction, APIMessage } from "discord-api-types/v10";
-import type { Store } from "../db.ts";
+import type { Store, WasmSource } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { guildCommandIds } from "../discord/commands.ts";
 import type { GuildState } from "../discord/permissions.ts";
@@ -438,7 +438,7 @@ export class RuleService {
     const { admin } = this.deps;
     const rule = admin.get(guildId, userId, ruleId);
     return detailView(
-      { rule, userId, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), ...extra },
+      { rule, userId, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), ...this.#wasmSource(rule), ...extra },
       cacheLabel(this.deps.caches.get(guildId)?.guild),
     );
   }
@@ -600,15 +600,24 @@ export class RuleService {
     }
   }
 
+  #wasmSource(rule: Pick<Rule, "program">): { wasmSource?: WasmSource } {
+    const source = rule.program.kind === "wasm" ? this.deps.wasm?.source(rule.program.sha256) : undefined;
+    return source ? { wasmSource: source } : {};
+  }
+
   async #codeFile(interaction: APIInteraction, name: string, definition: Pick<Rule, "trigger" | "allow" | "program" | "params">): Promise<void> {
     const json = JSON.stringify({ trigger: definition.trigger, allow: definition.allow, params: definition.params ?? null }, null, 2);
     const { program } = definition;
+    const source = this.#wasmSource(definition).wasmSource;
+    // Discord file names have no directories, so src/main.rs goes out as src_main.rs.
+    const code = program.kind === "js"
+      ? [{ name: "rule.js", data: Buffer.from(program.code) }]
+      : source
+        ? source.files.slice(0, 9).map((f) => ({ name: f.path.replaceAll("/", "_"), data: Buffer.from(f.content) }))
+        : [{ name: "rule.txt", data: Buffer.from(`Wasm sha256 ${program.sha256}`) }];
     await this.deps.api.interactions.reply(interaction.id, interaction.token, {
       content: `ルール「${name}」のコードと許す操作です`,
-      files: [
-        { name: "rule.js", data: Buffer.from(program.kind === "js" ? program.code : `// Wasm sha256 ${program.sha256}`) },
-        { name: "rule.json", data: Buffer.from(json) },
-      ],
+      files: [...code, { name: "rule.json", data: Buffer.from(json) }],
       flags: MessageFlags.Ephemeral,
       allowed_mentions: { parse: [] },
     });

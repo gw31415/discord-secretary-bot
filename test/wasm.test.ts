@@ -429,3 +429,19 @@ test("the agent compiles, reads the errors, and keeps or runs what it built", as
   assert.deepEqual(kept, [`hello:${prepared.info.sha256}`]);
   assert.match(registered.text, /Botがコンパイル/);
 });
+
+test("a compiled Wasm rule shows its source on the rule's code page", async () => {
+  const { detailView } = await import("../src/rules/panel.ts");
+  const rule = {
+    id: "r1", name: "hello", ownerId: "u1", enabled: true, version: 1, sourcePrompt: "挨拶して",
+    trigger: { events: ["MESSAGE_CREATE"] }, allow: [], program: { kind: "wasm", sha256: "ab".repeat(32) },
+  } as unknown as import("../src/rules/types.ts").Rule;
+  const base = { rule, userId: "u1", page: "source" as const, runs: [], can: { enable: true, disable: true, remove: true, owner: true } };
+  const text = (r: unknown) => JSON.stringify(r);
+  const compiled = text(detailView({ ...base, wasmSource: { language: "rust", version: "1", files: [{ path: "src/main.rs", content: "fn main() { greet(); }" }] } }, (id) => id));
+  assert.match(compiled, /```rust\\nfn main\(\) \{ greet\(\); \}/);
+  assert.match(compiled, /ファイルで/);
+  const uploaded = text(detailView(base, (id) => id));
+  assert.match(uploaded, /ソースはありません/);
+  assert.doesNotMatch(uploaded, /ファイルで/);
+});
