@@ -25,15 +25,18 @@ export type { ModelRole };
 
 /** An optional role's option for leaving it to the response model. */
 const MODEL_UNSET = "none";
+/** The option that opens a modal for typing an OpenRouter model id. */
+const MODEL_TYPED = "typed";
 
 export const CUSTOM_ID = {
   keySetSelect: "llm:key:set",
   keyDeleteSelect: "llm:key:delete",
   keyModal: (p: KeyProviderId) => `llm:keymodal:${p}`,
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
-  modelSelect: (role: ModelRole, p: ProviderId | "all", page: number) => `llm:model:${role}:${p}:${page}`,
+  // The render token makes each panel's selects new, so Discord forgets the option picked
+  // last: one that opened a modal can then be picked again.
+  modelSelect: (role: ModelRole, p: ProviderId | "all", page: number, token = "") => `llm:model:${role}:${p}:${page}${token ? `:${token}` : ""}`,
   webSelect: "llm:web:tool",
-  typedModelButton: (role: ModelRole) => `llm:typed:${role}`,
   typedModelModal: (role: ModelRole) => `llm:typedmodal:${role}`,
   readScopeSelect: "llm:read:scope",
   page: (page: PanelPage) => `llm:page:${page}`,
@@ -71,7 +74,9 @@ const SELECT_LIMIT = 25;
 function roleSelects(store: Store, userId: string, role: ModelRole, placeholder: string, unset?: string): APIActionRowComponent<APIStringSelectComponent>[] {
   const providers = store.listKeys(userId).map((k) => k.provider).filter(isProviderId);
   const current = store.getSettings(userId)[role];
-  // A model typed in for OpenRouter is listed alone, so the menu shows what is chosen.
+  // OpenRouter has hundreds of models, so its option opens a modal for the id instead, and
+  // the model typed in is listed alone so the menu shows what is chosen.
+  const typedProviders = providers.filter((provider) => TYPED_MODEL_PROVIDERS.has(provider));
   const typed = current && TYPED_MODEL_PROVIDERS.has(current.provider) && providers.includes(current.provider) ? findModel(role, current.provider, current.model) : undefined;
   const options = [
     ...(unset ? [{ label: unset, value: MODEL_UNSET, default: !current }] : []),
@@ -84,14 +89,16 @@ function roleSelects(store: Store, userId: string, role: ModelRole, placeholder:
         default: current?.provider === provider && current.model === model.id,
       })),
     ),
+    ...typedProviders.map((provider) => ({ label: `${PROVIDERS[provider].label}(IDを入力)`, value: MODEL_TYPED })),
   ];
   if (options.length === (unset ? 1 : 0)) return [];
+  const token = Date.now().toString(36);
   const pages = Math.ceil(options.length / SELECT_LIMIT);
   return Array.from({ length: pages }, (_, page) => ({
     type: ComponentType.ActionRow,
     components: [{
       type: ComponentType.StringSelect,
-      custom_id: CUSTOM_ID.modelSelect(role, "all", page),
+      custom_id: CUSTOM_ID.modelSelect(role, "all", page, token),
       placeholder: `${placeholder}${pages > 1 ? ` (${page + 1}/${pages})` : ""}`.slice(0, 150),
       options: options.slice(page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT),
     }],
@@ -245,7 +252,6 @@ function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
       content: "**判定モデル**\n発言がBot宛てかどうか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めるときに使います。コードやルールの judge()・rank() もこのモデルが答えます。軽いモデルか、判定専用のJevやGPT-6 Lunaが向いています。",
     },
     ...roleSelects(store, userId, "judge", "判定モデル", "言語モデルと同じ"),
-    ...typedModelButtons(store, userId, ["response", "judge"]),
     { type: ComponentType.ActionRow, components: [navButton("roles", "用途別のモデル", "models")] },
   );
   return body;
@@ -273,7 +279,6 @@ function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
       content: "**リアクション**\n文章で返すかリアクションだけで返すか、どの絵文字を付けるかを決めます。Botの発言にあなたが付けたリアクションへの応じ方も決めます。判定専用のモデルが向いています。",
     },
     ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", "判定モデルと同じ"),
-    ...typedModelButtons(store, userId, ["addressee", "code", "reaction"]),
   );
   return body;
 }
@@ -343,24 +348,6 @@ const ROLE_LABEL: Record<ModelRole, string> = { response: "言語", judge: "判�
 
 export function roleLabel(role: ModelRole): string {
   return ROLE_LABEL[role];
-}
-
-// OpenRouter has hundreds of models, so its models are typed in rather than listed.
-// Buttons, not a select: a select keeps showing the role picked last, and picking it
-// again sends nothing, so a typed model could not be changed.
-function typedModelButtons(store: Store, userId: string, roles: ModelRole[]): APIComponentInContainer[] {
-  const providers = [...TYPED_MODEL_PROVIDERS].filter((p) => store.listKeys(userId).some((k) => k.provider === p));
-  if (providers.length === 0) return [];
-  const label = providers.map((p) => PROVIDERS[p].label).join("・");
-  return [{
-    type: ComponentType.ActionRow,
-    components: roles.map((role) => ({
-      type: ComponentType.Button,
-      custom_id: CUSTOM_ID.typedModelButton(role),
-      label: `${label}の${ROLE_LABEL[role]}モデルをIDで選ぶ`.slice(0, 80),
-      style: ButtonStyle.Secondary,
-    })),
-  }];
 }
 
 /**
@@ -449,8 +436,8 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
   if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
   const isRole = (r: string | undefined): r is ModelRole => r === "response" || r === "judge" || r === "addressee" || r === "code" || r === "reaction";
+  // The OpenRouter select and buttons on panels opened before its option joined the model selects.
   if (kind === "typed" && isRole(arg)) return { kind: "openTypedModelModal", role: arg };
-  // The select on panels opened before the buttons.
   if (kind === "typed" && arg === "role") return isRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
   if (kind === "typedmodal" && isRole(arg)) return { kind: "submitTypedModel", role: arg };
   // "advanced" is the per-use page's id on panels opened before it moved under the models page.
@@ -467,6 +454,7 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "model" && isRole(arg)) {
     const value = values[0] ?? "";
     if (arg !== "response" && value === MODEL_UNSET) return { kind: "clearModel", role: arg };
+    if (value === MODEL_TYPED) return { kind: "openTypedModelModal", role: arg };
     const slash = value.indexOf("/");
     const provider = value.slice(0, slash);
     const model = value.slice(slash + 1);

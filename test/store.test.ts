@@ -96,7 +96,8 @@ test("every selectable model is offered, with unique custom ids, within the comp
     new Set(selects.filter((s) => s.custom_id.startsWith(`llm:model:${role}:`)).flatMap((s) => s.options.map((o) => o.value)));
   const code = selects.filter((s) => s.custom_id.startsWith("llm:model:code:")).flatMap((s) => s.options.map((o) => o.value));
   assert.equal(code[0], "none");
-  assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length + selectableModels("openai", "code").length);
+  assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length + selectableModels("openai", "code").length + 1, "and the OpenRouter entry");
+  assert.equal(code.at(-1), "typed");
   for (const role of ["response", "judge", "addressee"] as const) {
     for (const provider of ["anthropic", "typesafe", "zai", "openai"] as const) {
       for (const m of selectableModels(provider, role)) assert.ok(offered(role).has(`${provider}/${m.id}`), `${role} ${provider}/${m.id}`);
@@ -123,7 +124,9 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:judge:typesafe:0", ["typesafe/jev-latest"])?.kind, "selectModel");
   assert.equal(parseCustomId("llm:model:response:typesafe:0", ["typesafe/jev-latest"]), null);
   assert.equal(parseCustomId("llm:key:mistral"), null);
-  // OpenRouter models are typed in: each role's button opens a modal (the select on older panels too).
+  // OpenRouter models are typed in: its option in each role's select opens a modal
+  // (as the buttons and the select on older panels do).
+  assert.deepEqual(parseCustomId("llm:model:code:all:0:abc", ["typed"]), { kind: "openTypedModelModal", role: "code" });
   assert.deepEqual(parseCustomId("llm:typed:code"), { kind: "openTypedModelModal", role: "code" });
   assert.deepEqual(parseCustomId("llm:typed:role", ["judge"]), { kind: "openTypedModelModal", role: "judge" });
   assert.equal(parseCustomId("llm:typed:role", ["boss"]), null);
@@ -195,10 +198,20 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "openrouter", "sk-or-abcdefgh1357");
   const before = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
-  assert.match(before, /llm:typed:response/);
-  assert.match(before, /llm:typed:judge/);
-  const roles = JSON.stringify(renderPanel(store, "u1", undefined, "roles"));
-  for (const role of ["addressee", "code", "reaction"]) assert.match(roles, new RegExp(`llm:typed:${role}`));
+  const typedOption = (page: "models" | "roles", role: string) => {
+    let found = false;
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!node || typeof node !== "object") return;
+      const c = node as { custom_id?: string; options?: Array<{ value: string }>; components?: unknown };
+      if (c.custom_id?.startsWith(`llm:model:${role}:`) && c.options?.some((o) => o.value === "typed")) found = true;
+      walk(c.components);
+    };
+    walk(renderPanel(store, "u1", undefined, page).components);
+    return found;
+  };
+  for (const role of ["response", "judge"]) assert.ok(typedOption("models", role), role);
+  for (const role of ["addressee", "code", "reaction"]) assert.ok(typedOption("roles", role), role);
   assert.doesNotMatch(before, /"openrouter\//, "hundreds of models stay out of the menus");
   store.setModel("u1", "response", { provider: "openrouter", model: "anthropic/claude-sonnet-5" });
   const after = renderPanel(store, "u1", undefined, "models");
