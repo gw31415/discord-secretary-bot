@@ -210,7 +210,7 @@ cmd_compiler() {
       sudo install -m 755 "$NODE" "$CHOME/node"
       # Its own bwrap, so the AppArmor profile that lets it make user namespaces covers nothing else.
       sudo install -D -m 755 /usr/bin/bwrap "$CHOME/bin/bwrap"
-      if [[ -d /etc/apparmor.d ]] && command -v apparmor_parser >/dev/null; then
+      if [[ -d /sys/kernel/security/apparmor && -d /etc/apparmor.d ]]; then
         sudo install -m 644 "$src/deploy/apparmor/wasm-compiler-bwrap" /etc/apparmor.d/wasm-compiler-bwrap
         sudo apparmor_parser -r /etc/apparmor.d/wasm-compiler-bwrap
       fi
