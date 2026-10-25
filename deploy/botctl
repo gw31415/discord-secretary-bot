@@ -222,7 +222,7 @@ cmd_compiler() {
       say "wasm-compiler を $(git -C "$src" log -1 --format='%h %s') にしました"
       ;;
     rootfs) command -v mmdebstrap >/dev/null || sudo apt-get install -y -q mmdebstrap; compiler_node rootfs "${1:-base}" ;;
-    setup) [[ $# -gt 0 ]] || die "言語を指定してください(c, rust, go など)"; for lang in "$@"; do compiler_node setup "$lang"; done; sudo systemctl restart "$CUNIT" ;;
+    setup) [[ $# -gt 0 ]] || die "言語を指定してください(c, rust, go, moonbit など)"; for lang in "$@"; do compiler_node setup "$lang"; done; sudo systemctl restart "$CUNIT" ;;
     # As a unit with the service's own limits (read from its unit file), so it meets the same AppArmor, seccomp and mounts.
     selftest)
       local props=()

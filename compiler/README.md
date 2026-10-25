@@ -31,7 +31,7 @@ Bot から渡されたソースを、ルールで動かせる Wasm モジュー�
 ```sh
 botctl compiler install        # ユーザー・グループ・/opt/wasm-compiler・systemd ユニット
 botctl compiler rootfs         # mmdebstrap で rootfs/base を作る
-botctl compiler setup c rust go
+botctl compiler setup c rust go moonbit
 botctl compiler selftest
 botctl compiler status
 ```
