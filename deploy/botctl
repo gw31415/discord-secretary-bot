@@ -206,6 +206,7 @@ cmd_compiler() {
       [[ -d "$CHOME/app" ]] && sudo mv "$CHOME/app" "$CHOME/app.old"
       sudo mv "$CHOME/app.new" "$CHOME/app"
       sudo chown -R root:root "$CHOME/app"
+      sudo chmod -R u=rwX,go=rX "$CHOME/app"
       sudo install -m 755 "$NODE" "$CHOME/node"
       printf 'WASM_COMPILER_SOCKET_GID=%s\n' "$(getent group wasm-compiler-clients | cut -d: -f3)" | sudo tee "$CHOME/env" >/dev/null
       sudo install -m 644 "$src/deploy/$CUNIT.service" "/etc/systemd/system/$CUNIT.service"
