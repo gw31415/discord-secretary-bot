@@ -368,3 +368,19 @@ test("widen_read is not offered without a way to ask", async () => {
     llm.deleteProvider(faux.provider.id);
   }
 });
+
+test("stopping at the turn limit gives the limit's message, not a failed reply", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses(Array.from({ length: 30 }, () => fauxAssistantMessage([fauxToolCall("list_channels", {})], { stopReason: "toolUse" })));
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
+      transcript: [], target: "[1] user: チャンネルを教えて", web: null,
+    });
+    assert.match(result.text, /手順が多くなりすぎた/);
+    assert.ok(result.turns >= 12 && result.turns <= 13);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
