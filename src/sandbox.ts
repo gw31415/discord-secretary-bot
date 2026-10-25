@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { CANVAS_PRELUDE } from "./canvas.ts";
 import { DECIDE_PRELUDE } from "./agent/decide.ts";
 import type { Decide } from "./agent/decide.ts";
-import { execute, hostCalls, runModule, wasmInput } from "./wasm/run.ts";
+import { execute, hostCalls, runModule, warmUp, wasmInput } from "./wasm/run.ts";
 import type { Program } from "./wasm/run.ts";
 
 // Read-only code execution. JavaScript is one more Wasm module: QuickJS built
@@ -183,6 +183,19 @@ export async function jsProgram(code: string): Promise<Program> {
     }
   }
   return { module, prefix: bytecode ? prefix("bytecode", bytecode) : prefix("source", Buffer.from(ruleProgram(code))), engine: true };
+}
+
+/** One run through the engine's usual paths (globals, JSON, strings, a refused request, an error), so no rule's first run is the slow one. */
+export async function warmJsEngine(): Promise<void> {
+  const code = [
+    "var names = [];",
+    "for (var k in (event || {})) names.push(String(k).toUpperCase());",
+    "try { discord.get(\"/guilds/\" + guild); } catch (e) { log(e.message); }",
+    "var o = JSON.parse(JSON.stringify({ names: names, at: new Date().toISOString(), n: [3, 1, 2].sort() }));",
+    "if (state === null) setState(o);",
+    "return plan([call(\"POST /channels/{channel}/messages\", { path: { channel: \"0\" }, body: { content: o.names.join(\",\").replace(/,/g, \" \").slice(0, 10) } })]);",
+  ].join("\n");
+  await jsProgram(code).then(warmUp, () => undefined);
 }
 
 /** Runs a rule's code once from source, as a rule run would (trial runs and tests). */

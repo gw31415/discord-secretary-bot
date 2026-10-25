@@ -3,6 +3,7 @@ import type { GuildState } from "../discord/permissions.ts";
 import type { WasmRef } from "../plan/types.ts";
 import { type CompileOutcome, type CompilerClient, CompilerUnavailable, type SourceFile } from "./compiler.ts";
 import { type ModuleInfo, ModuleRejected, prepareModule } from "./module.ts";
+import { warmUp } from "./run.ts";
 
 // Uploaded Wasm modules: checks and keeps them, finds the one a rule names, and
 // compiles each once. A module carries no permissions of its own; a rule that
@@ -177,7 +178,7 @@ export class WasmRegistry {
     const bytes = this.#store.wasmBytes(sha256);
     if (!bytes) return Promise.reject(new Error(`Wasmモジュール ${sha256.slice(0, 12)} が消されています`));
     module = WebAssembly.compile(bytes);
-    module.catch(() => this.#compiled.delete(sha256));
+    module.then((m) => void warmUp({ module: m }), () => this.#compiled.delete(sha256));
     this.#compiled.set(sha256, module);
     while (this.#compiled.size > Math.max(COMPILED_CACHE, this.#store.wasmInUse().length)) this.#compiled.delete(this.#compiled.keys().next().value!);
     return module;

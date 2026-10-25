@@ -24,7 +24,7 @@ import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
 import { RuleService } from "./rules/service.ts";
 import { TRIGGER_INTENTS, TRIGGERS } from "./rules/triggers.ts";
-import { precompileJs, precompileJsEngine, setBytecodeCache } from "./sandbox.ts";
+import { precompileJs, precompileJsEngine, setBytecodeCache, warmJsEngine } from "./sandbox.ts";
 import { WasmRegistry } from "./wasm/registry.ts";
 import { CompilerClient } from "./wasm/compiler.ts";
 import { WasmPanel } from "./wasm/panel.ts";
@@ -401,6 +401,7 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 // as bytecode across restarts) and every uploaded module an enabled rule runs.
 await precompileJsEngine().catch((e) => log("JSエンジンのコンパイルに失敗", e));
 warmWorkers();
+void warmJsEngine();
 {
   let compiled = 0;
   for (const code of store.enabledRuleCode()) {

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_MEMORY_PAGES, ModuleRejected, prepareModule } from "../src/wasm/module.ts";
-import { execute, runModule } from "../src/wasm/run.ts";
+import { execute, runModule, warmUp } from "../src/wasm/run.ts";
 
 // Small modules written out byte by byte, so the tests need no Wasm toolchain.
 
@@ -100,6 +100,22 @@ test("a module runs once, reaches the host only through secretary.call, and is s
   assert.equal(r.ok, false);
   assert.match(r.error!, /上限/);
   assert.ok(Date.now() - started < 3000);
+});
+
+test("a module is warmed up once, and a warm-up that never ends is cut short", async () => {
+  const spin = await WebAssembly.compile((await prepareModule(wasm({ types: [[[], []]], memory: [1], funcs: [[0, LOOP]], exports: [["_start", 0, 0], ["memory", 2, 0]] }))).bytes);
+  let started = Date.now();
+  await warmUp({ module: spin });
+  const took = Date.now() - started;
+  assert.ok(took >= 1500 && took < 4000, `took ${took}ms`);
+  started = Date.now();
+  await warmUp({ module: spin });
+  assert.ok(Date.now() - started < 100);
+  // A warmed module still runs as usual.
+  const out = await WebAssembly.compile(printer(JSON.stringify({ steps: [] })));
+  await warmUp({ module: out });
+  const r = await runModule({ module: out }, { guildId: "1", actor: { kind: "user", userId: "2" }, get: async () => null }, { wallTimeMs: 5000, maxGets: 1 });
+  assert.deepEqual(r.value, { steps: [] });
 });
 
 test("rule code compiles to bytecode once and runs from it", async () => {
