@@ -14,7 +14,7 @@ MoonBit(`--target wasm`)です。`main.mbt` の `fn main` が入口で、同じ�
 @secretary.output(result : Json) -> Unit         // 標準出力に { steps, state?, reply? }
 ```
 
-Json は `{ "k": Json(v) }` のリテラルで作り、`match` で取り出します。`call`・`get` は失敗すると `Failure` を投げるので、`try?` か `catch` で受けてください。
+Json は `{ "k": Json(v) }` のリテラルで作り、`match` で取り出します。`call`・`get` は失敗すると `Failure` を投げるので、`try ... catch { e => ... }` で受けてください(`fn main` は失敗を投げられません)。
 
 ## 例: コマンドに返事をする
 
@@ -26,8 +26,11 @@ fn main {
     { "guild": String(g), .. } => g
     _ => ""
   }
-  let name = match (try? @secretary.get("/guilds/\{guild_id}")) {
-    Ok({ "name": String(n), .. }) => n
+  let guild = try @secretary.get("/guilds/\{guild_id}") catch {
+    _ => Json::null()
+  }
+  let name = match guild {
+    { "name": String(n), .. } => n
     _ => "このサーバー"
   }
   @secretary.output({ "reply": Json("ここは \{name} です"), "steps": [] })

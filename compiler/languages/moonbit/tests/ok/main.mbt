@@ -5,13 +5,19 @@ fn main {
     { "guild": String(g), .. } => g
     _ => ""
   }
-  let name = match (try? @secretary.get("/guilds/\{guild_id}")) {
-    Ok({ "name": String(n), .. }) => n
+  let guild = try @secretary.get("/guilds/\{guild_id}") catch {
+    _ => Json::null()
+  }
+  let name = match guild {
+    { "name": String(n), .. } => n
     _ => "このサーバー"
   }
-  let words = @string.split("a b c", " ").to_array().length()
+  let count = match (try @json.parse("[1, 2, 3]") catch { _ => Json::null() }) {
+    Array(a) => a.length()
+    _ => 0
+  }
   @secretary.output({
-    "reply": Json("ここは \{name} です(\{words})"),
+    "reply": Json("ここは \{name} です(\{count})"),
     "steps": [],
   })
 }
