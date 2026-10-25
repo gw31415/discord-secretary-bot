@@ -230,6 +230,11 @@ test("the settings panel moves between its pages with buttons, each well within 
   assert.match(keys, /llm:key:set/);
   assert.match(keys, /llm:page:home/);
   for (const page of ["home", "keys", "models", "roles"] as const) assert.ok(count(renderPanel(store, "u1", undefined, page).components) <= 40, page);
+  // Discord rejects a message whose components share a custom_id.
+  for (const page of ["home", "keys", "models", "roles"] as const) {
+    const ids = [...JSON.stringify(renderPanel(store, "u1", undefined, page)).matchAll(/"custom_id":"([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(new Set(ids).size, ids.length, `duplicate custom_id on ${page}`);
+  }
   // The rules are a section of the panel, and their panel leads back here.
   assert.match(home, /rule:home:/);
   assert.equal(SETTINGS_HOME_ID, CUSTOM_ID.page("home"));

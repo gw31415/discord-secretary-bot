@@ -101,8 +101,8 @@ function roleSelects(store: Store, userId: string, role: ModelRole, placeholder:
 /** "roles" holds the per-use models, a part of the models page. */
 export type PanelPage = "home" | "keys" | "models" | "roles";
 
-function navButton(page: PanelPage, label: string, current: PanelPage, back = page === "home"): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: CUSTOM_ID.page(page), label, style: back ? ButtonStyle.Secondary : ButtonStyle.Primary, disabled: page === current };
+function navButton(page: PanelPage, label: string, current: PanelPage): APIButtonComponent {
+  return { type: ComponentType.Button, custom_id: CUSTOM_ID.page(page), label, style: page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, disabled: page === current };
 }
 
 /** The settings panel: a home page with the general settings, and pages for keys and models reached by buttons. */
@@ -131,12 +131,8 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
         { type: ComponentType.Button, custom_id: WASM_SECTION_ID, label: "Wasm", style: ButtonStyle.Primary },
       ],
     },
-    ...(page === "home"
-      ? []
-      : [{
-          type: ComponentType.ActionRow,
-          components: [navButton("home", "← 設定のトップへ", page), ...(page === "roles" ? [navButton("models", "← モデル", page, true)] : [])],
-        } satisfies APIActionRowComponent<APIButtonComponent>]),
+    // From the per-use page, the モデル button above leads back to the models page.
+    ...(page === "home" ? [] : [{ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] } satisfies APIActionRowComponent<APIButtonComponent>]),
   );
   return {
     flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
