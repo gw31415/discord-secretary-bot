@@ -37,6 +37,7 @@ const MAX_WASM_OUTPUT = 20_000;
 import { FRESH_TTL_MS, sizeLabel } from "../wasm/registry.ts";
 import type { CompileResult, FreshModule } from "../wasm/registry.ts";
 import type { CompilerLanguage, SourceFile } from "../wasm/compiler.ts";
+import { docsIndex, loadDocs, readDoc, searchDocs } from "./docs.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
 // narrows results to what may be shown in the channel the reply goes to.
@@ -337,7 +338,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
 
   const coder = options.coder;
   // The coding agent reads the speaker's rules and runs too, so it can debug them.
-  const coderTools = options.rules ? ruleReadTools(options.rules) : [];
+  const coderTools = [readDocsTool(), ...(options.rules ? ruleReadTools(options.rules) : [])];
   const runCodeTask = tool({
     name: "run_code",
     label: "コードで調べる",
@@ -487,7 +488,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     },
   });
 
-  const tools = [readMessages, searchMessages, listChannels, findMembers, coder ? runCodeTask : runCode];
+  const tools = [readMessages, searchMessages, listChannels, findMembers, coder ? runCodeTask : runCode, readDocsTool()];
   if (wasm) tools.push(runWasmTool);
   if (options.images) tools.push(viewImages);
   if (box) tools.push(renderMathTool, convertImageTool);
@@ -799,6 +800,20 @@ async function attachedSources(reader: Reader, ref: { message_id: string; channe
   );
 }
 
+/**
+ * The secretary.call ABI and its host functions, from docs/wasm.md, for every
+ * language guide: the SDKs wrap them, but code without the SDK needs them.
+ */
+async function hostCallGuide(): Promise<string> {
+  try {
+    const docs = await loadDocs();
+    const sections = ["secretary.call", "ホスト関数"].map((s) => readDoc(docs, "wasm", s).replace(/^###/gm, "##"));
+    return ["# secretary.call の受け渡し(全言語共通)", "SDK の Call・Get などはこれを包んでいます。SDK を使わずに呼ぶときや、ホスト関数の引数を確かめるときに読みます。入出力の JSON など残りは read_docs の wasm にあります。", ...sections].join("\n\n");
+  } catch {
+    return "secretary.call の受け渡しは read_docs の wasm(見出し「secretary.call」「ホスト関数」)にあります。";
+  }
+}
+
 /** Building Wasm modules from source with the compiler service. */
 function compileTools(reader: Reader, compiler: NonNullable<WasmTools["compiler"]>, fetchFn: typeof fetch): AgentTool<any>[] {
   const languages = compiler.languages();
@@ -810,14 +825,14 @@ function compileTools(reader: Reader, compiler: NonNullable<WasmTools["compiler"
       label: "Wasmの書き方を見る",
       description: `compile_wasm でソースを書く前に、その言語の書き方(SDK・入出力・置けるファイル・例)を読みます。言語: ${summary}`,
       parameters: Type.Object({ language: Type.String() }),
-      execute: async (_id, params) => text(await compiler.guide(params.language)),
+      execute: async (_id, params) => text([await compiler.guide(params.language), await hostCallGuide()].join("\n\n")),
     }),
     tool({
       name: "compile_wasm",
       label: "Wasmにコンパイル",
       description: [
         `ソースを Wasm モジュールにコンパイルします。言語: ${summary}。`,
-        "コンパイルは Bot とは別のコンパイラで、ネットワークなしの箱の中で行われます。送れるのはソースファイルだけで、Cargo.toml・go.mod・build.rs などのビルド設定や追加のライブラリは指定できません。書く前に wasm_language_guide で書き方を確かめます。",
+        "コンパイルは Bot とは別のコンパイラで、ネットワークなしの箱の中で行われます。送れるのはソースファイルだけで、Cargo.toml・go.mod・build.rs などのビルド設定や追加のライブラリは指定できません。書く前に wasm_language_guide で書き方を確かめます。ABI やホスト関数の細かい決まりは read_docs の wasm と languages にあります。",
         "ソースは files に書くか、メッセージに添付されたソース(message_id)を使います。失敗したらエラーの場所と内容が返るので、直してもう一度呼びます。",
         `できたモジュールは${FRESH_TTL_MS / 60000}分だけ保持されます。一度動かすなら run_wasm の compiled に、ルールやコマンドに使うなら register_wasm の compiled と name で登録して(ソースも保存されます)、rules の wasm にその名前を入れます。`,
       ].join("\n"),
@@ -854,6 +869,30 @@ function compileTools(reader: Reader, compiler: NonNullable<WasmTools["compiler"
       },
     }),
   ];
+}
+
+/** The bot's own documentation (docs/), for how it works: conversation, /settings, rules, JS API, Wasm, languages, operations. */
+function readDocsTool(): AgentTool<any> {
+  return tool({
+    name: "read_docs",
+    label: "ドキュメントを読む",
+    description: [
+      "Bot 自身のドキュメントを読みます。使い方(会話・/settings・ルール・コマンド)、JavaScript の API、Wasm の ABI、言語と SDK、書き込み操作と権限が書いてあります。",
+      "Bot の仕組みや使い方を聞かれたとき、ルールやコード、Wasm を書く前に決まりを確かめるときに使います。覚えで答えずに、ここで確かめます。",
+      "doc を省くと目次(文書と見出し)、doc だけなら文書全体、section を付けるとその見出しの中だけ、query を付けると全文書からその言葉を含む行を返します。",
+    ].join("\n"),
+    parameters: Type.Object({
+      doc: Type.Optional(Type.String({ description: "conversation / settings / rules / js-api / wasm / languages / operations" })),
+      section: Type.Optional(Type.String({ description: "見出し(doc と一緒に)" })),
+      query: Type.Optional(Type.String({ description: "探す言葉(空白で区切ると全部を含む行)" })),
+    }),
+    execute: async (_id, params) => {
+      const docs = await loadDocs();
+      if (params.query) return text(searchDocs(docs, params.query, params.doc));
+      if (params.doc) return text(readDoc(docs, params.doc, params.section));
+      return text(docsIndex(docs));
+    },
+  });
 }
 
 /** Reading the speaker's rules and their runs; the coding agent gets these too, for debugging rules. */

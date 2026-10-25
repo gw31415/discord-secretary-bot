@@ -29,7 +29,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 | `nim` | Nim | Nim 2.2.12 → wasi-sdk 25 の clang | `main.nim` | `.nim`。サブディレクトリ可 | 標準ライブラリ(ファイル・ネットワーク・プロセス・スレッドを使わないもの) | 120秒 |
 | `zig` | Zig | Zig 0.17、wasm32-wasi | `main.zig` | `.zig`。サブディレクトリ可 | 標準ライブラリ | 120秒 |
 
-どの言語も、実行時に使えるのは標準入出力・時計・乱数だけです。ファイル・ネットワークはなく、メモリは64MiB までです。言語ごとの細かい決まりと例は各言語の `guide.md` にあります(Botが `wasm_language_guide` で読むものと同じ)。
+どの言語も、実行時に使えるのは標準入出力・時計・乱数だけです。ファイル・ネットワークはなく、メモリは64MiB までです。言語ごとの細かい決まりと例は各言語の `guide.md` にあります。Botが `wasm_language_guide` で読むのはこれに、どの言語にも共通の [secretary.call](wasm.md#secretarycall) と [ホスト関数](wasm.md#ホスト関数) の節を足したものです。
 
 ## SDK
 

@@ -82,6 +82,7 @@ BotはAdministrator権限を持ちますが、読み取りは「このチャン�
 | `run_wasm` | Wasm モジュールを登録せずに1回動かす([Wasm](wasm.md#一度だけ動かすrun_wasm)) |
 | `list_wasm` / `register_wasm` | 話し手の Wasm モジュールの一覧と登録 |
 | `wasm_language_guide` / `compile_wasm` | ソースを Wasm にコンパイルする(コンパイラがあるとき、[言語と SDK](languages.md)) |
+| `read_docs` | このドキュメント(docs/)の目次・文書・見出しを読む、言葉で探す。Botの使い方を聞かれたときや、ルール・コード・Wasm を書く前に決まりを確かめるときに使う(コード用のエージェントも使う) |
 | `widen_read` | 読み取りを広げる許可を求める |
 | `web_search` / `web_fetch` | Webを検索する、ページを読む(Webツールを使う設定のとき) |
 
