@@ -363,6 +363,16 @@ function typedModelButtons(store: Store, userId: string, roles: ModelRole[]): AP
   }];
 }
 
+/**
+ * The model id typed into the modal. "openrouter/" is dropped when it was pasted as a
+ * prefix, but OpenRouter's own routers (openrouter/free, openrouter/auto) keep it.
+ */
+export function typedModelId(role: ModelRole, input: string): string {
+  const id = input.trim();
+  if (findModel(role, "openrouter", id)) return id;
+  return id.replace(/^openrouter\//, "");
+}
+
 /** current is the OpenRouter model the role uses now, filled in so it can be edited. */
 export function typedModelModal(role: ModelRole, current?: string): APIModalInteractionResponseCallbackData {
   return {

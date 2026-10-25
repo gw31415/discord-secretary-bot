@@ -35,7 +35,7 @@
 - 言語モデル: 返事を書く、調べる、変更案やコードを作るときに使います。
 - 判定モデル: 発言がBot宛てか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めます。コードやルールの `judge()`・`rank()` と、会話の `judge` もこのモデルが答えます。軽いモデルか、判定専用のモデル(Jev・gpt-6-luna)が向いています。
 
-OpenRouter はモデルが多いので、「OpenRouterの言語モデルをIDで選ぶ」などのボタンからモデルIDを入力します(openrouter.ai/models に載っているID)。入力欄には今のモデルIDが入っているので、書き換えれば変えられます。
+OpenRouter はモデルが多いので、「OpenRouterの言語モデルをIDで選ぶ」などのボタンからモデルIDを入力します(openrouter.ai/models に載っているID)。入力欄には今のモデルIDが入っているので、書き換えれば変えられます。OpenRouter のルーター(`openrouter/free`・`openrouter/auto` など)も、そのIDで選べます。
 
 ### 用途別のモデル
 

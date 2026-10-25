@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
 import { findChatModel, judgeRef, lightestThinking, selectableModels } from "../src/llm/models.ts";
-import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelModal } from "../src/llm/panel.ts";
+import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
 import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
 
 const master = randomBytes(32);
@@ -213,6 +213,10 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   walk(after.components);
   assert.deepEqual(values.filter((o) => o.value.startsWith("openrouter/")), [{ value: "openrouter/anthropic/claude-sonnet-5", default: true, label: values.find((o) => o.value.startsWith("openrouter/"))!.label, description: "OpenRouter · anthropic/claude-sonnet-5" } as never]);
   assert.ok(setupStatus(store, "u1").missing.every((m) => !m.startsWith("言語")));
+  // OpenRouter's own routers keep their prefix; a pasted "openrouter/" before another id is dropped.
+  assert.equal(typedModelId("response", "openrouter/free"), "openrouter/free");
+  assert.equal(typedModelId("response", " openrouter/auto "), "openrouter/auto");
+  assert.equal(typedModelId("response", "openrouter/anthropic/claude-sonnet-5"), "anthropic/claude-sonnet-5");
   // The modal holds the model typed before, so it can be changed.
   const modal = JSON.stringify(typedModelModal("response", "anthropic/claude-sonnet-5"));
   assert.match(modal, /"value":"anthropic\/claude-sonnet-5"/);
