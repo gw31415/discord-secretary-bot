@@ -7,4 +7,5 @@ mkdir -p /work/src /toolchain/prewarm/cache
 cp /lang/tests/ok/main.zig /work/src/main.zig
 for opt in size speed; do OPTIMIZE=$opt /bin/sh /lang/build.sh; done
 cp -a /work/.zig-cache/. /toolchain/prewarm/cache/
+chmod -R a+rX /toolchain/prewarm
 echo "prewarm: $(wc -c < /work/out/module.wasm) bytes, cache $(du -sh /toolchain/prewarm/cache | cut -f1)"
