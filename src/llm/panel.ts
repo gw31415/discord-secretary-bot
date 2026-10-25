@@ -101,7 +101,7 @@ function roleSelects(store: Store, userId: string, role: ModelRole, placeholder:
 /** "roles" holds the per-use models, a part of the models page; "lookup" the web tool and the read scope. */
 export type PanelPage = "home" | "keys" | "models" | "roles" | "lookup";
 
-const LOOKUP_TITLE = "調べもの";
+const LOOKUP_TITLE = "ハーネス";
 
 function navButton(page: PanelPage, label: string, current: PanelPage): APIButtonComponent {
   return { type: ComponentType.Button, custom_id: CUSTOM_ID.page(page), label, style: page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, disabled: page === current };
