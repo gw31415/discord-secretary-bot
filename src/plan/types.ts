@@ -136,6 +136,8 @@ export interface WasmRef {
   /** Who uploaded it. */
   ownerId: string;
   producers: string[];
+  /** The sources, when the bot compiled it: shown on the approval in place of the bare hash. */
+  source?: { language: string; files: Array<{ path: string; content: string }> };
 }
 
 export interface PlanRuleDraft {

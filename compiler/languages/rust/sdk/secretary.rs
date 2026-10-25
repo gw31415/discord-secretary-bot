@@ -1,4 +1,5 @@
 //! The bot's side of the ABI: read the input, call the host, write the output.
+#![allow(dead_code)]
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 

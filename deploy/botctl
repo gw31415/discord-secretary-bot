@@ -220,7 +220,7 @@ cmd_compiler() {
     selftest) sudo -u wasmc env WASM_COMPILER_HOME="$CHOME" WASM_COMPILER_JOBS=/var/lib/wasm-compiler/selftest "$CHOME/node" "$CHOME/app/src/main.ts" selftest ;;
     status)
       say "wasm-compiler: $(systemctl is-active "$CUNIT" 2>/dev/null || true)"
-      curl -fsS --unix-socket /run/wasm-compiler/compiler.sock http://compiler/v1/languages 2>/dev/null \
+      sudo curl -fsS --unix-socket /run/wasm-compiler/compiler.sock http://compiler/v1/languages 2>/dev/null \
         | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{for(const l of JSON.parse(s).languages)console.log(`  ${l.id}: ${l.name} ${l.version} ${l.ready?"":"(未セットアップ)"}`)})' || true
       ;;
     logs) journalctl -u "$CUNIT" -n "${1:-50}" --no-pager -o cat ;;

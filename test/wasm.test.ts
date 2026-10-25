@@ -232,7 +232,7 @@ test("run_wasm runs an attached or kept module once, read-only, and points steps
   const fromModule = await run.execute("t", { module: "post" });
   assert.match((fromModule.content[0] as { text: string }).text, /post\(abababababab\) 終了コード 0/);
   assert.deepEqual(loaded, ["post"]);
-  await assert.rejects(run.execute("t", {}), /message_id か module/);
+  await assert.rejects(run.execute("t", {}), /message_id・module・compiled/);
 });
 
 test("rules saved before programs were a union read as a JS or a Wasm program", async () => {
@@ -261,4 +261,171 @@ test("rules saved before programs were a union read as a JS or a Wasm program", 
   } finally {
     store.close();
   }
+});
+
+/** A stand-in for wasm-compiler on a Unix socket: answers like the service does. */
+async function fakeCompiler(answer: (body: { language: string; files: Array<{ path: string; content: string }> }) => object) {
+  const { createServer } = await import("node:http");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const socket = join(mkdtempSync(join(tmpdir(), "wasmc-")), "c.sock");
+  const requests: Array<{ language: string; files: Array<{ path: string; content: string }> }> = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/v1/languages") return res.end(JSON.stringify({ languages: [{ id: "rust", name: "Rust", version: "1+abc", entry: ["src/main.rs"], extensions: [".rs"], paths: "^src/([a-z0-9_]+/)*[a-z0-9_]+\\.rs$", maxFiles: 32, libraries: ["serde_json"], ready: true }, { id: "zig", name: "Zig", version: "1", entry: ["main.zig"], extensions: [".zig"], paths: "^main\\.zig$", maxFiles: 1, libraries: [], ready: false }] }));
+      if (req.url === "/v1/languages/rust/guide") return res.end("# Rust でモジュールを書く");
+      if (req.url === "/v1/compile") {
+        const body = JSON.parse(raw);
+        requests.push(body);
+        return res.end(JSON.stringify(answer(body)));
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "そのAPIはありません" }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  return { socket, requests, close: () => server.close() };
+}
+
+test("a module built from source is checked, held for a while, and kept with its sources", async () => {
+  const { randomBytes } = await import("node:crypto");
+  const { Store } = await import("../src/db.ts");
+  const { WasmRegistry, wasmRef } = await import("../src/wasm/registry.ts");
+  const { CompilerClient, CompilerUnavailable } = await import("../src/wasm/compiler.ts");
+  const built = printer(JSON.stringify({ reply: "hi" }));
+  const fake = await fakeCompiler((body) =>
+    body.files[0]!.content.includes("broken")
+      ? { ok: false, stage: "compile", diagnostics: [{ file: "src/main.rs", line: 2, col: 5, severity: "error", message: "mismatched types" }], log: "src/main.rs:2:5: error[E0308]: mismatched types", durationMs: 100, cached: false, language: "rust", version: "1+abc" }
+      : { ok: true, wasm: Buffer.from(built).toString("base64"), sha256: "x", log: "", durationMs: 900, cached: false, language: "rust", version: "1+abc" },
+  );
+  try {
+    const client = new CompilerClient(fake.socket);
+    assert.deepEqual((await client.refresh()).map((l) => l.id), ["rust", "zig"]);
+    assert.deepEqual(client.languages().map((l) => l.id), ["rust"]); // not set up: left out
+    assert.match(await client.guide("rust"), /Rust/);
+    const store = new Store(":memory:", randomBytes(32));
+    const registry = new WasmRegistry(store, client);
+    const files = [{ path: "src/main.rs", content: "fn main() {}" }];
+
+    const failed = await registry.compile("7", "rust", [{ path: "src/main.rs", content: "broken" }]);
+    assert.ok(!failed.ok);
+    assert.deepEqual(failed.diagnostics.map((d) => `${d.file}:${d.line}`), ["src/main.rs:2"]);
+
+    const ok = await registry.compile("7", "rust", files);
+    assert.ok(ok.ok);
+    const sha = ok.module.info.sha256;
+    // Checked like an upload: the memory cap is written in, so the hash is of the kept bytes.
+    assert.equal(ok.module.info.memory.max, MAX_MEMORY_PAGES);
+    assert.equal(registry.fresh("7", sha.slice(0, 12)).bytes.length, ok.module.bytes.length);
+    // Only the person who built it can use it before it is kept.
+    assert.throws(() => registry.fresh("8", sha), ModuleRejected);
+    // Nothing is kept until asked.
+    assert.deepEqual(registry.list("7"), []);
+    const { module } = await registry.uploadCompiled("7", "pins", sha);
+    assert.deepEqual(module.source, { language: "rust", files: 1 });
+    assert.deepEqual(registry.source(sha), { language: "rust", version: "1+abc", files });
+    assert.deepEqual(wasmRef(module, registry.source(sha)).source, { language: "rust", files });
+    // A plain upload of the same bytes keeps the sources it already has.
+    await registry.upload("7", "pins", ok.module.bytes);
+    assert.deepEqual(registry.list("7")[0]!.source, { language: "rust", files: 1 });
+
+    // The service being away is said plainly.
+    const away = new WasmRegistry(store, new CompilerClient("/nonexistent/c.sock"));
+    await assert.rejects(away.compile("7", "rust", files), CompilerUnavailable);
+    await assert.rejects(new WasmRegistry(store).compile("7", "rust", files), CompilerUnavailable);
+  } finally {
+    fake.close();
+  }
+});
+
+test("compiles are limited per person: one at a time and so many an hour", async () => {
+  const { randomBytes } = await import("node:crypto");
+  const { Store } = await import("../src/db.ts");
+  const { MAX_COMPILES_PER_HOUR, WasmRegistry } = await import("../src/wasm/registry.ts");
+  const outcome = { ok: false, stage: "compile", diagnostics: [], log: "", durationMs: 1, cached: false, language: "rust", version: "1" } as const;
+  let release: () => void = () => {};
+  const client = { compile: () => new Promise((resolve) => (release = () => resolve(outcome))) };
+  const registry = new WasmRegistry(new Store(":memory:", randomBytes(32)), client as never);
+  const files = [{ path: "src/main.rs", content: "" }];
+  const first = registry.compile("7", "rust", files);
+  await assert.rejects(registry.compile("7", "rust", files), /前のコンパイル/);
+  release();
+  await first;
+  const instant = { compile: async () => outcome };
+  const limited = new WasmRegistry(new Store(":memory:", randomBytes(32)), instant as never);
+  for (let i = 0; i < MAX_COMPILES_PER_HOUR; i++) await limited.compile("7", "rust", files);
+  await assert.rejects(limited.compile("7", "rust", files), /1時間/);
+  // Someone else still can.
+  await limited.compile("8", "rust", files);
+});
+
+test("the agent compiles, reads the errors, and keeps or runs what it built", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const built = printer(JSON.stringify({ reply: "built" }));
+  const { prepareModule } = await import("../src/wasm/module.ts");
+  const prepared = await prepareModule(built);
+  const fresh = { ownerId: "1", bytes: prepared.bytes, info: prepared.info, source: { language: "rust", version: "1+abc", files: [{ path: "src/main.rs", content: "fn main() {}" }] }, expires: Date.now() + 60_000 };
+  const compiled: Array<{ language: string; files: Array<{ path: string; content: string }> }> = [];
+  const kept: string[] = [];
+  const message = { id: "5", author: { id: "1" }, attachments: [{ id: "a", filename: "main.rs", size: 12, url: "https://cdn/main.rs" }] };
+  const reader = { guild: { id: "1" }, scope: { speakerId: "1", channelId: "10" }, get: async (route: string) => (route === "/channels/10/messages/5" ? message : null) } as never;
+  const tools = readTools(reader, {
+    images: false,
+    fetch: (async () => new Response("fn main() { attached }")) as never,
+    rules: {
+      list: () => [],
+      runs: () => null,
+      wasm: {
+        list: () => [],
+        upload: async () => { throw new Error("not here"); },
+        load: async () => { throw new Error("not here"); },
+        compiler: {
+          languages: () => [{ id: "rust", name: "Rust", version: "1", entry: ["src/main.rs"], extensions: [".rs"], paths: "^src/([a-z0-9_]+/)*[a-z0-9_]+\\.rs$", maxFiles: 32, libraries: ["serde_json"], ready: true }],
+          guide: async () => "# guide",
+          compile: async (language, files) => {
+            compiled.push({ language, files });
+            return files[0]!.content.includes("broken")
+              ? { ok: false, stage: "compile", diagnostics: [{ file: "src/main.rs", line: 1, col: 13, severity: "error", message: "cannot find value `broken`" }], log: "error: could not compile", durationMs: 50, cached: false, language: "rust", version: "1" }
+              : { ok: true, module: fresh, log: "", durationMs: 1200, cached: false };
+          },
+          fresh: (ref) => {
+            if (!prepared.info.sha256.startsWith(ref)) throw new ModuleRejected("ない");
+            return fresh;
+          },
+          keep: async (name, ref) => {
+            kept.push(`${name}:${ref}`);
+            return { module: { ownerId: "1", sha256: prepared.info.sha256, name, size: prepared.bytes.length, info: prepared.info, createdAt: "2026-10-25T09:00:00Z", source: { language: "rust", files: 1 } }, replaced: 0 };
+          },
+        },
+      },
+    },
+  });
+  const compile = tools.find((t) => t.name === "compile_wasm")!;
+  assert.ok(tools.some((t) => t.name === "wasm_language_guide"));
+  assert.match(compile.description, /rust\(Rust/);
+
+  const failed = (await compile.execute("t", { language: "rust", files: [{ path: "src/main.rs", content: "fn main() { broken }" }] })).content[0] as { text: string };
+  assert.match(failed.text, /コンパイルできませんでした/);
+  assert.match(failed.text, /src\/main\.rs:1:13: error: cannot find value `broken`/);
+
+  // An attached main.rs goes where Rust expects it.
+  const ok = (await compile.execute("t", { language: "rust", message_id: "5" })).content[0] as { text: string };
+  assert.deepEqual(compiled.at(-1)!.files, [{ path: "src/main.rs", content: "fn main() { attached }" }]);
+  assert.match(ok.text, new RegExp(`sha256 ${prepared.info.sha256}`));
+  await assert.rejects(compile.execute("t", { language: "cobol", files: [] }), /cobol/);
+
+  const run = tools.find((t) => t.name === "run_wasm")!;
+  const ran = (await run.execute("t", { compiled: prepared.info.sha256.slice(0, 12) })).content[0] as { text: string };
+  assert.match(ran.text, /コンパイルした rust のモジュール.*終了コード 0/);
+  assert.match(ran.text, /"reply":"built"/);
+
+  const register = tools.find((t) => t.name === "register_wasm")!;
+  await assert.rejects(register.execute("t", { compiled: prepared.info.sha256 }), /name/);
+  const registered = (await register.execute("t", { compiled: prepared.info.sha256, name: "hello" })).content[0] as { text: string };
+  assert.deepEqual(kept, [`hello:${prepared.info.sha256}`]);
+  assert.match(registered.text, /Botがコンパイル/);
 });

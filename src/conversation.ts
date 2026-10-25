@@ -1,5 +1,7 @@
 import type { APIMessage } from "discord-api-types/v10";
 import type { Store, WasmModule } from "./db.ts";
+import type { CompilerLanguage, SourceFile } from "./wasm/compiler.ts";
+import type { CompileResult, FreshModule } from "./wasm/registry.ts";
 import { formatMessage } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
@@ -72,6 +74,14 @@ export interface ConversationDeps {
       upload: (ownerId: string, name: string, bytes: Uint8Array) => Promise<{ module: WasmModule; replaced: number }>;
       /** A module the person may run: their own by name, or one from someone in the server by sha256. */
       load: (ownerId: string, guildId: string, ref: string) => Promise<{ module: WebAssembly.Module; name: string; sha256: string }>;
+      /** Building from source; absent without the compiler service. */
+      compiler?: {
+        languages: () => CompilerLanguage[];
+        guide: (language: string) => Promise<string>;
+        compile: (ownerId: string, language: string, files: SourceFile[], optimize: "size" | "speed") => Promise<CompileResult>;
+        fresh: (ownerId: string, ref: string) => FreshModule;
+        keep: (ownerId: string, name: string, ref: string) => Promise<{ module: WasmModule; replaced: number }>;
+      };
     };
   };
   /** Asks the speaker, with buttons, to let one reply read up to their own permissions. Absent keeps reads to the channel's audience. */
@@ -534,6 +544,17 @@ export class Conversations {
                       list: () => this.deps.rules!.wasm!.list(speaker),
                       upload: (name: string, bytes: Uint8Array) => this.deps.rules!.wasm!.upload(speaker, name, bytes),
                       load: (ref: string) => this.deps.rules!.wasm!.load(speaker, input.guildId, ref),
+                      ...(this.deps.rules.wasm.compiler
+                        ? {
+                            compiler: {
+                              languages: () => this.deps.rules!.wasm!.compiler!.languages(),
+                              guide: (language: string) => this.deps.rules!.wasm!.compiler!.guide(language),
+                              compile: (language: string, files: SourceFile[], optimize: "size" | "speed") => this.deps.rules!.wasm!.compiler!.compile(speaker, language, files, optimize),
+                              fresh: (ref: string) => this.deps.rules!.wasm!.compiler!.fresh(speaker, ref),
+                              keep: (name: string, ref: string) => this.deps.rules!.wasm!.compiler!.keep(speaker, name, ref),
+                            },
+                          }
+                        : {}),
                     },
                   }
                 : {}),

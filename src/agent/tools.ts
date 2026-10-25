@@ -34,7 +34,9 @@ import type { WasmBindings } from "../wasm/run.ts";
 
 /** How much of a one-shot module's stdout the model sees. */
 const MAX_WASM_OUTPUT = 20_000;
-import { sizeLabel } from "../wasm/registry.ts";
+import { FRESH_TTL_MS, sizeLabel } from "../wasm/registry.ts";
+import type { CompileResult, FreshModule } from "../wasm/registry.ts";
+import type { CompilerLanguage, SourceFile } from "../wasm/compiler.ts";
 
 // Phase 1 tools are read-only. Every one of them goes through Reader, which
 // narrows results to what may be shown in the channel the reply goes to.
@@ -140,6 +142,17 @@ export interface WasmTools {
   upload: (name: string, bytes: Uint8Array) => Promise<{ module: WasmModule; replaced: number }>;
   /** A kept module the speaker may run: their own by name, or one from someone in the server by sha256. */
   load: (ref: string) => Promise<{ module: WebAssembly.Module; name: string; sha256: string }>;
+  /** Building from source, when the compiler service is there. */
+  compiler?: {
+    /** Languages it can build now. */
+    languages: () => CompilerLanguage[];
+    guide: (language: string) => Promise<string>;
+    compile: (language: string, files: SourceFile[], optimize: "size" | "speed") => Promise<CompileResult>;
+    /** A module the speaker built and has not kept, by sha256. */
+    fresh: (ref: string) => FreshModule;
+    /** Keeps a module the speaker built, with its sources. */
+    keep: (name: string, ref: string) => Promise<{ module: WasmModule; replaced: number }>;
+  };
 }
 
 export function readTools(reader: Reader, options: ToolOptions = { images: false }): AgentTool<any>[] {
@@ -407,13 +420,14 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     name: "run_wasm",
     label: "Wasmを動かす",
     description: [
-      "Wasmモジュールを登録せずに1回だけ動かし、標準出力・ログ・画像を返します。メッセージに添付された .wasm(だれの添付でも可)か、登録済みのモジュール(話し手のものは名前、同じサーバーの人のものは sha256 12文字以上)を指定します。",
+      "Wasmモジュールを登録せずに1回だけ動かし、標準出力・ログ・画像を返します。メッセージに添付された .wasm(だれの添付でも可)か、登録済みのモジュール(話し手のものは名前、同じサーバーの人のものは sha256 12文字以上)か、compile_wasm で作ったモジュール(compiled に sha256)を指定します。",
       "実行は読み取りだけです。モジュールは WASI のコマンドとして、標準入力で { guild, actor, eventName: null, event: input, batch: null, params: null, state: null } のJSONを読みます(stdin を渡すとその文字列だけ)。Discordの読み取りなどは secretary.call で、範囲は今のチャンネルで扱える分だけです。1回30秒・メモリ64MiBまで。",
       "標準出力が { steps: [...] } なら変更の提案です。実行するには、その steps を propose_plan の steps に渡して確認ダイアログを出します(勝手には実行されません)。reply があれば返答に使えます。",
     ].join("\n"),
     parameters: Type.Object({
       ...WASM_SOURCE,
       module: Type.Optional(Type.String({ description: "登録済みのモジュール名か sha256。message_id の代わりに" })),
+      compiled: Type.Optional(Type.String({ description: "compile_wasm で作ったモジュールの sha256。message_id の代わりに" })),
       input: Type.Optional(Type.Unknown({ description: "標準入力のJSONの event に入れる値" })),
       stdin: Type.Optional(Type.String({ maxLength: 100_000, description: "標準入力にそのまま渡す文字列(input の代わりに)" })),
     }),
@@ -421,7 +435,12 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       if (!wasm) throw new Error("ここでは Wasm を動かせません");
       let module: WebAssembly.Module;
       let label: string;
-      if (params.module) {
+      if (params.compiled) {
+        if (!wasm.compiler) throw new Error("ここではコンパイルできません");
+        const fresh = wasm.compiler.fresh(params.compiled);
+        module = await WebAssembly.compile(fresh.bytes);
+        label = `コンパイルした ${fresh.source.language} のモジュール(${fresh.info.sha256.slice(0, 12)})`;
+      } else if (params.module) {
         const found = await wasm.load(params.module);
         module = found.module;
         label = `${found.name}(${found.sha256.slice(0, 12)})`;
@@ -430,7 +449,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
         const prepared = await prepareModule(bytes);
         module = await WebAssembly.compile(prepared.bytes);
         label = `${filename}(${prepared.info.sha256.slice(0, 12)})`;
-      } else throw new Error("message_id か module のどちらかを指定してください");
+      } else throw new Error("message_id・module・compiled のどれかを指定してください");
       const made: string[] = [];
       const bindings: WasmBindings = {
         ...drawingBindings(made),
@@ -687,7 +706,7 @@ const RULES_DESCRIPTION = [
   "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
   "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
   "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
-  "  wasm: コードの代わりに、アップロードされたWasmモジュールを動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。Wasmは会話で登録できます(/settings の「Wasm」からも登録できます)。一度動かすだけなら登録せずに run_wasm で動かします。話し手が .wasm を添付して使い道を話したら、何をするモジュールか・どう使いたいか(どのきっかけで動かすか、コマンドにするか、何を変更するか)を相談し、決まったら register_wasm で登録してからルール案を出します。登録しただけで済ませたいと言われたら登録だけします。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
+  "  wasm: コードの代わりに、アップロードされたWasmモジュール(Botがソースからコンパイルして登録したものを含む)を動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。Wasmは会話で登録できます(/settings の「Wasm」からも登録できます)。一度動かすだけなら登録せずに run_wasm で動かします。話し手が .wasm を添付して使い道を話したら、何をするモジュールか・どう使いたいか(どのきっかけで動かすか、コマンドにするか、何を変更するか)を相談し、決まったら register_wasm で登録してからルール案を出します。登録しただけで済ませたいと言われたら登録だけします。JavaScript 以外の言語(Rust・Go・C など)で書きたいと頼まれたら、compile_wasm でコンパイルし、register_wasm(compiled と name)で登録してからその名前を wasm に入れます。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
   "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 4 } を加えます。",
   "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
   "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND だけにし、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに作成者の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。変更は作成者の権限で allow の範囲だけ実行されるので、実行した人の権限で絞るときは permissions(例: [\"ManageChannels\"])を付けます。読み取りはそのチャンネルを見られる全員が読めるものに限られます。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
@@ -719,8 +738,9 @@ const WASM_SOURCE = {
 /** The speaker's Wasm modules: listing them, and keeping one attached to a message. */
 function wasmTools(reader: Reader, wasm: WasmTools, fetchFn: typeof fetch): AgentTool<any>[] {
   const describe = (m: WasmModule) =>
-    JSON.stringify({ name: m.name, sha256: m.sha256, size: sizeLabel(m.size), built_with: m.info.producers, uploaded: m.createdAt.slice(0, 16) });
+    JSON.stringify({ name: m.name, sha256: m.sha256, size: sizeLabel(m.size), built_with: m.info.producers, ...(m.source ? { source: `${m.source.language}(${m.source.files}ファイル、Botがコンパイル)` } : {}), uploaded: m.createdAt.slice(0, 16) });
   return [
+    ...(wasm.compiler && wasm.compiler.languages().length ? compileTools(reader, wasm.compiler, fetchFn) : []),
     tool({
       name: "list_wasm",
       label: "Wasmモジュールを見る",
@@ -734,17 +754,103 @@ function wasmTools(reader: Reader, wasm: WasmTools, fetchFn: typeof fetch): Agen
     tool({
       name: "register_wasm",
       label: "Wasmを登録",
-      description: `メッセージに添付された .wasm を話し手のモジュールとして登録します(${MAX_MODULE_BYTES / 1024 / 1024}MBまで)。同じ名前で登録すると新しい版になり、それを使うルールは差し替えるまで古い版のまま動きます。添付したのが話し手本人のメッセージのときだけ使います。登録しただけでは何も動きません。`,
+      description: `メッセージに添付された .wasm か、compile_wasm で作ったモジュール(compiled に sha256、name は必須)を話し手のモジュールとして登録します(${MAX_MODULE_BYTES / 1024 / 1024}MBまで)。コンパイルしたものはソースも一緒に保存されます。同じ名前で登録すると新しい版になり、それを使うルールは差し替えるまで古い版のまま動きます。添付は話し手本人のメッセージのときだけ使います。登録しただけでは何も動きません。`,
       parameters: Type.Object({
         ...WASM_SOURCE,
-        message_id: Type.String(),
-        name: Type.Optional(Type.String({ maxLength: 40, description: "モジュール名。省略時はファイル名" })),
+        compiled: Type.Optional(Type.String({ description: "compile_wasm で作ったモジュールの sha256。message_id の代わりに" })),
+        name: Type.Optional(Type.String({ maxLength: 40, description: "モジュール名。添付なら省略時はファイル名" })),
       }),
       execute: async (_id, params) => {
-        const { bytes, filename, authorId } = await attachedWasm(reader, params, fetchFn);
+        if (params.compiled) {
+          if (!wasm.compiler) throw new Error("ここではコンパイルできません");
+          if (!params.name) throw new Error("compiled で登録するときは name を付けてください");
+          const { module, replaced } = await wasm.compiler.keep(params.name, params.compiled);
+          return text(`登録しました: ${describe(module)}${replaced ? `(同じ名前の古い版${replaced}個は使われていないので消しました)` : ""}`);
+        }
+        if (!params.message_id) throw new Error("message_id か compiled を指定してください");
+        const { bytes, filename, authorId } = await attachedWasm(reader, { ...params, message_id: params.message_id }, fetchFn);
         if (authorId !== reader.scope.speakerId) throw new Error("話し手本人が添付した .wasm だけ登録できます");
         const { module, replaced } = await wasm.upload(params.name ?? filename, bytes);
         return text(`登録しました: ${describe(module)}${replaced ? `(同じ名前の古い版${replaced}個は使われていないので消しました)` : ""}`);
+      },
+    }),
+  ];
+}
+
+const MAX_SOURCE_BYTES = 256 * 1024;
+
+/** Source files attached to a message, placed where the language expects them (main.rs → src/main.rs). */
+async function attachedSources(reader: Reader, ref: { message_id: string; channel_id?: string | undefined }, language: CompilerLanguage, fetchFn: typeof fetch): Promise<SourceFile[]> {
+  const channelId = ref.channel_id ?? reader.scope.channelId;
+  const message = (await reader.get(`/channels/${channelId}/messages/${ref.message_id}`, {})) as APIMessage | null;
+  if (!message) throw new Error("メッセージが見つかりません");
+  const paths = new RegExp(language.paths);
+  const files = message.attachments.filter((a) => language.extensions.some((e) => a.filename.toLowerCase().endsWith(e)));
+  if (files.length === 0) throw new Error(`このメッセージに ${language.extensions.join(" ")} の添付はありません`);
+  if (files.reduce((n, a) => n + a.size, 0) > MAX_SOURCE_BYTES) throw new Error(`ソースは合計${MAX_SOURCE_BYTES / 1024}KBまでです`);
+  return Promise.all(
+    files.map(async (a) => {
+      const path = paths.test(a.filename) ? a.filename : paths.test(`src/${a.filename}`) ? `src/${a.filename}` : null;
+      if (!path) throw new Error(`${a.filename} は置けない名前です(${language.paths})`);
+      const res = await fetchFn(a.url);
+      if (!res.ok) throw new Error(`添付を取得できませんでした(${res.status})`);
+      return { path, content: await res.text() };
+    }),
+  );
+}
+
+/** Building Wasm modules from source with the compiler service. */
+function compileTools(reader: Reader, compiler: NonNullable<WasmTools["compiler"]>, fetchFn: typeof fetch): AgentTool<any>[] {
+  const languages = compiler.languages();
+  const summary = languages.map((l) => `${l.id}(${l.name}、入口 ${l.entry.join(" か ")}、使えるライブラリ: ${l.libraries.join("・") || "標準のみ"})`).join("、");
+  const find = (id: string) => compiler.languages().find((l) => l.id === id) ?? null;
+  return [
+    tool({
+      name: "wasm_language_guide",
+      label: "Wasmの書き方を見る",
+      description: `compile_wasm でソースを書く前に、その言語の書き方(SDK・入出力・置けるファイル・例)を読みます。言語: ${summary}`,
+      parameters: Type.Object({ language: Type.String() }),
+      execute: async (_id, params) => text(await compiler.guide(params.language)),
+    }),
+    tool({
+      name: "compile_wasm",
+      label: "Wasmにコンパイル",
+      description: [
+        `ソースを Wasm モジュールにコンパイルします。言語: ${summary}。`,
+        "コンパイルは Bot とは別のコンパイラで、ネットワークなしの箱の中で行われます。送れるのはソースファイルだけで、Cargo.toml・go.mod・build.rs などのビルド設定や追加のライブラリは指定できません。書く前に wasm_language_guide で書き方を確かめます。",
+        "ソースは files に書くか、メッセージに添付されたソース(message_id)を使います。失敗したらエラーの場所と内容が返るので、直してもう一度呼びます。",
+        `できたモジュールは${FRESH_TTL_MS / 60000}分だけ保持されます。一度動かすなら run_wasm の compiled に、ルールやコマンドに使うなら register_wasm の compiled と name で登録して(ソースも保存されます)、rules の wasm にその名前を入れます。`,
+      ].join("\n"),
+      parameters: Type.Object({
+        language: Type.String({ description: languages.map((l) => l.id).join(" / ") }),
+        files: Type.Optional(Type.Array(Type.Object({ path: Type.String({ maxLength: 200 }), content: Type.String() }), { maxItems: 32, description: "ソースファイル(パスは言語の決まりに合わせる)" })),
+        message_id: Type.Optional(Type.String({ description: "ソースが添付されたメッセージ(files と合わせても可)" })),
+        channel_id: Type.Optional(Type.String({ description: "省略時は今のチャンネル" })),
+        optimize: Type.Optional(Type.Union([Type.Literal("size"), Type.Literal("speed")], { description: "既定は size" })),
+      }),
+      execute: async (_id, params) => {
+        const language = find(params.language);
+        if (!language) throw new Error(`言語 ${params.language} は使えません(${languages.map((l) => l.id).join(", ")})`);
+        const files: SourceFile[] = [...(params.files ?? [])];
+        if (params.message_id) files.push(...(await attachedSources(reader, { message_id: params.message_id, channel_id: params.channel_id }, language, fetchFn)));
+        if (files.length === 0) throw new Error("files か message_id でソースを渡してください");
+        const result = await compiler.compile(language.id, files, params.optimize ?? "size");
+        const located = (d: { file: string; line: number; col: number; severity: string; message: string }) => `${d.file}:${d.line}:${d.col}: ${d.severity}: ${d.message}`;
+        if (!result.ok) {
+          const lines = [`コンパイルできませんでした(${result.stage === "limit" ? "時間か大きさの上限" : result.stage === "link" ? "リンク" : "コンパイル"})。`];
+          if (result.diagnostics.length) lines.push(...result.diagnostics.slice(0, 20).map(located));
+          lines.push(`ログ(末尾):\n${result.log.slice(-3000)}`);
+          return text(lines.join("\n"));
+        }
+        const m = result.module;
+        const warnings = result.log.split("\n").filter((l) => /\bwarning\b/.test(l)).slice(0, 10);
+        return text(
+          [
+            `コンパイルしました(${language.name} ${m.source.version}、${result.cached ? "同じソースの結果を再利用" : `${Math.round(result.durationMs / 100) / 10}秒`}): sha256 ${m.info.sha256} 大きさ ${sizeLabel(m.bytes.length)}`,
+            `${FRESH_TTL_MS / 60000}分だけ保持されます。動かすなら run_wasm の compiled、残すなら register_wasm の compiled と name に sha256 を渡します。`,
+            ...(warnings.length ? [`警告:\n${warnings.join("\n")}`] : []),
+          ].join("\n"),
+        );
       },
     }),
   ];

@@ -53,10 +53,11 @@ export interface RuleServiceDeps {
   now: () => number;
   log: (message: string, error?: unknown) => void;
   /** Explains rule code from the code alone, paid for by the owner. */
-  summarize?: (code: string, ownerId: string, trigger: string) => Promise<string | null>;
+  /** `language` is set for sources compiled to Wasm; JavaScript otherwise. */
+  summarize?: (code: string, ownerId: string, trigger: string, language?: string) => Promise<string | null>;
   /** How likely a command's reply is meant for everyone (0 to 1), by the owner's judge model; null without one. */
   /** Uploaded Wasm modules a rule may run instead of code. */
-  wasm?: Pick<WasmRegistry, "resolve">;
+  wasm?: Pick<WasmRegistry, "resolve" | "source">;
   visibilityScore?: (input: { ownerId: string; command: CommandSpec; options: Record<string, unknown>; reply: string; images: number; steps: number }) => Promise<number | null>;
 }
 
@@ -66,6 +67,7 @@ type DryRunInput = Pick<RuleProposal, "allow" | "trigger" | "params" | "sampleEv
 /** How the dialog and panel describe a module, in place of an explanation of code. */
 export function wasmSummary(ref: WasmRef): string {
   const by = ref.producers.length ? `、${ref.producers.slice(0, 2).join("・")} 製` : "";
+  if (ref.source) return `Botが ${ref.source.language} のソースからコンパイルしたWasmモジュール「${ref.name}」(${sizeLabel(ref.size)}、<@${ref.ownerId}> が登録、sha256 ${ref.sha256.slice(0, 12)})を動かします。`;
   return `アップロードされたWasmモジュール「${ref.name}」(${sizeLabel(ref.size)}${by}、<@${ref.ownerId}> が登録、sha256 ${ref.sha256.slice(0, 12)})を動かします。中身はAIの説明の対象外です。`;
 }
 
@@ -201,7 +203,8 @@ export class RuleService {
       if (proposed.program.kind === "wasm") {
         try {
           if (!this.deps.wasm) throw new ModuleRejected("Wasmのルールはここでは作れません");
-          wasm = wasmRef(this.deps.wasm.resolve(input.ownerId, this.deps.caches.get(input.guildId)?.guild, proposed.program.module));
+          const found = this.deps.wasm.resolve(input.ownerId, this.deps.caches.get(input.guildId)?.guild, proposed.program.module);
+          wasm = wasmRef(found, this.deps.wasm.source(found.sha256));
         } catch (e) {
           own.push(e instanceof Error ? e.message : String(e));
         }
@@ -265,7 +268,13 @@ export class RuleService {
         program: wasm ? { kind: "wasm", module: wasm } : { kind: "js", code: code ?? "" },
         ...(r.params ? { params: r.params } : {}),
         ...(r.limits ? { limits: ruleLimits(r.limits) } : {}),
-        summary: wasm ? wasmSummary(wasm) : r.summary !== undefined ? r.summary : await this.#summarize(code ?? "", input.ownerId, triggerEvents(r.trigger).join("・")),
+        summary: wasm
+          ? wasm.source
+            ? ((await this.#summarize(wasm.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n"), input.ownerId, triggerEvents(r.trigger).join("・"), wasm.source.language)) ?? wasmSummary(wasm))
+            : wasmSummary(wasm)
+          : r.summary !== undefined
+            ? r.summary
+            : await this.#summarize(code ?? "", input.ownerId, triggerEvents(r.trigger).join("・")),
         ...(replaces ? { replaces } : {}),
         dry,
         ...(r.sampleEvent !== undefined ? { sampleEvent: r.sampleEvent } : {}),
@@ -324,10 +333,10 @@ export class RuleService {
     return this.deps.admin.save(guildId, ownerId, definition, draft.replaces?.id).id;
   }
 
-  async #summarize(code: string, ownerId: string, trigger: string): Promise<string | null> {
+  async #summarize(code: string, ownerId: string, trigger: string, language?: string): Promise<string | null> {
     if (!this.deps.summarize) return null;
     try {
-      return await this.deps.summarize(code, ownerId, trigger);
+      return await this.deps.summarize(code, ownerId, trigger, language);
     } catch (e) {
       this.deps.log("ルールのコードの要約に失敗", e);
       return null;

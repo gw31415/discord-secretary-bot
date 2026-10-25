@@ -1,7 +1,7 @@
 import type { API } from "@discordjs/core";
 import { ButtonStyle, ComponentType, InteractionType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
 import type { APIButtonComponent, APIComponentInContainer, APIInteraction, APIModalInteractionResponseCallbackData, APIModalSubmitInteraction } from "discord-api-types/v10";
-import type { WasmModule } from "../db.ts";
+import type { WasmModule, WasmSource } from "../db.ts";
 import { modalValue } from "../discord/modal.ts";
 import { SETTINGS_HOME_ID } from "../rules/panel.ts";
 import type { Rendered } from "../rules/panel.ts";
@@ -10,14 +10,14 @@ import { MAX_BYTES_PER_USER, MAX_MODULES_PER_USER, ModuleRejected, sizeLabel } f
 import type { WasmRegistry } from "./registry.ts";
 
 // The "Wasm" section of /settings: the presser's own modules. A module is
-// usually added in conversation (attached and talked over with the bot); the
-// modal's file field here is the other way in. Either way it only does
+// usually added in conversation (attached, or compiled from source, and
+// talked over with the bot); the modal's file field here is the other way in. Either way it only does
 // something once a rule runs it. Modules belong to the person, like the
 // rest of /settings, so the section is the same in every server.
 
 export const WASM_SECTION_ID = "wasm:home:";
-const ACTIONS = new Set(["home", "open", "upload", "uploaded", "rename", "renamed", "del", "del2"]);
-type WasmAction = "home" | "open" | "upload" | "uploaded" | "rename" | "renamed" | "del" | "del2";
+const ACTIONS = new Set(["home", "open", "upload", "uploaded", "rename", "renamed", "del", "del2", "src"]);
+type WasmAction = "home" | "open" | "upload" | "uploaded" | "rename" | "renamed" | "del" | "del2" | "src";
 
 export function wasmCustomId(action: WasmAction, arg = ""): string {
   return `wasm:${action}:${arg}`;
@@ -46,11 +46,12 @@ const HOW_TO = [
   "登録しただけでは動きません。会話で「このWasmを /xxx コマンドにして」のように頼むと、ルールとして確認画面が出ます。実行はルールの作成者の権限の範囲だけです。",
 ].join("\n");
 
-export function homeView(modules: WasmModule[], usage: (sha: string) => number, notice?: string): Rendered {
+export function homeView(modules: WasmModule[], usage: (sha: string) => number, notice?: string, languages: string[] = []): Rendered {
   const total = modules.reduce((n, m) => n + m.size, 0);
   const texts = [
     "## Wasm",
     HOW_TO,
+    languages.length ? `**ソースから**: ${languages.join("・")} なら、Botにソースを渡す(書いてもらう)とコンパイルして登録できます。コンパイルは Bot とは別の、ネットワークのない箱の中で行います。` : "",
     `-# 上限: 1個${MAX_MODULE_BYTES / 1024 / 1024}MB・一人${MAX_MODULES_PER_USER}個・合計${MAX_BYTES_PER_USER / 1024 / 1024}MB(いま ${modules.length}個・${sizeLabel(total)})。実行は1回30秒・メモリ${MAX_MEMORY_PAGES / 16}MiBまで。`,
     modules.length ? "" : "まだ登録していません。",
     notice ? `-# ${notice}` : "",
@@ -80,6 +81,7 @@ export function detailView(module: WasmModule, latest: boolean, rules: Array<{ n
       `**sha256**: \`${module.sha256}\``,
       `**大きさ**: ${sizeLabel(module.size)} · **メモリ**: ${module.info.memory.min * 64}KiB から最大 ${module.info.memory.max / 16}MiB`,
       `**ビルド**: ${module.info.producers.join("、") || "記載なし"}`,
+      ...(module.source ? [`**ソース**: ${module.source.language}・${module.source.files}ファイル(Botがコンパイル)`] : []),
       `**import**: ${module.info.imports.map((i) => `\`${i}\``).join(" ").slice(0, 900) || "なし"}`,
       `**登録**: <t:${Math.floor(Date.parse(module.createdAt) / 1000)}:f>`,
     ].join("\n"),
@@ -91,8 +93,31 @@ export function detailView(module: WasmModule, latest: boolean, rules: Array<{ n
   ];
   const rows = confirmDelete
     ? [[button(wasmCustomId("del2", module.sha256), "削除する", ButtonStyle.Danger), button(wasmCustomId("open", module.sha256), "やめる")]]
-    : [[button(wasmCustomId("rename", module.sha256), "名前を変える"), button(wasmCustomId("del", module.sha256), "削除", ButtonStyle.Danger), button(wasmCustomId("home"), "← 一覧へ")]];
+    : [
+        [button(wasmCustomId("rename", module.sha256), "名前を変える"), button(wasmCustomId("del", module.sha256), "削除", ButtonStyle.Danger), button(wasmCustomId("home"), "← 一覧へ")],
+        module.source ? [button(wasmCustomId("src", module.sha256), "ソースを見る")] : [],
+      ];
   return view(texts, rows);
+}
+
+const MAX_SOURCE_SHOWN = 3400;
+
+/** The sources a module was compiled from, as much as fits in one message. */
+export function sourceView(module: WasmModule, source: WasmSource): Rendered {
+  let room = MAX_SOURCE_SHOWN;
+  const parts: string[] = [];
+  for (const file of source.files) {
+    const head = `**${file.path}**`;
+    const body = file.content.replace(/```/g, "`\u200b``");
+    if (room < head.length + 40) {
+      parts.push(`-# ほか ${source.files.length - parts.length}ファイル(会話で頼むと全部見せます)`);
+      break;
+    }
+    const shown = body.length > room - head.length - 20 ? `${body.slice(0, room - head.length - 20)}\n…` : body;
+    parts.push(`${head}\n\`\`\`\n${shown}\n\`\`\``);
+    room -= head.length + shown.length + 10;
+  }
+  return view([`## ${module.name} のソース(${source.language} ${source.version})`, ...parts], [[button(wasmCustomId("open", module.sha256), "← 戻る")]]);
 }
 
 function uploadModal(): APIModalInteractionResponseCallbackData {
@@ -153,7 +178,7 @@ export class WasmPanel {
 
   #home(userId: string, notice?: string): Rendered {
     const { registry } = this.#deps;
-    return homeView(registry.list(userId), (sha) => registry.rulesUsing(sha).length, notice);
+    return homeView(registry.list(userId), (sha) => registry.rulesUsing(sha).length, notice, registry.compiler?.languages().map((l) => l.name) ?? []);
   }
 
   #detail(userId: string, sha: string, extra: { confirmDelete?: boolean; notice?: string } = {}): Rendered {
@@ -225,6 +250,12 @@ export class WasmPanel {
         case "del":
           await update(this.#detail(userId, sha, { confirmDelete: true }));
           return true;
+        case "src": {
+          const module = registry.list(userId).find((m) => m.sha256 === sha);
+          const source = module && registry.source(sha);
+          await update(module && source ? sourceView(module, source) : this.#home(userId, "そのモジュールのソースはありません"));
+          return true;
+        }
         case "del2": {
           const module = registry.remove(userId, sha);
           await update(this.#home(userId, `「${module.name}」を削除しました`));

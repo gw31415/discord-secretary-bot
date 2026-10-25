@@ -26,13 +26,15 @@ import { RuleService } from "./rules/service.ts";
 import { TRIGGER_INTENTS, TRIGGERS } from "./rules/triggers.ts";
 import { precompileJs, precompileJsEngine, setBytecodeCache } from "./sandbox.ts";
 import { WasmRegistry } from "./wasm/registry.ts";
+import { CompilerClient } from "./wasm/compiler.ts";
 import { WasmPanel } from "./wasm/panel.ts";
 import { warmWorkers } from "./wasm/run.ts";
 
 const config = loadConfig();
 const store = new Store(config.dbPath, config.masterKey);
 const caches = new GuildCaches();
-const wasm = new WasmRegistry(store);
+const compiler = config.compilerSocket ? new CompilerClient(config.compilerSocket) : undefined;
+const wasm = new WasmRegistry(store, compiler);
 setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data) });
 
 function served(guildId: string | undefined): guildId is string {
@@ -149,12 +151,12 @@ const rules = new RuleService({
   selfId: () => selfId,
   now: () => Date.now(),
   log,
-  summarize: async (code, ownerId, trigger) => {
+  summarize: async (code, ownerId, trigger, language) => {
     const ref = store.getSettings(ownerId).response;
     const model = ref && findChatModel(ref.provider, ref.model);
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
     if (!model || !apiKey) return null;
-    return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger } });
+    return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger }, ...(language ? { language } : {}) });
   },
   visibilityScore: async ({ ownerId, command, options, reply, images, steps }) => {
     const ref = judgeRef(store.getSettings(ownerId));
@@ -206,6 +208,17 @@ const conversations = new Conversations({
         const found = wasm.resolve(ownerId, caches.get(guildId)?.guild, ref);
         return { module: await wasm.compiled(found.sha256), name: found.name, sha256: found.sha256 };
       },
+      ...(compiler
+        ? {
+            compiler: {
+              languages: () => compiler.languages(),
+              guide: (language) => compiler.guide(language),
+              compile: (ownerId, language, files, optimize) => wasm.compile(ownerId, language, files, optimize),
+              fresh: (ownerId, ref) => wasm.fresh(ownerId, ref),
+              keep: (ownerId, name, ref) => wasm.uploadCompiled(ownerId, name, ref),
+            },
+          }
+        : {}),
     },
   },
   askWiden: (input) => widenPrompts.ask(input),
@@ -397,6 +410,12 @@ warmWorkers();
     }
   }
   if (compiled) log(`ルールのコード ${compiled} 件をコンパイルしました`);
+}
+if (compiler) {
+  await compiler
+    .refresh()
+    .then((languages) => log(`コンパイラ: ${languages.map((l) => `${l.id}${l.ready ? "" : "(未セットアップ)"}`).join(", ") || "言語なし"}`))
+    .catch((e) => log("コンパイラにつながりません(ソースからのコンパイルは使えません)", e));
 }
 await wasm.precompileUsed().then((n) => n && log(`Wasmモジュール ${n} 個をコンパイルしました`)).catch((e) => log("Wasmモジュールのコンパイルに失敗", e));
 

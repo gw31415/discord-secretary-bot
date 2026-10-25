@@ -30,8 +30,8 @@ export interface FreshModule {
 
 export type CompileResult = { ok: true; module: FreshModule; log: string; durationMs: number; cached: boolean } | Extract<CompileOutcome, { ok: false }>;
 
-export function wasmRef(module: WasmModule): WasmRef {
-  return { sha256: module.sha256, name: module.name, size: module.size, ownerId: module.ownerId, producers: module.info.producers };
+export function wasmRef(module: WasmModule, source?: WasmSource): WasmRef {
+  return { sha256: module.sha256, name: module.name, size: module.size, ownerId: module.ownerId, producers: module.info.producers, ...(source ? { source: { language: source.language, files: source.files } } : {}) };
 }
 
 export function sizeLabel(bytes: number): string {
