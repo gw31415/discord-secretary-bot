@@ -1,0 +1,14 @@
+{
+  "id": "zig",
+  "name": "Zig",
+  "version": "1",
+  "toolchain": "zig-0.17.0",
+  "rootfs": "base",
+  "entry": ["main.zig"],
+  "extensions": [".zig"],
+  "paths": "^([a-z0-9_]+/)*[a-z0-9_]+\\.zig$",
+  "maxFiles": 32,
+  "timeoutMs": 120000,
+  "abi": ["secretary/1"],
+  "libraries": ["標準ライブラリ", "secretary"]
+}

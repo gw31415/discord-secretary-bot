@@ -1,0 +1,14 @@
+{
+  "id": "nim",
+  "name": "Nim",
+  "version": "1",
+  "toolchain": "nim-2.2.12",
+  "rootfs": "base",
+  "entry": ["main.nim"],
+  "extensions": [".nim"],
+  "paths": "^([a-z0-9_]+/)*[a-z0-9_]+\\.nim$",
+  "maxFiles": 32,
+  "timeoutMs": 120000,
+  "abi": ["secretary/1"],
+  "libraries": ["標準ライブラリ", "secretary"]
+}

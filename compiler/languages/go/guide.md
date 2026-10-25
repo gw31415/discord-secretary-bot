@@ -1,9 +1,9 @@
 # Go でモジュールを書く
 
-Go 1.25 の `GOOS=wasip1 GOARCH=wasm` です。モジュール名は `bot` で、`main.go`(package main)が入口です。サブパッケージは `bot/<dir>` で import できます。go.mod は書けず、使えるのは標準ライブラリと SDK(`bot/secretary`)だけです。cgo・go generate は動きません。
+TinyGo 0.43(Go 1.25)の `-target=wasip1` です。モジュール名は `bot` で、`main.go`(package main)が入口です。サブパッケージは `bot/<dir>` で import できます。go.mod は書けず、使えるのは標準ライブラリと SDK(`bot/secretary`)だけです。cgo・go generate は動きません。標準ライブラリは TinyGo が対応している範囲で使えます(`reflect` の一部、`encoding/json` は動きます。goroutine は動きますが並列にはなりません)。
 
 - 実行時は標準入出力・時計・乱数だけ。ファイル・ネットワークはありません。メモリは64MiBまで
-- できるモジュールは2〜3MBと大きめです(上限8MB)
+- できるモジュールは数百KBです
 
 ## SDK
 

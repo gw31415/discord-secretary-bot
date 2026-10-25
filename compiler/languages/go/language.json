@@ -1,14 +1,14 @@
 {
   "id": "go",
-  "name": "Go",
-  "version": "1",
-  "toolchain": "go-1.25.3",
+  "name": "Go(TinyGo)",
+  "version": "2",
+  "toolchain": "tinygo-0.43.0",
   "rootfs": "base",
   "entry": ["main.go"],
   "extensions": [".go"],
   "paths": "^([a-z0-9_]+/)*[A-Za-z0-9_]+\\.go$",
   "maxFiles": 32,
-  "timeoutMs": 120000,
+  "timeoutMs": 180000,
   "abi": ["secretary/1"],
-  "libraries": ["標準ライブラリ", "bot/secretary"]
+  "libraries": ["標準ライブラリ(TinyGo が対応している範囲)", "bot/secretary"]
 }
