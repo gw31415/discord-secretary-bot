@@ -218,6 +218,22 @@ export function missingPermissions(guild: GuildState, member: MemberState, allow
   return [...missing];
 }
 
+/**
+ * What an allow list permits that its owner (named `who`) or the bot does not
+ * hold now. Checked when a rule is approved, and again before each run.
+ */
+export function ownerAllowProblems(guild: GuildState, ownerId: string, selfId: string, allow: AllowEntry[], who = "あなた"): string[] {
+  const owner = guild.members.get(ownerId);
+  if (!owner) return [`${who}がサーバーのメンバーとして見つかりません`];
+  const problems: string[] = [];
+  const missing = missingPermissions(guild, owner, allow);
+  if (missing.length > 0) problems.push(`許す操作に必要な権限を${who}が持っていません: ${missing.join(", ")}`);
+  const bot = guild.members.get(selfId);
+  const botMissing = bot ? missingPermissions(guild, bot, allow) : ["(Botの情報がありません)"];
+  if (botMissing.length > 0) problems.push(`許す操作に必要な権限をBotが持っていません: ${botMissing.join(", ")}`);
+  return problems;
+}
+
 export function allowRisk(allow: AllowEntry[]): Risk {
   return maxRisk(
     allow.map((entry) => {

@@ -3,6 +3,7 @@ import type { Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { toChannel } from "../discord/cache.ts";
 import { canView } from "../discord/permissions.ts";
+import { ownerAllowProblems } from "./allow.ts";
 import type { GuildState } from "../discord/permissions.ts";
 import type { Reader, ReadScope } from "../discord/reader.ts";
 import { CATALOG } from "../plan/catalog.ts";
@@ -383,7 +384,24 @@ export class RuleEngine {
     if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId)) return null;
     const actor = actorId ?? rule.ownerId;
     const command = actorId !== undefined;
+    const guild = this.deps.caches.get(rule.guildId)?.guild;
+    if (!guild) return null;
+    // Checked again now, not only when the events came: a debounced, held-back or queued run
+    // may start well after them, and roles can change in between.
+    const visible = batch.filter((item) => this.#visible(rule, guild, item.eventName, item.event, actor));
+    if (visible.length === 0) return command ? { outcome: "skipped", error: "このチャンネルを見られる人として確認できないため、ここでは動きません", reply: null, images: [], steps: 0 } : null;
+    batch = visible;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
+    // The owner must still hold everything the rule allows, as at approval, even when someone else ran its command.
+    const owned = ownerAllowProblems(guild, rule.ownerId, this.deps.selfId(), rule.allow, "ルールの作成者");
+    if (owned.length > 0) {
+      const error = owned.join("\n").slice(0, MAX_ERROR);
+      store.finishRuleRun(runId, { outcome: "rejected", error, logs: [] });
+      store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome: "rejected", event: eventId, version }, undefined, rule.id);
+      // This is the rule's own problem, so it counts toward switching the rule off.
+      this.#settle(rule, true, error);
+      return { outcome: "rejected", error, reply: null, images: [], steps: 0 };
+    }
     const last = batch.at(-1)!;
     const result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND", actor);
     const reply = result.reply ?? null;
@@ -408,7 +426,7 @@ export class RuleEngine {
       const done = await this.deps.planner.runForRule({
         guildId: rule.guildId,
         actorId: actor,
-        rule: { id: rule.id, version: rule.version, name: rule.name, eventId, allow: rule.allow },
+        rule: { id: rule.id, version: rule.version, name: rule.name, eventId, ownerId: rule.ownerId, allow: rule.allow },
         drafts: result.drafts,
         ...(images.length ? { images: Object.fromEntries(images.map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }])) } : {}),
       });

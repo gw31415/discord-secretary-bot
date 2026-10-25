@@ -96,6 +96,11 @@ export interface PlanRule {
   version: number;
   name: string;
   eventId: string;
+  /**
+   * Who made the rule. A command runs as whoever used it, but its owner must
+   * still hold everything the allow list permits. Older plans lack it; the actor is the owner there.
+   */
+  ownerId?: string;
   /** What the rule's owner approved; every step must fit one entry, checked again with real values. */
   allow: AllowEntry[];
 }
