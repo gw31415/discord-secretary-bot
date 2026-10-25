@@ -53,6 +53,8 @@ export interface RespondInput {
   widen?: (reason: string) => Promise<boolean>;
   /** Judgments by the speaker's judge model (or language model). */
   decide?: Decide;
+  /** Asks the speaker whether to go on past the turn limit. Absent stops there. */
+  askContinue?: (turns: number) => Promise<boolean>;
 }
 
 export interface RespondResult {
@@ -114,6 +116,11 @@ export class Inbox {
 }
 
 const MAX_TURNS = 12;
+/** Writing code to compile goes compile → read the errors → fix, a turn each, so it gets more room. */
+const MAX_TURNS_COMPILING = 24;
+const COMPILING_TOOLS = new Set(["compile_wasm"]);
+/** Times the speaker may let one reply go on past its turn limit. */
+const MAX_CONTINUES = 3;
 const MAX_REACTIONS = 3;
 /** Progress posts per answer; past this the agent works quietly. */
 const MAX_PROGRESS = 6;
@@ -233,6 +240,15 @@ function hasToolCalls(m: AssistantMessage): boolean {
 }
 
 /** The answer: the last text the agent wrote without going on to use a tool. */
+/** Whether the run stopped before the agent wrote its answer. */
+function unanswered(messages: AgentMessage[]): boolean {
+  try {
+    return !lastAssistantText(messages);
+  } catch {
+    return true;
+  }
+}
+
 function lastAssistantText(messages: AgentMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i] as AssistantMessage;
@@ -303,13 +319,20 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   });
 
   let turns = 0;
+  // Turns allowed from roundStart; the speaker can start another round at the limit.
+  let budget = MAX_TURNS;
+  let roundStart = 0;
+  const atLimit = () => turns - roundStart >= budget;
   let progress = 0;
   let retries = 0;
   const toolCalls: string[] = [];
   const toolErrors: { tool: string; error: string }[] = [];
   agent.subscribe(async (event) => {
-    if (event.type === "turn_end" && ++turns >= MAX_TURNS) agent.abort();
-    if (event.type === "tool_execution_start") toolCalls.push(event.toolName);
+    if (event.type === "turn_end" && (++turns, atLimit())) agent.abort();
+    if (event.type === "tool_execution_start") {
+      toolCalls.push(event.toolName);
+      if (COMPILING_TOOLS.has(event.toolName)) budget = MAX_TURNS_COMPILING;
+    }
     if (event.type === "tool_execution_end" && event.isError) {
       toolErrors.push({ tool: event.toolName, error: errorText(event.result).slice(0, 300) });
     }
@@ -328,27 +351,42 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   try {
     const images = seesImages && input.images?.length ? await downloadImages(input.images, input.fetch) : [];
     input.inbox?.open(steer);
-    const canRetry = () => turns < MAX_TURNS && !input.signal?.aborted;
-    await agent.prompt(userPrompt(input), images.length > 0 ? images : undefined);
-    retries += await retryFailedCall(agent, canRetry);
-    // A message that came in as the agent finished still gets read.
-    while (agent.hasQueuedMessages() && turns < MAX_TURNS) {
-      const queued = agent.peekQueuedMessages();
-      agent.clearAllQueues();
-      await agent.prompt(queued);
+    const canRetry = () => !atLimit() && !input.signal?.aborted;
+    const drain = async () => {
       retries += await retryFailedCall(agent, canRetry);
+      // A message that came in as the agent finished still gets read.
+      while (agent.hasQueuedMessages() && !atLimit()) {
+        const queued = agent.peekQueuedMessages();
+        agent.clearAllQueues();
+        await agent.prompt(queued);
+        retries += await retryFailedCall(agent, canRetry);
+      }
+    };
+    await agent.prompt(userPrompt(input), images.length > 0 ? images : undefined);
+    await drain();
+    // At the limit with no answer yet, the speaker may let it go on from where it stopped.
+    for (let asked = 0; asked < MAX_CONTINUES && atLimit() && unanswered(agent.state.messages) && input.askContinue && !input.signal?.aborted; asked++) {
+      if (!(await input.askContinue(turns))) break;
+      const last = agent.state.messages.at(-1) as AssistantMessage | undefined;
+      if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) agent.state.messages = agent.state.messages.slice(0, -1);
+      roundStart = turns;
+      await agent.continue();
+      await drain();
     }
   } finally {
     input.inbox?.close();
   }
+  const capped = atLimit();
   let text: string;
   try {
     text = lastAssistantText(agent.state.messages);
   } catch (e) {
-    throw new ReplyFailed(e instanceof Error ? e.message : String(e), { turns, toolCalls, retries });
+    // Stopping at the turn limit aborts the call in flight; that is the limit, not a lost connection.
+    if (!capped) throw new ReplyFailed(e instanceof Error ? e.message : String(e), { turns, toolCalls, retries });
+    text = "";
   }
   const extra = retries > 0 ? { retries } : {};
-  if (!text && turns >= MAX_TURNS) {
+  if (!text && capped) {
     return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors, reactions, ...extra };
   }
   return { text, progress, turns, toolCalls, toolErrors, reactions, ...extra };

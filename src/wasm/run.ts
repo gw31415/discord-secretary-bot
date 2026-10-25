@@ -170,6 +170,26 @@ export function warmWorkers(count = 2): void {
   while (idle.length < Math.min(count, MAX_IDLE_WORKERS)) idle.push(spawn());
 }
 
+// V8 compiles a module's functions the first time they are called, so a
+// module's first run takes 5 to 70 ms more than the next ones (more for big
+// modules such as Go's). Once per module, a run with a made-up input and a
+// host that refuses every request does that before the first event. Whatever
+// it writes is thrown away, and it can reach nothing: every request fails.
+const WARM_TIME_MS = 2_000;
+const warmed = new WeakSet<WebAssembly.Module>();
+let warming: Promise<void> = Promise.resolve();
+
+/** Runs the program once, in the background and one module at a time, so its first real run is not its slowest. */
+export function warmUp(program: Program): Promise<void> {
+  if (warmed.has(program.module)) return warming;
+  warmed.add(program.module);
+  const input = new TextEncoder().encode(JSON.stringify({ guild: "0", actor: { kind: "user", userId: "0" }, eventName: null, event: null, batch: [], params: null, state: null }));
+  const stdin = program.prefix ? Buffer.concat([program.prefix, input]) : input;
+  const refuse = async () => JSON.stringify({ error: "準備のための実行です" });
+  warming = warming.then(() => execute(program.module, stdin, refuse, WARM_TIME_MS).then(() => undefined, () => undefined));
+  return warming;
+}
+
 /** What an uploaded module reads on stdin. */
 export function wasmInput(bindings: SandboxBindings): string {
   return JSON.stringify({

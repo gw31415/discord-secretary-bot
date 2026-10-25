@@ -1,0 +1,46 @@
+# The compiler service, apart from the bot: its own user, no network, no home
+# directories, capped memory and CPU. Each build also runs in its own
+# bubblewrap box (compiler/src/sandbox.ts). `botctl compiler install` writes this
+# to /etc/systemd/system.
+[Unit]
+Description=wasm-compiler (source to Wasm for discord-secretary-bot)
+
+[Service]
+Type=simple
+User=wasmc
+Group=wasmc
+SupplementaryGroups=wasm-compiler-clients
+Environment=WASM_COMPILER_HOME=/opt/wasm-compiler
+Environment=WASM_COMPILER_JOBS=/var/lib/wasm-compiler/jobs
+Environment=WASM_COMPILER_SOCKET=/run/wasm-compiler/compiler.sock
+EnvironmentFile=/opt/wasm-compiler/env
+ExecStart=/opt/wasm-compiler/node /opt/wasm-compiler/app/src/main.ts serve
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=wasm-compiler
+RuntimeDirectoryMode=0755
+StateDirectory=wasm-compiler
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+# Left out on purpose, as they stop bwrap making the box: ProtectHostname (its
+# seccomp filter refuses naming the box's own UTS namespace) and
+# ProtectKernelTunables/ProtectKernelLogs (their mounts over /proc forbid a
+# fresh /proc inside it). The service is not root, so /proc/sys and the kernel
+# log stay out of its reach anyway.
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryMax=3G
+CPUQuota=150%
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target

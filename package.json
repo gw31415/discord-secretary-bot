@@ -5,8 +5,8 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "node src/index.ts",
-    "check": "tsc --noEmit",
-    "test": "node --test \"test/**/*.test.ts\""
+    "check": "tsc --noEmit && tsc -p compiler",
+    "test": "node --test \"test/**/*.test.ts\" \"compiler/test/**/*.test.ts\""
   },
   "repository": {
     "type": "git",

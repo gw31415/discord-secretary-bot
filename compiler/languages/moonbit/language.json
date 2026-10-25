@@ -1,0 +1,14 @@
+{
+  "id": "moonbit",
+  "name": "MoonBit",
+  "version": "1",
+  "toolchain": "moonbit-0.10.17",
+  "rootfs": "base",
+  "entry": ["main.mbt"],
+  "extensions": [".mbt"],
+  "paths": "^[a-z0-9_]+\\.mbt$",
+  "maxFiles": 32,
+  "timeoutMs": 120000,
+  "abi": ["secretary/1"],
+  "libraries": ["moonbitlang/core", "bot/main/secretary"]
+}

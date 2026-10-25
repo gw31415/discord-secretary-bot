@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+
 export interface Config {
   discordToken: string;
   applicationId: string;
@@ -6,6 +8,8 @@ export interface Config {
   /** 32-byte key that wraps every per-key DEK. */
   masterKey: Buffer;
   dbPath: string;
+  /** wasm-compiler's socket; unset when there is none, and then nothing is built from source. */
+  compilerSocket?: string;
 }
 
 function required(name: string): string {
@@ -25,5 +29,15 @@ export function loadConfig(): Config {
     allowedGuildIds: new Set((process.env.DISCORD_GUILD_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean)),
     masterKey,
     dbPath: process.env.DB_PATH ?? "data/bot.db",
+    ...compilerSocket(),
   };
+}
+
+const DEFAULT_COMPILER_SOCKET = "/run/wasm-compiler/compiler.sock";
+
+/** WASM_COMPILER_SOCKET, or the service's usual socket when it is there; "" turns it off. */
+function compilerSocket(): { compilerSocket?: string } {
+  const set = process.env.WASM_COMPILER_SOCKET;
+  if (set !== undefined) return set ? { compilerSocket: set } : {};
+  return existsSync(DEFAULT_COMPILER_SOCKET) ? { compilerSocket: DEFAULT_COMPILER_SOCKET } : {};
 }

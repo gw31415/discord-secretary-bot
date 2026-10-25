@@ -1,7 +1,7 @@
 import { ButtonStyle, ComponentType, MessageFlags } from "discord-api-types/v10";
 import type { APIButtonComponent, APIComponentInContainer, APIMessageTopLevelComponent } from "discord-api-types/v10";
 import { VISIBILITY_CHOICES } from "./command.ts";
-import type { AuditEntry, PlanRow } from "../db.ts";
+import type { AuditEntry, PlanRow, WasmSource } from "../db.ts";
 import { RISK_LABEL } from "../plan/types.ts";
 import type { RuleDryRun } from "../plan/types.ts";
 import { allowLines, allowRisk, valueText } from "./allow.ts";
@@ -55,6 +55,27 @@ const MAX_CODE = 1500;
 const MAX_TOTAL = 3900;
 
 export type Rendered = { flags: number; components: APIMessageTopLevelComponent[] };
+
+/** The code fence's language for a compiled module's source. */
+export function fenceLanguage(language: string): string {
+  return language === "c" ? "c" : language === "rust" ? "rust" : language === "go" ? "go" : "";
+}
+
+/** A compiled module's source files, cut to `max` characters in all. */
+export function sourceText(source: WasmSource, max: number): string[] {
+  let room = max;
+  const out: string[] = [];
+  for (const f of source.files) {
+    if (room <= 0) {
+      out.push(`-# ほか ${f.path} など(続きは「ファイルで」)`);
+      break;
+    }
+    const shown = f.content.length > room ? `${f.content.slice(0, room)}\n// …(続きは「ファイルで」)` : f.content;
+    room -= shown.length;
+    out.push(`\`${f.path}\`\n${fenced(fenceLanguage(source.language), shown)}`);
+  }
+  return out;
+}
 
 function fenced(lang: string, body: string): string {
   return `\`\`\`${lang}\n${body.replaceAll("```", "`​``")}\n\`\`\``;
@@ -219,6 +240,8 @@ export interface DetailInput {
   confirmDelete?: boolean;
   /** What the rule keeps between runs; null when nothing. */
   state?: unknown;
+  /** The source of a Wasm rule's module, when the bot compiled it. */
+  wasmSource?: WasmSource;
 }
 
 const MAX_STATE_SHOWN = 600;
@@ -292,12 +315,14 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   } else if (page === "source") {
     texts.push(
       `**元の依頼**\n${clip(rule.sourcePrompt, 300)}`,
-      rule.program.kind === "wasm"
-        ? `**Wasmモジュール**を動かします\n${fenced("", `sha256 ${rule.program.sha256}`)}\n-# 中身は /settings の「Wasm」で、登録した人が確かめられます。`
-        : fenced("js", rule.program.code.length > MAX_CODE ? `${rule.program.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.program.code),
+      ...(rule.program.kind === "js"
+        ? [fenced("js", rule.program.code.length > MAX_CODE ? `${rule.program.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.program.code)]
+        : input.wasmSource
+          ? [`**Wasmモジュール**(${input.wasmSource.language} のソースからBotがコンパイル、sha256 \`${rule.program.sha256.slice(0, 12)}\`)`, ...sourceText(input.wasmSource, MAX_CODE)]
+          : [`**Wasmモジュール**を動かします\n${fenced("", `sha256 ${rule.program.sha256}`)}\n-# アップロードされたモジュールなので、ソースはありません。`]),
     );
     if (input.can.owner) texts.push(`-# 直すときは会話でBotに「ルール \`${rule.id}\`(${rule.name})を〜に直して」と頼みます。`);
-    if (rule.program.kind === "js") buttons.push(button(ruleCustomId("code", rule.id), "ファイルで"));
+    if (rule.program.kind === "js" || input.wasmSource) buttons.push(button(ruleCustomId("code", rule.id), "ファイルで"));
   } else {
     texts.push(`**最近の実行**\n${input.runs.length > 0 ? input.runs.map(runLine).join("\n") : "まだありません"}`);
     const hasState = input.state !== undefined && input.state !== null;

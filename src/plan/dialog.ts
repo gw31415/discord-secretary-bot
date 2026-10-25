@@ -9,7 +9,7 @@ import type {
 } from "discord-api-types/v10";
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
-import { limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
+import { fenceLanguage, limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
 import { VISIBILITY_CHOICES } from "../rules/command.ts";
 import type { Body } from "./catalog.ts";
 import { dialogFileName } from "./files.ts";
@@ -311,25 +311,27 @@ function fenced(lang: string, body: string): string {
 }
 
 function codeBody(plan: Plan, room: number): string[] {
-  const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string }> = [
+  const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string; lang?: string }> = [
     ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
     ...(plan.rules ?? []).map((r) => ({
-      title: r.program.kind === "wasm" ? `ルール「${r.name}」が動かすWasm` : `ルール「${r.name}」のコードの説明`,
-      code: r.program.kind === "js" ? r.program.code : "",
-      ...(r.program.kind === "wasm" ? { wasm: `sha256 ${r.program.module.sha256}${r.program.module.producers.length ? `\nビルド: ${r.program.module.producers.join("、")}` : ""}` } : {}),
+      title: r.program.kind === "wasm" ? `ルール「${r.name}」が動かすWasm${r.program.module.source ? `(${r.program.module.source.language} からBotがコンパイル)` : ""}` : `ルール「${r.name}」のコードの説明`,
+      code: r.program.kind === "js" ? r.program.code : r.program.module.source ? r.program.module.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n") : "",
+      ...(r.program.kind === "wasm" && !r.program.module.source ? { wasm: `sha256 ${r.program.module.sha256}${r.program.module.producers.length ? `\nビルド: ${r.program.module.producers.join("、")}` : ""}` } : {}),
+      ...(r.program.kind === "wasm" && r.program.module.source ? { lang: fenceLanguage(r.program.module.source.language) } : {}),
       summary: r.replaces?.before && r.summary ? `変更前: ${r.replaces.before.summary ?? "説明はありません"}\n変更後: ${r.summary}` : r.summary,
     })),
   ];
   const share = Math.floor(room / Math.max(1, parts.length));
-  return parts.flatMap(({ title, code, summary, wasm }) => {
+  return parts.flatMap(({ title, code, summary, wasm, lang }) => {
     if (wasm) return [`**${title}**\n${summary ?? ""}`, fenced("", wasm)];
     const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
     const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
     const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;
-    return [`**${title}**\n${explained}`, fenced("js", shown)];
+    return [`**${title}**\n${explained}`, fenced(lang ?? "js", shown)];
   });
 }
 
+/** The code block language for a compiler language id. */
 function replyLine(r: PlanRuleDraft): string {
   const images = r.dry.images ? `(画像${r.dry.images}枚)` : "";
   return r.dry.reply || images ? `\n　返事: ${(r.dry.reply ?? "").slice(0, 200)}${images}` : "";

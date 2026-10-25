@@ -8,6 +8,7 @@
 #   botctl rollback            put production back on the commit it ran before
 #   botctl logs prod|dev [n]   recent log lines
 #   botctl install             one-time setup of the layout and the units
+#   botctl compiler ...        the Wasm compiler service (botctl compiler help)
 #
 # Production only runs a commit that dev is running. Before every production
 # change the database is copied to prod/data/backups; if the new commit does not
@@ -178,6 +179,67 @@ cmd_install() {
   say "設置しました。prod/.env と dev/.env を用意してから: sudo systemctl enable --now $UNIT@prod $UNIT@dev"
 }
 
+# --- wasm-compiler ------------------------------------------------------------
+# A service of its own (deploy/wasm-compiler.service): user wasmc, code and
+# toolchains under /opt/wasm-compiler (root-owned, so the service cannot change
+# them), and a socket the bot reaches through the wasm-compiler-clients group.
+CHOME=/opt/wasm-compiler
+CUNIT=wasm-compiler
+
+compiler_node() { sudo env WASM_COMPILER_HOME="$CHOME" WASM_COMPILER_JOBS=/var/tmp/wasm-compiler-setup "$CHOME/node" "$CHOME/app/src/main.ts" "$@"; }
+
+cmd_compiler() {
+  local sub="${1:-status}" src
+  shift || true
+  case "$sub" in
+    install)
+      # Code from a clone (default: what production runs), copied so the service never reads a home directory.
+      src="${1:-$ROOT/prod}"
+      [[ -d "$src/compiler/src" ]] || die "$src/compiler がありません"
+      getent group wasm-compiler-clients >/dev/null || sudo groupadd --system wasm-compiler-clients
+      id wasmc >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin wasmc
+      id -nG "$(id -un)" | grep -qw wasm-compiler-clients || sudo usermod -aG wasm-compiler-clients "$(id -un)"
+      sudo install -d -m 755 "$CHOME" "$CHOME/toolchains" "$CHOME/rootfs"
+      sudo rm -rf "$CHOME/app.new"
+      sudo cp -r "$src/compiler" "$CHOME/app.new"
+      sudo rm -rf "$CHOME/app.old"
+      [[ -d "$CHOME/app" ]] && sudo mv "$CHOME/app" "$CHOME/app.old"
+      sudo mv "$CHOME/app.new" "$CHOME/app"
+      sudo chown -R root:root "$CHOME/app"
+      sudo chmod -R u=rwX,go=rX "$CHOME/app"
+      sudo install -m 755 "$NODE" "$CHOME/node"
+      # Its own bwrap, so the AppArmor profile that lets it make user namespaces covers nothing else.
+      sudo install -D -m 755 /usr/bin/bwrap "$CHOME/bin/bwrap"
+      if [[ -d /sys/kernel/security/apparmor && -d /etc/apparmor.d ]]; then
+        sudo install -m 644 "$src/deploy/apparmor/wasm-compiler-bwrap" /etc/apparmor.d/wasm-compiler-bwrap
+        sudo apparmor_parser -r /etc/apparmor.d/wasm-compiler-bwrap
+      fi
+      printf 'WASM_COMPILER_SOCKET_GID=%s\nBWRAP=%s\n' "$(getent group wasm-compiler-clients | cut -d: -f3)" "$CHOME/bin/bwrap" | sudo tee "$CHOME/env" >/dev/null
+      sudo install -m 644 "$src/deploy/$CUNIT.service" "/etc/systemd/system/$CUNIT.service"
+      sudo systemctl daemon-reload
+      sudo systemctl enable -q "$CUNIT"
+      sudo systemctl restart "$CUNIT"
+      say "wasm-compiler を $(git -C "$src" log -1 --format='%h %s') にしました"
+      ;;
+    rootfs) command -v mmdebstrap >/dev/null || sudo apt-get install -y -q mmdebstrap; compiler_node rootfs "${1:-base}" ;;
+    setup) [[ $# -gt 0 ]] || die "言語を指定してください(c, rust, go, moonbit, zig, nim など)"; for lang in "$@"; do compiler_node setup "$lang"; done; sudo systemctl restart "$CUNIT" ;;
+    # As a unit with the service's own limits (read from its unit file), so it meets the same AppArmor, seccomp and mounts.
+    selftest)
+      local props=()
+      while IFS= read -r line; do props+=(-p "$line"); done < <(grep -E '^(NoNewPrivileges|Protect|Private|Restrict|Lock|Memory|CPU|Tasks)' "/etc/systemd/system/$CUNIT.service")
+      sudo systemd-run --quiet --wait --pipe --collect -p User=wasmc -p EnvironmentFile="$CHOME/env" -p StateDirectory=wasm-compiler "${props[@]}" \
+        -E WASM_COMPILER_HOME="$CHOME" -E WASM_COMPILER_JOBS=/var/lib/wasm-compiler/selftest \
+        "$CHOME/node" "$CHOME/app/src/main.ts" selftest ;;
+    status)
+      say "wasm-compiler: $(systemctl is-active "$CUNIT" 2>/dev/null || true)"
+      sudo curl -fsS --unix-socket /run/wasm-compiler/compiler.sock http://compiler/v1/languages 2>/dev/null \
+        | "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{for(const l of JSON.parse(s).languages)console.log(`  ${l.id}: ${l.name} ${l.version} ${l.ready?"":"(未セットアップ)"}`)})' || true
+      ;;
+    logs) journalctl -u "$CUNIT" -n "${1:-50}" --no-pager -o cat ;;
+    *) die "使い方: botctl compiler install [clone] | rootfs [name] | setup <言語>... | selftest | status | logs [n]" ;;
+  esac
+}
+
 case "${1:-status}" in
   status) cmd_status ;;
   dev) shift; cmd_dev "$@" ;;
@@ -185,5 +247,6 @@ case "${1:-status}" in
   rollback) cmd_rollback ;;
   logs) shift; cmd_logs "$@" ;;
   install) cmd_install ;;
-  *) die "使い方: botctl status | dev [branch] | promote [commit] | rollback | logs prod|dev [n] | install" ;;
+  compiler) shift; cmd_compiler "$@" ;;
+  *) die "使い方: botctl status | dev [branch] | promote [commit] | rollback | logs prod|dev [n] | install | compiler ..." ;;
 esac

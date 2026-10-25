@@ -1,0 +1,14 @@
+# Ubuntu (apparmor_restrict_unprivileged_userns=1) takes every capability away
+# inside a user namespace made by an unconfined program, so bubblewrap cannot
+# even bring up the box's loopback. This lets only wasm-compiler's own copy of
+# bwrap make user namespaces as on other distributions; the system's
+# /usr/bin/bwrap is left as it is. `botctl compiler install` puts it in
+# /etc/apparmor.d.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile wasm-compiler-bwrap /opt/wasm-compiler/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/wasm-compiler-bwrap>
+}
