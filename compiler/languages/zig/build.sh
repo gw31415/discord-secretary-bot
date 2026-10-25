@@ -6,7 +6,7 @@ cd /work/src
 mkdir -p /work/out
 . /lang/env.sh
 mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
-cp -a /toolchain/prewarm/cache/. "$ZIG_GLOBAL_CACHE_DIR/"
+[ ! -d /toolchain/prewarm/cache ] || cp -a /toolchain/prewarm/cache/. "$ZIG_GLOBAL_CACHE_DIR/"
 case "${OPTIMIZE:-size}" in speed) OPT=ReleaseFast ;; *) OPT=ReleaseSmall ;; esac
 status=0
 zig build-exe -target wasm32-wasi -O "$OPT" -fstrip --stack 1048576 \
