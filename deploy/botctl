@@ -223,9 +223,12 @@ cmd_compiler() {
       ;;
     rootfs) command -v mmdebstrap >/dev/null || sudo apt-get install -y -q mmdebstrap; compiler_node rootfs "${1:-base}" ;;
     setup) [[ $# -gt 0 ]] || die "言語を指定してください(c, rust, go など)"; for lang in "$@"; do compiler_node setup "$lang"; done; sudo systemctl restart "$CUNIT" ;;
-    # As a unit like the service, so it meets the same AppArmor and systemd limits a login shell does not.
-    selftest) sudo systemd-run --quiet --wait --pipe --collect -p User=wasmc -p EnvironmentFile="$CHOME/env" \
-        -E WASM_COMPILER_HOME="$CHOME" -E WASM_COMPILER_JOBS=/var/tmp/wasm-compiler-selftest \
+    # As a unit with the service's own limits (read from its unit file), so it meets the same AppArmor, seccomp and mounts.
+    selftest)
+      local props=()
+      while IFS= read -r line; do props+=(-p "$line"); done < <(grep -E '^(NoNewPrivileges|Protect|Private|Restrict|Lock|Memory|CPU|Tasks)' "/etc/systemd/system/$CUNIT.service")
+      sudo systemd-run --quiet --wait --pipe --collect -p User=wasmc -p EnvironmentFile="$CHOME/env" -p StateDirectory=wasm-compiler "${props[@]}" \
+        -E WASM_COMPILER_HOME="$CHOME" -E WASM_COMPILER_JOBS=/var/lib/wasm-compiler/selftest \
         "$CHOME/node" "$CHOME/app/src/main.ts" selftest ;;
     status)
       say "wasm-compiler: $(systemctl is-active "$CUNIT" 2>/dev/null || true)"

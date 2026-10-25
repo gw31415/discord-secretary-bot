@@ -32,7 +32,7 @@ ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
-ProtectHostname=true
+# No ProtectHostname: its seccomp filter also stops bwrap naming the box's own UTS namespace.
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
