@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
 import { findChatModel, judgeRef, lightestThinking, selectableModels } from "../src/llm/models.ts";
@@ -59,16 +62,15 @@ test("every selectable model is offered, with unique custom ids, within the comp
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "typesafe", "ts-abcdefgh5678");
   store.setApiKey("u1", "zai", "glm-abcdefgh9012");
-  store.setApiKey("u1", "tavily", "tvly-abcdefgh3456");
   store.setApiKey("u1", "openai", "sk-proj-abcdefgh7890");
   store.setApiKey("u1", "openrouter", "sk-or-abcdefgh1357");
   // A warning line is the most the web section ever adds.
   store.setModel("u1", "response", { provider: "zai", model: selectableModels("zai", "response")[0]!.id });
-  store.setWebTool("u1", "anthropic");
+  store.setWebTool("u1", "tavily");
   store.setModel("u1", "code", { provider: "anthropic", model: selectableModels("anthropic", "code")[0]!.id });
   const models = renderPanel(store, "u1", undefined, "models");
   const advanced = renderPanel(store, "u1", undefined, "advanced");
-  assert.match(JSON.stringify(advanced), /応答モデルがClaudeではない/);
+  assert.match(JSON.stringify(advanced), /Tavilyのキーがない/);
   const selects: { custom_id: string; options: { value: string }[] }[] = [];
   let components = 0;
   const walk = (node: unknown): void => {
@@ -232,4 +234,18 @@ test("the settings panel moves between its pages with buttons, each well within 
   assert.equal(SETTINGS_HOME_ID, CUSTOM_ID.page("home"));
   const rows = (renderPanel(store, "u1", undefined, "keys").components[0] as { components: Array<{ type: number; components?: Array<{ type: number }> }> }).components.filter((c) => c.type === 1 && c.components!.every((b) => b.type === 2));
   assert.ok(rows.every((r) => r.components!.length <= 3));
+});
+
+test("a person who chose Claude's web tools moves to the response model's standard", () => {
+  const dir = mkdtempSync(join(tmpdir(), "store-"));
+  const path = join(dir, "bot.db");
+  const before = new Store(path, master);
+  before.setWebTool("u1", "tavily");
+  before.db.prepare("UPDATE user_settings SET web_tool = 'anthropic' WHERE user_id = 'u1'").run();
+  before.db.close();
+  const after = new Store(path, master);
+  assert.equal(after.db.prepare("SELECT web_tool FROM user_settings WHERE user_id = 'u1'").pluck().get(), "auto");
+  assert.equal(after.getSettings("u1").web, "auto");
+  after.db.close();
+  rmSync(dir, { recursive: true });
 });

@@ -3,13 +3,13 @@ import { Type } from "@earendil-works/pi-ai";
 import type { KeyProviderId, ProviderId } from "../llm/models.ts";
 
 // Web access for the agent. Each person picks the service in /settings; the keys are theirs.
-// Claude's own tools run on Anthropic's servers. The others are ordinary tools the bot
-// calls, so they work with any model: GLM Coding Plan's Web Search / Web Reader MCP
-// servers, and Tavily's search and extract API.
+// Claude's and OpenAI's own tools run on the provider's servers, so they come only with a
+// response model of that provider: they are what "応答モデルの標準" means, not choices of
+// their own. The others are ordinary tools the bot calls, so they work with any model:
+// GLM Coding Plan's Web Search / Web Reader MCP servers, and Tavily's search and extract API.
 
 export const WEB_TOOLS = {
-  auto: { label: "応答モデルの標準", description: "ClaudeならClaudeの検索、GLMならGLMの検索を使います" },
-  anthropic: { label: "Claude", description: "Claudeのサーバー側の検索と取得。応答モデルがClaudeのときだけ使えます" },
+  auto: { label: "応答モデルの標準", description: "Claude・OpenAI・GLMなら、それぞれの検索を使います" },
   zai: { label: "GLM Coding Plan", description: "GLMのWeb Search / Web Reader。GLM Coding Planのキーが要ります" },
   tavily: { label: "Tavily", description: "どのモデルでも使えます。Tavilyのキーが要ります(月1,000回まで無料)" },
   off: { label: "使わない", description: "BotはWebを調べません" },
@@ -21,8 +21,11 @@ export function isWebTool(value: string): value is WebTool {
   return Object.hasOwn(WEB_TOOLS, value);
 }
 
+/** Providers whose web tools run on their own servers, inside the model's request. */
+export type HostedWebProvider = "anthropic" | "openai";
+
 export type WebAccess =
-  | { kind: "anthropic" }
+  | { kind: HostedWebProvider }
   | { kind: "zai"; apiKey: string }
   | { kind: "tavily"; apiKey: string };
 
@@ -31,10 +34,9 @@ export type WebAccess =
  * response model or its key is missing; panelWarning() tells the person why.
  */
 export function resolveWebAccess(choice: WebTool, model: ProviderId, keyOf: (p: KeyProviderId) => string | undefined): WebAccess | null {
-  const tool = choice === "auto" ? (model === "anthropic" ? "anthropic" : model === "zai" ? "zai" : "off") : choice;
+  if (choice === "auto" && (model === "anthropic" || model === "openai")) return { kind: model };
+  const tool = choice === "auto" ? (model === "zai" ? "zai" : "off") : choice;
   switch (tool) {
-    case "anthropic":
-      return model === "anthropic" ? { kind: "anthropic" } : null;
     case "zai":
     case "tavily": {
       const apiKey = keyOf(tool);
@@ -48,18 +50,34 @@ export function resolveWebAccess(choice: WebTool, model: ProviderId, keyOf: (p: 
 /** Why the chosen web tool will not work with these settings, or null if it will. */
 export function webToolWarning(choice: WebTool, model: ProviderId | undefined, keys: ReadonlySet<KeyProviderId>): string | null {
   if (choice === "off" || !model) return null;
-  if (choice === "auto" && model !== "anthropic" && model !== "zai") return "応答モデルの標準のWebツールがないため、Webは使われません。Tavilyを選ぶと使えます。";
-  if (choice === "anthropic" && model !== "anthropic") return "応答モデルがClaudeではないため、Webは使われません。";
+  if (choice === "auto" && !hasOwnWebTools(model)) return "応答モデルの標準のWebツールがないため、Webは使われません。Tavilyを選ぶと使えます。";
+  if (choice === "auto" && model === "zai" && !keys.has("zai")) return "GLM Coding Planのキーがないため、Webは使われません。";
   if (choice === "zai" && !keys.has("zai")) return "GLM Coding Planのキーがないため、Webは使われません。";
   if (choice === "tavily" && !keys.has("tavily")) return "Tavilyのキーがないため、Webは使われません。";
   return null;
 }
 
-/** Anthropic server tools, added to the raw request. pi-ai keeps only the final text. */
-export const ANTHROPIC_WEB_TOOLS = [
-  { type: "web_search_20250305", name: "web_search", max_uses: 5 },
-  { type: "web_fetch_20250910", name: "web_fetch", max_uses: 5 },
-] as const;
+function hasOwnWebTools(model: ProviderId): boolean {
+  return model === "anthropic" || model === "openai" || model === "zai";
+}
+
+export function isHostedWeb(access: WebAccess | null): access is { kind: HostedWebProvider } {
+  return access?.kind === "anthropic" || access?.kind === "openai";
+}
+
+/**
+ * Server tools added to the raw request of each provider. pi-ai skips the blocks they
+ * produce (Anthropic's server_tool_use / web_*_tool_result, OpenAI's web_search_call)
+ * and keeps the final text.
+ */
+export const HOSTED_WEB_TOOLS = {
+  anthropic: [
+    { type: "web_search_20250305", name: "web_search", max_uses: 5 },
+    { type: "web_fetch_20250910", name: "web_fetch", max_uses: 5 },
+  ],
+  // The Responses API's search also opens and reads pages, so there is no separate fetch.
+  openai: [{ type: "web_search" }],
+} as const satisfies Record<HostedWebProvider, readonly unknown[]>;
 
 const MAX_OUTPUT = 15_000;
 const TIMEOUT_MS = 30_000;
@@ -86,7 +104,7 @@ function checkUrl(url: string): void {
 
 /** The agent's web_search and web_fetch tools for services the bot calls itself. */
 export function webTools(access: WebAccess, fetchImpl: typeof fetch = fetch): AgentTool<any>[] {
-  if (access.kind === "anthropic") return [];
+  if (isHostedWeb(access)) return [];
   const service = access.kind === "zai" ? zaiService(access.apiKey, fetchImpl) : tavilyService(access.apiKey, fetchImpl);
   const search: AgentTool<typeof searchParams> = {
     name: "web_search",
