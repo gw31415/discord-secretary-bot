@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickMcpTool, resolveWebAccess, webToolWarning, webTools, ZAI_MCP } from "../src/agent/web.ts";
+import { isWebTool, pickMcpTool, resolveWebAccess, webToolWarning, webTools, ZAI_MCP } from "../src/agent/web.ts";
 import type { KeyProviderId } from "../src/llm/models.ts";
 
 const keys = (map: Partial<Record<KeyProviderId, string>>) => (p: KeyProviderId) => map[p];
@@ -8,13 +8,25 @@ const keys = (map: Partial<Record<KeyProviderId, string>>) => (p: KeyProviderId)
 test("the web choice resolves against the response model and the person's keys", () => {
   assert.deepEqual(resolveWebAccess("auto", "anthropic", keys({})), { kind: "anthropic" });
   assert.deepEqual(resolveWebAccess("auto", "zai", keys({ zai: "z" })), { kind: "zai", apiKey: "z" });
-  assert.equal(resolveWebAccess("anthropic", "zai", keys({ zai: "z" })), null, "Claude's tools need a Claude model");
+  assert.deepEqual(resolveWebAccess("auto", "openai", keys({})), { kind: "openai" });
+  assert.equal(resolveWebAccess("auto", "openrouter", keys({ tavily: "t" })), null, "no standard web tool");
+  assert.equal(resolveWebAccess("auto", "zai", keys({})), null);
   assert.deepEqual(resolveWebAccess("tavily", "anthropic", keys({ tavily: "t" })), { kind: "tavily", apiKey: "t" });
   assert.equal(resolveWebAccess("tavily", "anthropic", keys({})), null);
   assert.deepEqual(resolveWebAccess("zai", "anthropic", keys({ zai: "z" })), { kind: "zai", apiKey: "z" }, "GLM's tools work with Claude too");
   assert.equal(resolveWebAccess("off", "anthropic", keys({ tavily: "t" })), null);
-  assert.equal(webToolWarning("tavily", "anthropic", new Set()), "Tavilyのキーがないため、Webは使われません。");
+  assert.equal(webToolWarning("tavily", "anthropic", new Set()), "Tavilyのキーがないので、Webを使いません。");
   assert.equal(webToolWarning("tavily", "anthropic", new Set(["tavily"])), null);
+  assert.equal(webToolWarning("auto", "openai", new Set()), null);
+  assert.match(webToolWarning("auto", "openrouter", new Set()) ?? "", /標準のWebツールがない/);
+  assert.match(webToolWarning("auto", "zai", new Set()) ?? "", /GLM Coding Planのキーがない/);
+});
+
+test("Claude's and OpenAI's web tools run on their servers, so the bot adds no tools of its own", () => {
+  assert.deepEqual(webTools({ kind: "anthropic" }), []);
+  assert.deepEqual(webTools({ kind: "openai" }), []);
+  assert.ok(!isWebTool("anthropic"), "Claude is not a choice of its own");
+  assert.ok(!isWebTool("openai"));
 });
 
 function json(body: unknown, headers: Record<string, string> = {}) {

@@ -18,9 +18,9 @@ import { WASM_SECTION_ID } from "../wasm/panel.ts";
 export type { ModelRole };
 
 // The /settings panel: an ephemeral Components V2 message for one user's keys and models,
-// split into a home page and pages for keys and models. Only the language (response)
-// model is required and it is never chosen automatically; the judge model falls back
-// to it, and the code and reaction models are optional overrides.
+// split into a home page and pages for keys and models, with the per-use models under the
+// models page. Only the language (response) model is required and it is never chosen
+// automatically; the judge model falls back to it, and the per-use models override them.
 
 
 /** An optional role's option for leaving it to the response model. */
@@ -68,19 +68,19 @@ const SELECT_LIMIT = 25;
 // selects past Discord's 25-option limit so no model is dropped. Optional roles
 // lead with the option that leaves the role unset. The panel is near Discord's
 // 40-component limit, so providers share a select.
-function roleSelects(store: Store, userId: string, role: ModelRole, placeholder: string, unset?: { label: string; description: string }): APIActionRowComponent<APIStringSelectComponent>[] {
+function roleSelects(store: Store, userId: string, role: ModelRole, placeholder: string, unset?: string): APIActionRowComponent<APIStringSelectComponent>[] {
   const providers = store.listKeys(userId).map((k) => k.provider).filter(isProviderId);
   const current = store.getSettings(userId)[role];
   // A model typed in for OpenRouter is listed alone, so the menu shows what is chosen.
   const typed = current && TYPED_MODEL_PROVIDERS.has(current.provider) && providers.includes(current.provider) ? findModel(role, current.provider, current.model) : undefined;
   const options = [
-    ...(unset ? [{ label: unset.label, value: MODEL_UNSET, description: unset.description, default: !current }] : []),
+    ...(unset ? [{ label: unset, value: MODEL_UNSET, default: !current }] : []),
     ...(typed ? [{ label: typed.name.slice(0, 100), value: `${current!.provider}/${typed.id}`.slice(0, 100), description: `${PROVIDERS[current!.provider].label} · ${typed.id}`.slice(0, 100), default: true }] : []),
     ...providers.filter((provider) => !TYPED_MODEL_PROVIDERS.has(provider)).flatMap((provider) =>
       selectableModels(provider, role).map((model) => ({
         label: (isClassifier(model) ? `${model.name}(判定専用)` : model.name).slice(0, 100),
         value: `${provider}/${model.id}`,
-        description: `${PROVIDERS[provider].label} · ${model.id}`.slice(0, 100),
+        description: PROVIDERS[provider].label,
         default: current?.provider === provider && current.model === model.id,
       })),
     ),
@@ -98,7 +98,10 @@ function roleSelects(store: Store, userId: string, role: ModelRole, placeholder:
   }) satisfies APIActionRowComponent<APIStringSelectComponent>);
 }
 
-export type PanelPage = "home" | "keys" | "models" | "advanced";
+/** "roles" holds the per-use models, a part of the models page; "lookup" the web tool and the read scope. */
+export type PanelPage = "home" | "keys" | "models" | "roles" | "lookup";
+
+const LOOKUP_TITLE = "ハーネス";
 
 function navButton(page: PanelPage, label: string, current: PanelPage): APIButtonComponent {
   return { type: ComponentType.Button, custom_id: CUSTOM_ID.page(page), label, style: page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, disabled: page === current };
@@ -108,20 +111,20 @@ function navButton(page: PanelPage, label: string, current: PanelPage): APIButto
 export function renderPanel(store: Store, userId: string, notice?: string, page: PanelPage = "home"): { flags: number; components: APIMessageTopLevelComponent[] } {
   const status = setupStatus(store, userId);
   const body: APIComponentInContainer[] =
-    page === "keys" ? keysPage(store, userId) : page === "models" ? modelsPage(store, userId) : page === "advanced" ? advancedPage(store, userId) : homePage(store, userId);
+    page === "keys" ? keysPage(store, userId) : page === "models" ? modelsPage(store, userId) : page === "roles" ? rolesPage(store, userId) : page === "lookup" ? lookupPage(store, userId) : homePage(store, userId);
   body.push(
     { type: ComponentType.Separator },
     {
       type: ComponentType.TextDisplay,
       content: status.complete
-        ? "✅ 設定は完了しています。Botをメンションすると会話できます。"
-        : `⚠️ 設定が完了していません。未設定: ${status.missing.join("、")}`,
+        ? "✅ 設定は済んでいます。Botをメンションすると会話できます。"
+        : `⚠️ まだ設定していないものがあります: ${status.missing.join("、")}`,
     },
   );
   if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
   // At most three buttons a row; the rules and the commands open their own panels in this message.
   body.push(
-    { type: ComponentType.ActionRow, components: [navButton("keys", "APIキーの管理", page), navButton("models", "モデルの選択", page), navButton("advanced", "応用設定", page)] },
+    { type: ComponentType.ActionRow, components: [navButton("keys", "APIキー", page), navButton("models", "モデル", page), navButton("lookup", LOOKUP_TITLE, page)] },
     {
       type: ComponentType.ActionRow,
       components: [
@@ -130,6 +133,7 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
         { type: ComponentType.Button, custom_id: WASM_SECTION_ID, label: "Wasm", style: ButtonStyle.Primary },
       ],
     },
+    // From the per-use page, the モデル button above leads back to the models page.
     ...(page === "home" ? [] : [{ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] } satisfies APIActionRowComponent<APIButtonComponent>]),
   );
   return {
@@ -147,27 +151,36 @@ function homePage(store: Store, userId: string): APIComponentInContainer[] {
   const settings = store.getSettings(userId);
   const language = modelName(settings.response);
   const overrides = [
-    ...(settings.addressee ? [`宛先の判定: ${modelName(settings.addressee)}`] : []),
-    ...(settings.code ? [`コード: ${modelName(settings.code)}`] : []),
-    ...(settings.reaction ? [`リアクション: ${modelName(settings.reaction)}`] : []),
+    ...(settings.addressee ? [`宛先の判定 ${modelName(settings.addressee)}`] : []),
+    ...(settings.code ? [`コード ${modelName(settings.code)}`] : []),
+    ...(settings.reaction ? [`リアクション ${modelName(settings.reaction)}`] : []),
   ];
   return [
-    { type: ComponentType.TextDisplay, content: "## 設定\nあなたのAPIキー・モデルなどの設定です。この画面はあなたにだけ見えています。" },
+    { type: ComponentType.TextDisplay, content: "## 設定\nこの画面はあなたにだけ見えています。" },
     { type: ComponentType.Separator },
     {
       type: ComponentType.TextDisplay,
       content: [
         `**APIキー**: ${keys.length > 0 ? keys.join("・") : "未登録"}`,
         `**言語モデル**: ${language ?? "未設定"}`,
-        `**判定モデル**: ${modelName(settings.judge) ?? (language ? "言語モデルを使う" : "未設定")}`,
-        ...(overrides.length > 0 ? [`**応用設定**: ${overrides.join("、")}`] : []),
+        `**判定モデル**: ${modelName(settings.judge) ?? (language ? "言語モデルと同じ" : "未設定")}`,
+        ...(overrides.length > 0 ? [`**用途別のモデル**: ${overrides.join("、")}`] : []),
         `**Webツール**: ${WEB_TOOLS[settings.web].label}`,
+        `**読み取りの範囲**: ${READ_SCOPES[settings.readScope].label}`,
       ].join("\n"),
     },
+  ];
+}
+
+// How the bot gathers information: the web outside the server, and how far it reads inside.
+function lookupPage(store: Store, userId: string): APIComponentInContainer[] {
+  return [
+    { type: ComponentType.TextDisplay, content: `## ${LOOKUP_TITLE}` },
+    ...webSection(store, userId),
     { type: ComponentType.Separator },
     {
       type: ComponentType.TextDisplay,
-      content: "**読み取りを広げるとき**\nBotはふつう、そのチャンネルを見られる全員が見られる情報だけを使います。あなたへの返答でそれ以上が要るとき、あなたが見られる範囲まで広げてよいかを選べます。",
+      content: "**読み取りの範囲**\nBotは、チャンネルの全員が見られる情報だけを使います。あなたへの返事にそれより広い情報が要るときの扱いを選んでください。",
     },
     readScopeSelect(store, userId),
   ];
@@ -177,11 +190,11 @@ function keysPage(store: Store, userId: string): APIComponentInContainer[] {
   const keys = new Map(store.listKeys(userId).map((k) => [k.provider, k.last4]));
   const keyLines = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p) => {
     const last4 = keys.get(p);
-    const note = p === "tavily" ? "(Web検索用)" : "";
+    const note = p === "tavily" ? "(Webツール)" : "";
     return `${KEY_PROVIDERS[p].label}${note}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
   });
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## APIキーの管理\nキーは暗号化して保存し、表示は末尾4文字だけです。" },
+    { type: ComponentType.TextDisplay, content: "## APIキー\nキーは暗号化して保存します。表示するのは末尾4文字だけです。" },
     { type: ComponentType.Separator },
     { type: ComponentType.TextDisplay, content: keyLines.join("\n") },
     {
@@ -214,78 +227,55 @@ function keysPage(store: Store, userId: string): APIComponentInContainer[] {
 
 function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## モデルの選択\nBotがあなたのために使う基本のモデルです。用途ごとに別のモデルにしたいときは「応用設定」で上書きできます。" },
+    { type: ComponentType.TextDisplay, content: "## モデル\nBotがあなたのキーで使うモデルです。用途ごとに変えたいときは「用途別のモデル」で選びます。" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
-    body.push({ type: ComponentType.TextDisplay, content: "先に「APIキーの管理」でキーを登録すると、モデルを選べるようになります。" });
+    body.push({ type: ComponentType.TextDisplay, content: NO_KEY });
     return body;
   }
-  const settings = store.getSettings(userId);
   const response = roleSelects(store, userId, "response", "言語モデル");
   body.push(
-    { type: ComponentType.TextDisplay, content: "**言語モデル**(必須)\n返事を書く、調べる、変更案やコードを作るなど、文章を書く仕事に使います。" },
+    { type: ComponentType.TextDisplay, content: "**言語モデル**\n返事を書く、調べものをする、変更案やコードを作るときに使います。" },
     ...(response.length > 0
       ? response
-      : [{ type: ComponentType.TextDisplay, content: "-# 返事に使えるモデルがありません。Claude API・GLM Coding Plan・OpenAI・OpenRouterのどれかのキーを登録してください。" } satisfies APIComponentInContainer]),
+      : [{ type: ComponentType.TextDisplay, content: "-# 言語モデルに使えるモデルがありません。Claude API、GLM Coding Plan、OpenAI、OpenRouterのどれかのキーを登録してください。" } satisfies APIComponentInContainer]),
     {
       type: ComponentType.TextDisplay,
-      content: `**判定モデル**(任意)\nはい・いいえ、選択肢からの選択、点数付けやランク付けなど、判定の仕事全般に使います(発言が自分宛てかの判定、コマンドの返事を誰に見せるか、リアクション選び、コードやルールの judge()・rank())。${settings.judge ? "" : "未設定なので言語モデルが判定します。"}軽いモデルか、判定専用のJev(TypeSafe)・GPT-6 Luna(OpenAIのDecisions API)がおすすめです。`,
+      content: "**判定モデル**\n発言がBot宛てかどうか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めるときに使います。コードやルールの judge()・rank() もこのモデルが答えます。軽いモデルか、判定専用のJevやGPT-6 Lunaが向いています。",
     },
-    ...roleSelects(store, userId, "judge", "判定モデル", { label: "言語モデルを使う", description: "判定にも言語モデルを使います" }),
+    ...roleSelects(store, userId, "judge", "判定モデル", "言語モデルと同じ"),
     ...typedModelSelect(store, userId, ["response", "judge"]),
+    { type: ComponentType.ActionRow, components: [navButton("roles", "用途別のモデル", "models")] },
   );
   return body;
 }
 
-function advancedPage(store: Store, userId: string): APIComponentInContainer[] {
+const NO_KEY = "先に「APIキー」でキーを登録すると、モデルを選べます。";
+
+// Part of the models page: each use takes the language or judge model unless one is chosen here.
+function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## 応用設定\n用途ごとに、基本のモデルを別のモデルで上書きします。選ばなければ基本のモデルが使われます。" },
+    { type: ComponentType.TextDisplay, content: "## 用途別のモデル\n用途ごとに、言語モデルや判定モデルとは別のモデルを選べます。選ばなければ元のモデルを使います。" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
-    body.push({ type: ComponentType.TextDisplay, content: "先に「APIキーの管理」でキーを登録すると、モデルを選べるようになります。" });
+    body.push({ type: ComponentType.TextDisplay, content: NO_KEY });
     return body;
   }
-  const current = store.getSettings(userId).addressee;
   body.push(
+    { type: ComponentType.TextDisplay, content: "**宛先の判定**\nあなたが始めた会話で、発言がBot宛てかどうかを決めます。" },
+    ...roleSelects(store, userId, "addressee", "宛先を判定するモデル", "判定モデルと同じ"),
+    { type: ComponentType.TextDisplay, content: "**コード**\n調べもの、変更案、ルールのコードを書きます。" },
+    ...roleSelects(store, userId, "code", "コードを書くモデル", "言語モデルと同じ"),
     {
       type: ComponentType.TextDisplay,
-      content: current
-        ? `**宛先を判定するモデル**\nあなたが起こした会話で、発言がBot宛てかを ${current.model} が判定します。`
-        : "**宛先を判定するモデル**\n未設定なので、判定モデルが、あなたが起こした会話の発言がBot宛てかを判定します。",
+      content: "**リアクション**\n文章で返すかリアクションだけで返すか、どの絵文字を付けるかを決めます。Botの発言にあなたが付けたリアクションへの応じ方も決めます。判定専用のモデルが向いています。",
     },
-    ...roleSelects(store, userId, "addressee", "宛先を判定するモデル", { label: "判定モデルに任せる", description: "宛先の判定も判定モデルがします" }),
-    ...codeSection(store, userId),
-    ...reactionSection(store, userId),
+    ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", "判定モデルと同じ"),
     ...typedModelSelect(store, userId, ["addressee", "code", "reaction"]),
-    ...webSection(store, userId),
   );
   return body;
-}
-
-// Optional: without it the response model writes the code itself.
-function codeSection(store: Store, userId: string): APIComponentInContainer[] {
-  const current = store.getSettings(userId).code;
-  const text = current
-    ? `**コードを書くモデル**\n調べもの・変更案・ルールのコードを ${current.model} が書きます。`
-    : "**コードを書くモデル**\n未設定なので、言語モデルがコードも書きます。選ぶと、調べもの・変更案・ルールのコードをそのモデルが書きます。";
-  return [
-    { type: ComponentType.TextDisplay, content: text },
-    ...roleSelects(store, userId, "code", "コードを書くモデル", { label: "言語モデルに任せる", description: "コード用のモデルを使いません" }),
-  ];
-}
-
-// Optional: without it the response model reacts when it sees fit.
-function reactionSection(store: Store, userId: string): APIComponentInContainer[] {
-  const current = store.getSettings(userId).reaction;
-  const text = current
-    ? `**リアクションを選ぶモデル**\nBotがあなたに答える前に ${current.model} が、文章で返すかリアクションだけで返すかと、どの絵文字にするかを選びます。Botの発言にあなたが付けたリアクションへの応じ方も選びます。`
-    : "**リアクションを選ぶモデル**\n未設定なので、判定モデルが、文章で返すかリアクションだけで返すかとどの絵文字にするかを選びます。Botの発言にあなたが付けたリアクションへの応じ方も選びます。判定専用のモデルが向いています。";
-  return [
-    { type: ComponentType.TextDisplay, content: text },
-    ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", { label: "判定モデルに任せる", description: "リアクションも判定モデルが選びます" }),
-  ];
 }
 
 // Not required for setup: the bot answers without the web when none works.
@@ -299,7 +289,7 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
       type: ComponentType.TextDisplay,
       content: [
         "**Webツール**",
-        "BotがWebを検索したりページを読んだりするときに使うものです。",
+        "BotがWebを検索したりページを読んだりするときに使います。",
         ...(warning ? [`-# ⚠️ ${warning}`] : []),
       ].join("\n"),
     },
@@ -312,7 +302,7 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
         options: (Object.keys(WEB_TOOLS) as WebTool[]).map((tool) => ({
           label: WEB_TOOLS[tool].label,
           value: tool,
-          description: WEB_TOOLS[tool].description.slice(0, 100),
+          ...(WEB_TOOLS[tool].description ? { description: WEB_TOOLS[tool].description.slice(0, 100) } : {}),
           default: settings.web === tool,
         })),
       }],
@@ -321,8 +311,8 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
 }
 
 const READ_SCOPES: Record<ReadScopeSetting, { label: string; description: string }> = {
-  ask: { label: "毎回確認する", description: "チャンネルの全員が見られる範囲の外が必要になったら、ボタンで聞きます" },
-  always: { label: "常に許可する", description: "必要になったら、確認せずにあなたが見られる範囲まで読みます" },
+  ask: { label: "毎回確認する", description: "広げる前にボタンで聞きます" },
+  always: { label: "常に許可する", description: "聞かずに、あなたが見られる範囲まで読みます" },
 };
 
 // Replies normally read only what everyone in the channel can see; this decides
@@ -334,9 +324,9 @@ function readScopeSelect(store: Store, userId: string): APIComponentInContainer 
     components: [{
       type: ComponentType.StringSelect,
       custom_id: CUSTOM_ID.readScopeSelect,
-      placeholder: "読み取りを広げるとき",
+      placeholder: "読み取りの範囲",
       options: (Object.keys(READ_SCOPES) as ReadScopeSetting[]).map((scope) => ({
-        label: `読み取りを広げるとき: ${READ_SCOPES[scope].label}`,
+        label: READ_SCOPES[scope].label,
         description: READ_SCOPES[scope].description,
         value: scope,
         default: current === scope,
@@ -367,8 +357,7 @@ function typedModelSelect(store: Store, userId: string, roles: ModelRole[]): API
       custom_id: CUSTOM_ID.typedModelSelect,
       placeholder: `${label}のモデルをIDで選ぶ`.slice(0, 150),
       options: roles.map((role) => ({
-        label: `${label}: ${ROLE_LABEL[role]}モデルをIDで指定`.slice(0, 100),
-        description: (judgesOnly(role) ? "例: ~typesafe/jev-latest、anthropic/claude-haiku-5-5" : "例: anthropic/claude-sonnet-5、google/gemini-3-pro").slice(0, 100),
+        label: `${ROLE_LABEL[role]}モデル`.slice(0, 100),
         value: role,
       })),
     }],
@@ -386,7 +375,7 @@ export function typedModelModal(role: ModelRole): APIModalInteractionResponseCal
           {
             type: ComponentType.TextInput,
             custom_id: "model",
-            label: "モデルID(openrouter.ai/models に載っているもの)",
+            label: "openrouter.ai/models に載っているモデルID",
             style: TextInputStyle.Short,
             required: true,
             min_length: 3,
@@ -451,7 +440,9 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   const isRole = (r: string | undefined): r is ModelRole => r === "response" || r === "judge" || r === "addressee" || r === "code" || r === "reaction";
   if (kind === "typed" && arg === "role") return isRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
   if (kind === "typedmodal" && isRole(arg)) return { kind: "submitTypedModel", role: arg };
-  if (kind === "page" && (arg === "home" || arg === "keys" || arg === "models" || arg === "advanced")) return { kind: "page", page: arg };
+  // "advanced" is the per-use page's id on panels opened before it moved under the models page.
+  if (kind === "page" && arg === "advanced") return { kind: "page", page: "roles" };
+  if (kind === "page" && (arg === "home" || arg === "keys" || arg === "models" || arg === "roles" || arg === "lookup")) return { kind: "page", page: arg };
   if (kind === "read" && arg === "scope") {
     const scope = values[0];
     return scope === "ask" || scope === "always" ? { kind: "selectReadScope", scope } : null;

@@ -307,6 +307,8 @@ export class Store {
     this.#ensureColumn("user_settings", "read_scope", "TEXT");
     this.#ensureColumn("user_settings", "addressee_provider", "TEXT");
     this.#ensureColumn("user_settings", "addressee_model", "TEXT");
+    // Claude's web tools are no longer a choice of their own: they are the standard for a Claude model.
+    this.db.exec("UPDATE user_settings SET web_tool = 'auto' WHERE web_tool = 'anthropic'");
   }
 
   /**
