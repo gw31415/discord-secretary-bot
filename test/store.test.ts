@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
 import { findChatModel, judgeRef, lightestThinking, selectableModels } from "../src/llm/models.ts";
-import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus } from "../src/llm/panel.ts";
+import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
 import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
 
 const master = randomBytes(32);
@@ -96,7 +96,8 @@ test("every selectable model is offered, with unique custom ids, within the comp
     new Set(selects.filter((s) => s.custom_id.startsWith(`llm:model:${role}:`)).flatMap((s) => s.options.map((o) => o.value)));
   const code = selects.filter((s) => s.custom_id.startsWith("llm:model:code:")).flatMap((s) => s.options.map((o) => o.value));
   assert.equal(code[0], "none");
-  assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length + selectableModels("openai", "code").length);
+  assert.equal(code.length, 1 + selectableModels("anthropic", "code").length + selectableModels("zai", "code").length + selectableModels("openai", "code").length + 1, "and the OpenRouter entry");
+  assert.equal(code.at(-1), "typed");
   for (const role of ["response", "judge", "addressee"] as const) {
     for (const provider of ["anthropic", "typesafe", "zai", "openai"] as const) {
       for (const m of selectableModels(provider, role)) assert.ok(offered(role).has(`${provider}/${m.id}`), `${role} ${provider}/${m.id}`);
@@ -123,7 +124,10 @@ test("custom ids parse into panel actions and reject unknown models", () => {
   assert.equal(parseCustomId("llm:model:judge:typesafe:0", ["typesafe/jev-latest"])?.kind, "selectModel");
   assert.equal(parseCustomId("llm:model:response:typesafe:0", ["typesafe/jev-latest"]), null);
   assert.equal(parseCustomId("llm:key:mistral"), null);
-  // OpenRouter models are typed in: the select opens a modal for the role.
+  // OpenRouter models are typed in: its option in each role's select opens a modal
+  // (as the buttons and the select on older panels do).
+  assert.deepEqual(parseCustomId("llm:model:code:all:0:abc", ["typed"]), { kind: "openTypedModelModal", role: "code" });
+  assert.deepEqual(parseCustomId("llm:typed:code"), { kind: "openTypedModelModal", role: "code" });
   assert.deepEqual(parseCustomId("llm:typed:role", ["judge"]), { kind: "openTypedModelModal", role: "judge" });
   assert.equal(parseCustomId("llm:typed:role", ["boss"]), null);
   assert.deepEqual(parseCustomId("llm:typedmodal:response"), { kind: "submitTypedModel", role: "response" });
@@ -194,7 +198,20 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
   store.setApiKey("u1", "openrouter", "sk-or-abcdefgh1357");
   const before = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
-  assert.match(before, /llm:typed:role/);
+  const typedOption = (page: "models" | "roles", role: string) => {
+    let found = false;
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!node || typeof node !== "object") return;
+      const c = node as { custom_id?: string; options?: Array<{ value: string }>; components?: unknown };
+      if (c.custom_id?.startsWith(`llm:model:${role}:`) && c.options?.some((o) => o.value === "typed")) found = true;
+      walk(c.components);
+    };
+    walk(renderPanel(store, "u1", undefined, page).components);
+    return found;
+  };
+  for (const role of ["response", "judge"]) assert.ok(typedOption("models", role), role);
+  for (const role of ["addressee", "code", "reaction"]) assert.ok(typedOption("roles", role), role);
   assert.doesNotMatch(before, /"openrouter\//, "hundreds of models stay out of the menus");
   store.setModel("u1", "response", { provider: "openrouter", model: "anthropic/claude-sonnet-5" });
   const after = renderPanel(store, "u1", undefined, "models");
@@ -209,6 +226,14 @@ test("OpenRouter models are typed in, and the one chosen is shown in its role's 
   walk(after.components);
   assert.deepEqual(values.filter((o) => o.value.startsWith("openrouter/")), [{ value: "openrouter/anthropic/claude-sonnet-5", default: true, label: values.find((o) => o.value.startsWith("openrouter/"))!.label, description: "OpenRouter · anthropic/claude-sonnet-5" } as never]);
   assert.ok(setupStatus(store, "u1").missing.every((m) => !m.startsWith("言語")));
+  // OpenRouter's own routers keep their prefix; a pasted "openrouter/" before another id is dropped.
+  assert.equal(typedModelId("response", "openrouter/free"), "openrouter/free");
+  assert.equal(typedModelId("response", " openrouter/auto "), "openrouter/auto");
+  assert.equal(typedModelId("response", "openrouter/anthropic/claude-sonnet-5"), "anthropic/claude-sonnet-5");
+  // The modal holds the model typed before, so it can be changed.
+  const modal = JSON.stringify(typedModelModal("response", "anthropic/claude-sonnet-5"));
+  assert.match(modal, /"value":"anthropic\/claude-sonnet-5"/);
+  assert.doesNotMatch(JSON.stringify(typedModelModal("judge")), /"value"/);
 });
 
 test("the settings panel moves between its pages with buttons, each well within Discord's limits", () => {

@@ -5,7 +5,7 @@ import type { Store } from "./db.ts";
 import { modalValue } from "./discord/modal.ts";
 import { WEB_TOOLS } from "./agent/web.ts";
 import { findModel, judgesOnly, KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
-import { keyModal, parseCustomId, readScopeLabel, renderPanel, roleLabel, typedModelModal } from "./llm/panel.ts";
+import { keyModal, parseCustomId, readScopeLabel, renderPanel, roleLabel, typedModelId, typedModelModal } from "./llm/panel.ts";
 import type { ModelRole, PanelPage } from "./llm/panel.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
@@ -74,9 +74,11 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, pageOf(action.role)));
         return;
       }
-      case "openTypedModelModal":
-        await api.interactions.createModal(interaction.id, interaction.token, typedModelModal(action.role));
+      case "openTypedModelModal": {
+        const current = store.getSettings(userId)[action.role];
+        await api.interactions.createModal(interaction.id, interaction.token, typedModelModal(action.role, current?.provider === "openrouter" ? current.model : undefined));
         return;
+      }
       case "selectWeb": {
         store.setWebTool(userId, action.tool);
         store.audit(actor, "llm.web.set", { tool: action.tool });
@@ -105,7 +107,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
   if (interaction.type === InteractionType.ModalSubmit) {
     const action = parseCustomId(interaction.data.custom_id);
     if (action?.kind === "submitTypedModel") {
-      const model = modalValue(interaction, "model")?.trim().replace(/^openrouter\//, "") ?? "";
+      const model = typedModelId(action.role, modalValue(interaction, "model") ?? "");
       let notice: string;
       if (!store.listKeys(userId).some((k) => k.provider === "openrouter")) {
         notice = "OpenRouterのキーが登録されていません";

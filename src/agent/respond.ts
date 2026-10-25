@@ -249,6 +249,15 @@ function unanswered(messages: AgentMessage[]): boolean {
   }
 }
 
+/** The reply so far, or "" when the last call failed. */
+function finalText(messages: AgentMessage[]): string {
+  try {
+    return lastAssistantText(messages);
+  } catch {
+    return "";
+  }
+}
+
 function lastAssistantText(messages: AgentMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i] as AssistantMessage;
@@ -261,6 +270,46 @@ function lastAssistantText(messages: AgentMessage[]): string {
   }
   return "";
 }
+
+// Models weak at tool calls sometimes write a call into the text instead of making it:
+// a tag named after a tool (<react emoji="🙂">) or a generic call block (<tool_call>…).
+const CALL_BLOCKS = ["tool_call", "tool_calls", "function_call", "function_calls", "invoke", "tool_use"];
+
+function writtenCallPattern(toolNames: string[]): RegExp {
+  const names = [...new Set([...toolNames, ...CALL_BLOCKS])].map((n) => n.replace(/[^A-Za-z0-9_]/g, ""));
+  const name = `(?:${names.join("|")})`;
+  // A block with its closing tag, a lone opening or closing tag, or <function=name>…</function>.
+  return new RegExp(
+    `<(${name})\\b[^>]*>[\\s\\S]*?<\\/\\1\\s*>|<\\/?${name}\\b[^>]*>|<function=[A-Za-z0-9_]+>[\\s\\S]*?(?:<\\/function>|$)`,
+    "g",
+  );
+}
+
+/** Splits text into code (fenced or inline) and the rest, so tags inside code are left alone. */
+function outsideCode(text: string, f: (part: string) => string): string {
+  return text.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map((part, i) => (i % 2 === 1 ? part : f(part))).join("");
+}
+
+/** Whether the text holds a tool call written as text. */
+export function hasWrittenToolCall(text: string, toolNames: string[]): boolean {
+  const pattern = writtenCallPattern(toolNames);
+  let found = false;
+  outsideCode(text, (part) => {
+    if (part.search(pattern) >= 0) found = true;
+    return part;
+  });
+  return found;
+}
+
+/** The text without tool calls written into it. */
+export function stripWrittenToolCalls(text: string, toolNames: string[]): string {
+  if (!hasWrittenToolCall(text, toolNames)) return text;
+  const pattern = writtenCallPattern(toolNames);
+  return outsideCode(text, (part) => part.replace(pattern, "")).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+const REDO_WRITTEN_CALL =
+  "[システム] 直前の返答の本文に、ツールの呼び出しを文字で書いたものが入っていました。本文に書いたものは実行されず、そのまま投稿されてしまいます。ツールは本文に書かずに呼び出し、本文には話し手への返事だけを書いてください。";
 
 function reactTool(react: (emoji: string) => Promise<void>, reactions: string[]): AgentTool<any> {
   const parameters = Type.Object({ emoji: Type.String({ description: "Unicodeの絵文字1つ。例: 👍 ✅ ❌ 🙏 😂 🎉" }) });
@@ -318,6 +367,8 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
       }),
   });
 
+  const toolNames = () => agent.state.tools.map((t) => t.name);
+
   let turns = 0;
   // Turns allowed from roundStart; the speaker can start another round at the limit.
   let budget = MAX_TURNS;
@@ -338,7 +389,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
     }
     if (event.type === "message_end" && event.message.role === "assistant" && input.onProgress) {
       const m = event.message as AssistantMessage;
-      const text = textOf(m);
+      const text = stripWrittenToolCalls(textOf(m), toolNames());
       if (text && hasToolCalls(m) && progress < MAX_PROGRESS) {
         progress++;
         await input.onProgress(text).catch(() => undefined);
@@ -373,13 +424,18 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
       await agent.continue();
       await drain();
     }
+    // A call written as text is asked for once more as a real call.
+    if (canRetry() && hasWrittenToolCall(finalText(agent.state.messages), toolNames())) {
+      await agent.prompt(REDO_WRITTEN_CALL);
+      await drain();
+    }
   } finally {
     input.inbox?.close();
   }
   const capped = atLimit();
   let text: string;
   try {
-    text = lastAssistantText(agent.state.messages);
+    text = stripWrittenToolCalls(lastAssistantText(agent.state.messages), toolNames());
   } catch (e) {
     // Stopping at the turn limit aborts the call in flight; that is the limit, not a lost connection.
     if (!capped) throw new ReplyFailed(e instanceof Error ? e.message : String(e), { turns, toolCalls, retries });
