@@ -11,6 +11,8 @@ import type { CommandSpec } from "../src/rules/command.ts";
 import { RuleEngine } from "../src/rules/engine.ts";
 import { RuleService } from "../src/rules/service.ts";
 import { triggerProblems } from "../src/rules/triggers.ts";
+import { PlanRejected } from "../src/plan/validate.ts";
+import { NO_DECIDE } from "../src/wasm/run.ts";
 import { DEFAULT_LIMITS } from "../src/rules/types.ts";
 import type { RuleDefinition } from "../src/rules/types.ts";
 import { GUILD, makeGuild, SELF } from "./helpers.ts";
@@ -75,7 +77,7 @@ function interaction(options: Record<string, string>, permissions = P.SendMessag
   } as never;
 }
 
-function world(visibilityScore?: (input: any) => Promise<number | null>) {
+function world(visibilityScore?: (input: any) => Promise<number | null>, engineDeps: Partial<ConstructorParameters<typeof RuleEngine>[0]> = {}) {
   const store = new Store(":memory:", randomBytes(32));
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
@@ -94,6 +96,7 @@ function world(visibilityScore?: (input: any) => Promise<number | null>) {
     notifyOwner: async () => {},
     log: () => {},
     run: async (_code, bindings) => code(bindings),
+    ...engineDeps,
   });
   const calls: Array<[string, unknown]> = [];
   const api = {
@@ -120,15 +123,15 @@ function world(visibilityScore?: (input: any) => Promise<number | null>) {
   return { store, admin, engine, service, runs, readers, calls, definition, setCode: (f: typeof code) => (code = f), api };
 }
 
-test("running the command runs the rule as its owner and replies with what the code said", async () => {
+test("running the command runs the rule as whoever ran it and replies with what the code said", async () => {
   const w = world();
   w.admin.save(GUILD, "1", w.definition);
   assert.equal(await w.service.handleCustomCommand(interaction({ text: "お知らせです" })), true);
   assert.equal(w.runs.length, 1);
-  assert.equal(w.runs[0].ownerId, "1");
+  assert.equal(w.runs[0].actorId, "3");
   assert.deepEqual(w.runs[0].drafts?.[0]?.body ?? w.runs[0].steps?.[0]?.body, { content: "お知らせです" });
-  // Reads are limited to what the channel's viewers may see, as the owner.
-  assert.deepEqual([w.readers.at(-1).speakerId, w.readers.at(-1).audience, w.readers.at(-1).channelId], ["1", "channel", "10"]);
+  // Reads are limited to what the channel's viewers may see, as whoever ran it.
+  assert.deepEqual([w.readers.at(-1).speakerId, w.readers.at(-1).audience, w.readers.at(-1).channelId], ["3", "channel", "10"]);
   const [defer, edit] = w.calls;
   assert.equal(defer![0], "defer");
   assert.ok((defer![1] as { flags?: number }).flags); // only the person who ran it sees the reply
@@ -185,13 +188,13 @@ test("enabled command rules are the server's guild commands; /settings is global
   assert.equal(w.calls.filter((c) => c[0] === "global").length, 1);
 });
 
-test("by default the owner's judge model decides who sees the reply; failures and errors stay private", async () => {
+test("by default the judge model of whoever ran it decides who sees the reply; failures and errors stay private", async () => {
   const asked: any[] = [];
   let verdict: () => Promise<number> = async () => 0.9;
   const w = world(async (input) => (asked.push(input), verdict()));
   w.admin.save(GUILD, "1", w.definition);
   await w.service.handleCustomCommand(interaction({ text: "お知らせです" }));
-  assert.deepEqual(asked.map((a) => [a.ownerId, a.command.name, a.options.text, a.reply, a.steps]), [["1", "announce", "お知らせです", "こんにちは", 1]]);
+  assert.deepEqual(asked.map((a) => [a.userId, a.command.name, a.options.text, a.reply, a.steps]), [["3", "announce", "お知らせです", "こんにちは", 1]]);
   // Starts private, then moves to a public follow-up.
   assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "followUp", "delete"]);
   assert.ok((w.calls[0]![1] as { flags?: number }).flags);
@@ -332,4 +335,36 @@ test("the commands section lists every command the presser may run as a link, an
   assert.equal(w.store.getRule(mine.id), undefined);
   assert.match(last(), /コマンド \/announce とルール「お知らせ」を削除しました/);
   assert.ok(w.store.getRule(gated.id));
+});
+
+test("a command acts within the allow list and the runner's permissions; their refusals do not switch the rule off", async () => {
+  const w = world(undefined, {
+    planner: {
+      // Stands in for the planner's check of the runner's permissions.
+      runForRule: async (input) => {
+        if (input.actorId !== "1") throw new PlanRejected(["依頼者に権限 ManageChannels がありません"]);
+        return { plan: { id: "p1" }, status: "succeeded", reason: null } as never;
+      },
+    },
+  });
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  for (let i = 0; i < DEFAULT_LIMITS.maxConsecutiveFailures + 1; i++) await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.match((w.calls.at(-1)![1] as { content: string }).content, /ManageChannels/);
+  assert.equal(w.store.getRule(rule.id)!.enabled, true);
+});
+
+test("a runner without a judge model still runs the parts that need none; judge() fails without switching the rule off", async () => {
+  const asked: string[] = [];
+  const w = world(undefined, { decide: (userId) => (asked.push(userId), undefined) });
+  w.setCode((b) => (b.decide ? { ok: true, value: null, logs: [] } : { ok: false, error: `Error: ${NO_DECIDE}`, logs: [] }));
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, allow: [] });
+  for (let i = 0; i < DEFAULT_LIMITS.maxConsecutiveFailures + 1; i++) await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.ok(asked.length > 0 && asked.every((id) => id === "3"));
+  assert.match((w.calls.at(-1)![1] as { content: string }).content, /\/settings/);
+  assert.equal(w.store.getRule(rule.id)!.enabled, true);
+
+  // Without judge(), the same runner's command just works.
+  w.setCode((b) => (b.reply("ok"), { ok: true, value: null, logs: [] }));
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.match((w.calls.at(-1)![1] as { content: string }).content, /ok/);
 });

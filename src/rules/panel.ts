@@ -309,7 +309,7 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   } else if (page === "allow") {
     texts.push(
       `**許す操作**(これ以外の変更は実行されません)\n${allowLines(rule.allow, label).join("\n") || "なし(返事だけします)"}`,
-      `<@${rule.ownerId}> の権限で動きます · 危険度: ${RISK_LABEL[allowRisk(rule.allow)]}\n${limitsLabel(rule.limits)}`,
+      `${rule.trigger.command ? "実行した人の権限と判定モデルで動きます(許す操作が上限)" : `<@${rule.ownerId}> の権限で動きます`} · 危険度: ${RISK_LABEL[allowRisk(rule.allow)]}\n${limitsLabel(rule.limits)}`,
       rule.params ? `**params**(コードが読む値)\n${paramsText(rule.params, label)}` : "",
     );
   } else if (page === "source") {

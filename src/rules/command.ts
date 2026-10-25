@@ -3,9 +3,9 @@ import type { APIApplicationCommandInteractionDataBasicOption, APIInteraction, R
 import type { MemberState } from "../discord/permissions.ts";
 
 // Rules that a person starts with a guild slash command. The command's options
-// arrive as `event.options`, the code runs like any rule (with its owner's
-// permissions, within its allow list), and what it passes to reply() goes back
-// to whoever ran the command. Each server's custom commands are registered next
+// arrive as `event.options`, the code runs like any rule but as whoever ran the
+// command (their read scope, their permissions within the allow list, their
+// judge model), and what it passes to reply() goes back to them. Each server's custom commands are registered next
 // to /settings whenever its rules change.
 
 export const OPTION_TYPES = {
@@ -36,7 +36,7 @@ export interface CommandSpec {
   permissions?: string[];
   /**
    * Who sees the reply: only whoever ran it, everyone in the channel, or (the
-   * default) whichever the owner's judge model picks for each reply.
+   * default) whichever the judge model of whoever ran it picks for each reply.
    */
   visibility?: CommandVisibility;
 }

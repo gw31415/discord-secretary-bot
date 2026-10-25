@@ -99,7 +99,7 @@ test("a matching event runs the rule as its owner; the bot's own events and hidd
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3"));
   await w.engine.idle();
   assert.equal(w.runs.length, 1);
-  assert.equal(w.runs[0].ownerId, "1");
+  assert.equal(w.runs[0].actorId, "1");
   assert.equal(w.runs[0].rule.id, rule.id);
   assert.equal(w.store.recentRuleRuns(rule.id, 1)[0]!.outcome, "executed");
 
@@ -114,7 +114,7 @@ test("a matching event runs the rule as its owner; the bot's own events and hidd
   const memberRule = w.admin.save(GUILD, "3", w.definition);
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("11", "2", "702"));
   await w.engine.idle();
-  assert.deepEqual(w.runs.map((r) => r.ownerId), ["1", "1"]);
+  assert.deepEqual(w.runs.map((r) => r.actorId), ["1", "1"]);
   assert.equal(w.store.recentRuleRuns(memberRule.id, 5).length, 0);
 });
 

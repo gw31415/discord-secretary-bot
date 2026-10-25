@@ -80,7 +80,8 @@ export interface PrepareRulesInput {
 
 export interface RuleRunInput {
   guildId: string;
-  ownerId: string;
+  /** Whose permissions the steps are checked against: the owner, or whoever ran a command. */
+  actorId: string;
   rule: PlanRule;
   drafts: StepDraft[];
   /** Images the rule's code made, which its posts may name in `files`. */
@@ -336,7 +337,7 @@ export class Planner {
     const guild = cache.guild;
     const id = randomBytes(6).toString("hex");
     const steps = normalizeSteps(input.drafts, input.guildId, id);
-    const ctx = { guild, actorId: input.ownerId, selfId: this.deps.selfId() };
+    const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId() };
     const [targets, channels, preconditions] = await Promise.all([
       this.#targets(input.guildId, steps, input.rule.allow),
       this.#channelStates(steps, input.rule.allow),
@@ -346,12 +347,12 @@ export class Planner {
     const problems = [...allowProblems(steps, input.rule.allow, targets, undefined, channels), ...steps.flatMap((s) => permissionProblems(s, ctx)), ...files.problems];
     if (problems.length > 0) throw new PlanRejected(problems);
 
-    const labels = await this.#labels(input.guildId, guild, [], input.ownerId);
+    const labels = await this.#labels(input.guildId, guild, [], input.actorId);
     const createdAt = new Date(this.deps.now()).toISOString();
     const draft: Omit<Plan, "hash"> = {
       id,
       guildId: input.guildId,
-      actor: { kind: "user", userId: input.ownerId, via: "rule" },
+      actor: { kind: "user", userId: input.actorId, via: "rule" },
       preconditions,
       steps,
       labels,

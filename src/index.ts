@@ -135,7 +135,7 @@ const engine = new RuleEngine({
   now: () => Date.now(),
   makeReader,
   notifyOwner: sendDm,
-  decide: (ownerId) => decideFor(store, ownerId),
+  decide: (userId) => decideFor(store, userId),
   wasm,
   onRulesChanged: syncCommands,
   log,
@@ -158,10 +158,10 @@ const rules = new RuleService({
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger }, ...(language ? { language } : {}) });
   },
-  visibilityScore: async ({ ownerId, command, options, reply, images, steps }) => {
-    const ref = judgeRef(store.getSettings(ownerId));
+  visibilityScore: async ({ userId, command, options, reply, images, steps }) => {
+    const ref = judgeRef(store.getSettings(userId));
     const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
+    const apiKey = ref && store.getApiKey(userId, ref.provider);
     if (!model || !apiKey) return null;
     return publicReplyScore({ model, apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
   },

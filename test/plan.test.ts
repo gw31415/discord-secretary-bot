@@ -550,7 +550,7 @@ test("a rule's plan runs without a dialog, as its owner, inside its allow list",
   const written: string[] = [];
   planner.deps.beforeWrite = (_plan, step) => void written.push(`before ${step.op} (${calls.length} sent)`);
   planner.deps.onWrite = (_plan, step) => void written.push(step.op);
-  const done = await planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "ようこそ" } }] });
+  const done = await planner.runForRule({ guildId: GUILD, actorId: "1", rule: RULE, drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "ようこそ" } }] });
   assert.equal(done.status, "succeeded");
   assert.equal(replies.length, 0); // no dialog
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["POST /channels/10/messages"]);
@@ -564,7 +564,7 @@ test("a rule's plan runs without a dialog, as its owner, inside its allow list",
 
 test("a rule's steps outside its allow list, or past its count, are rejected before anything runs", async () => {
   const { planner, calls } = setup();
-  const run = (drafts: any[]) => planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts });
+  const run = (drafts: any[]) => planner.runForRule({ guildId: GUILD, actorId: "1", rule: RULE, drafts });
   await assert.rejects(run([{ op: "POST /channels/{channel}/messages", path: { channel: "11" }, body: { content: "x" } }]), (e: unknown) => e instanceof PlanRejected && /範囲外/.test(e.reasons.join()));
   await assert.rejects(run([{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x".repeat(60) } }]), PlanRejected);
   await assert.rejects(run([{ op: "DELETE /channels/{channel}", path: { channel: "10" } }]), PlanRejected);
@@ -577,7 +577,7 @@ test("a rule's steps outside its allow list, or past its count, are rejected bef
   );
   // The owner's own permissions still apply.
   const manage = { ...RULE, allow: [{ op: "PATCH /channels/{channel}" }] };
-  await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "3", rule: manage, drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { topic: "x" } }] }), /依頼者に権限 ManageChannels/);
+  await assert.rejects(planner.runForRule({ guildId: GUILD, actorId: "3", rule: manage, drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { topic: "x" } }] }), /依頼者に権限 ManageChannels/);
   assert.equal(calls.length, 0);
 });
 
@@ -585,7 +585,7 @@ test("a value from an earlier step is checked against the allow list once it is 
   const { planner, calls } = setup();
   const rule = { ...RULE, allow: [{ op: "POST /guilds/{guild}/channels" }, { op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } } }] };
   const done = await planner.runForRule({
-    guildId: GUILD, ownerId: "1", rule,
+    guildId: GUILD, actorId: "1", rule,
     drafts: [
       { op: "POST /guilds/{guild}/channels", body: { name: "new" } },
       { op: "POST /channels/{channel}/messages", path: { channel: { $ref: "steps.s1.result.id" } }, body: { content: "hi" } },
@@ -601,7 +601,7 @@ test("a rule's target conditions are checked on the target as it is right before
   channels["60"] = { id: "60", type: 2, name: "📞 alice", guild_id: GUILD, permission_overwrites: [] };
   cache.guild!.channels.set("60", { id: "60", type: 2, name: "📞 alice", parentId: null, overwrites: [] });
   const rule = { ...RULE, allow: [{ op: "DELETE /channels/{channel}", target: { properties: { name: { pattern: "^📞" } }, required: ["name"] }, maxStepsPerRun: 1 }] };
-  const run = (channel: string) => planner.runForRule({ guildId: GUILD, ownerId: "1", rule, drafts: [{ op: "DELETE /channels/{channel}", path: { channel } }] });
+  const run = (channel: string) => planner.runForRule({ guildId: GUILD, actorId: "1", rule, drafts: [{ op: "DELETE /channels/{channel}", path: { channel } }] });
   await assert.rejects(run("10"), (e: unknown) => e instanceof PlanRejected && /範囲外/.test(e.reasons.join()));
   assert.equal(calls.length, 0);
   assert.equal((await run("60")).status, "succeeded");
@@ -852,12 +852,12 @@ test("a rule's post carries the images its code made, and only those", async () 
   const { planner, calls } = setup();
   const rule = { ...RULE, allow: [{ op: "POST /channels/{channel}/messages", path: { channel: { enum: ["10"] } }, body: { type: "object", properties: { content: { type: "string" }, files: { type: "array", maxItems: 4 } }, additionalProperties: false } }] };
   const drafts = [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x", files: ["img1"] } }];
-  await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "1", rule, drafts }), /画像 img1 がありません/);
-  const done = await planner.runForRule({ guildId: GUILD, ownerId: "1", rule, drafts, images: { img1: PNG } });
+  await assert.rejects(planner.runForRule({ guildId: GUILD, actorId: "1", rule, drafts }), /画像 img1 がありません/);
+  const done = await planner.runForRule({ guildId: GUILD, actorId: "1", rule, drafts, images: { img1: PNG } });
   assert.equal(done.status, "succeeded");
   assert.equal((calls.at(-1)!.options as { files?: unknown[] }).files!.length, 1);
   // The allow list still decides: a body without files in it refuses them.
-  await assert.rejects(planner.runForRule({ guildId: GUILD, ownerId: "1", rule: RULE, drafts, images: { img1: PNG } }), /範囲外/);
+  await assert.rejects(planner.runForRule({ guildId: GUILD, actorId: "1", rule: RULE, drafts, images: { img1: PNG } }), /範囲外/);
 });
 
 const TEX_RULE = {
@@ -917,7 +917,7 @@ test("neighbouring position changes go in one request; other steps are sent alon
   planner.deps.onWrite = (_plan, step) => void written.push(String(step.pathParams.channel));
   const rule = { ...RULE, allow: [ANY("PATCH /channels/{channel}")] };
   const done = await planner.runForRule({
-    guildId: GUILD, ownerId: "1", rule,
+    guildId: GUILD, actorId: "1", rule,
     drafts: [
       { op: "PATCH /channels/{channel}", path: { channel: "11" }, body: { position: 0 } },
       { op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { position: 1, parent_id: null } },
@@ -941,7 +941,7 @@ test("recent deletions in one channel use bulk delete; old ones are deleted one 
   for (const id of [a, b, old]) messages[id] = { id, content: "x", author: { username: "alice" } };
   const rule = { ...RULE, allow: [ANY("DELETE /channels/{channel}/messages/{message}")] };
   const done = await planner.runForRule({
-    guildId: GUILD, ownerId: "1", rule,
+    guildId: GUILD, actorId: "1", rule,
     drafts: [a, b, old].map((message) => ({ op: "DELETE /channels/{channel}/messages/{message}", path: { channel: "10", message } })),
   });
   assert.equal(done.status, "succeeded");
@@ -999,7 +999,7 @@ test("several role changes of one member become one PATCH with the whole list, r
   members["3"].roles = ["900"];
   const rule = { ...RULE, allow: [ANY("PUT /guilds/{guild}/members/{user}/roles/{role}"), ANY("DELETE /guilds/{guild}/members/{user}/roles/{role}")] };
   const done = await planner.runForRule({
-    guildId: GUILD, ownerId: "1", rule,
+    guildId: GUILD, actorId: "1", rule,
     drafts: [
       { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } },
       { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: "901" } },
@@ -1017,7 +1017,7 @@ test("two role changes are sent one by one: reading the list first would not sav
   addRoles(t, "901");
   const rule = { ...RULE, allow: [ANY("PUT /guilds/{guild}/members/{user}/roles/{role}")] };
   await planner.runForRule({
-    guildId: GUILD, ownerId: "1", rule,
+    guildId: GUILD, actorId: "1", rule,
     drafts: [MOD_ROLE, "901"].map((role) => ({ op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role } })),
   });
   assert.deepEqual(calls.map((c) => c.method), ["PUT", "PUT"]);
@@ -1029,7 +1029,7 @@ test("overwrites of one channel go in one PATCH; changes to one resource are mer
   channels["10"].permission_overwrites = [{ id: "3", type: 1, allow: "0", deny: "2048" }];
   const rule = { ...RULE, allow: [ANY("PUT /channels/{channel}/permissions/{overwrite}"), ANY("DELETE /channels/{channel}/permissions/{overwrite}"), ANY("PATCH /channels/{channel}"), ANY("PATCH /guilds/{guild}/members/{user}")] };
   const done = await planner.runForRule({
-    guildId: GUILD, ownerId: "1", rule,
+    guildId: GUILD, actorId: "1", rule,
     drafts: [
       { op: "PUT /channels/{channel}/permissions/{overwrite}", path: { channel: "10", overwrite: MOD_ROLE }, body: { type: 0, allow: "1024" } },
       { op: "PUT /channels/{channel}/permissions/{overwrite}", path: { channel: "10", overwrite: GUILD }, body: { type: 0, deny: "1024" } },

@@ -15,6 +15,8 @@ import type { WorkerInput, WorkerMessage } from "./worker.ts";
 // what the person it runs for may do.
 
 export const MAX_STDOUT = 4 * 1024 * 1024;
+/** judge() or rank() without a judge model; for a command, the model of whoever ran it. */
+export const NO_DECIDE = "判定モデル(または言語モデル)が設定されていないので judge・rank は使えません(`/settings` の「モデル」で選べます)";
 const MAX_STDERR = 64 * 1024;
 const MAX_LOG_LINES = 100;
 const MAX_LOG_LINE = 2000;
@@ -256,7 +258,7 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits, engine 
     throw new Error(what === "attachImage" ? `attachImage は1回の実行で${MAX_IMAGES_PER_RUN}回までです` : `画像を作れるのは1回の実行で${MAX_IMAGES_PER_RUN}枚までです(${what})`);
   };
   const decide = async (state: unknown, questions: unknown) => {
-    if (!bindings.decide) throw new Error("判定モデル(または言語モデル)が設定されていないので judge・rank は使えません");
+    if (!bindings.decide) throw new Error(NO_DECIDE);
     if (++decides > MAX_DECIDES_PER_RUN) throw new Error(`judge・rank は1回の実行で${MAX_DECIDES_PER_RUN}回までです`);
     const input = checkDecideInput(state, questions);
     return bindings.decide(input.state, input.questions);
