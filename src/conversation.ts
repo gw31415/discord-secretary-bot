@@ -22,7 +22,7 @@ import { toUploadable } from "./media.ts";
 import type { JudgeModel } from "./llm/models.ts";
 import { setupStatus } from "./llm/panel.ts";
 import type { Reader, ReadScope } from "./discord/reader.ts";
-import type { WidenRequest } from "./discord/widen.ts";
+import type { ContinueRequest, WidenRequest } from "./discord/widen.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
 import type { Rule, RuleRun } from "./rules/types.ts";
@@ -86,6 +86,8 @@ export interface ConversationDeps {
   };
   /** Asks the speaker, with buttons, to let one reply read up to their own permissions. Absent keeps reads to the channel's audience. */
   askWiden?: (input: WidenRequest) => Promise<boolean>;
+  /** Asks the speaker whether a reply may go on past its turn limit. */
+  askContinue?: (input: ContinueRequest) => Promise<boolean>;
   /** A conversation woke or was extended. */
   onAwake?: () => void;
   log: (message: string, error?: unknown) => void;
@@ -510,6 +512,7 @@ export class Conversations {
         decide: decideFor(store, speaker),
         ...(this.deps.react ? { react: (emoji: string) => this.deps.react!(channelId, input.replyToId, emoji) } : {}),
         widen,
+        ...(this.deps.askContinue ? { askContinue: (turns: number) => this.deps.askContinue!({ channelId, replyToId: input.replyToId, speakerId: speaker, turns }) } : {}),
         onProgress: async (content) => {
           await post(content);
           await this.deps.typing(channelId).catch(() => undefined);

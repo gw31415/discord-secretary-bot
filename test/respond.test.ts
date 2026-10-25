@@ -384,3 +384,41 @@ test("stopping at the turn limit gives the limit's message, not a failed reply",
     llm.deleteProvider(faux.provider.id);
   }
 });
+
+test("at the turn limit the speaker can let the reply go on from where it stopped", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    const call = () => fauxAssistantMessage([fauxToolCall("list_channels", {})], { stopReason: "toolUse" });
+    faux.setResponses([...Array.from({ length: 12 }, call), ...Array.from({ length: 3 }, call), fauxAssistantMessage([fauxText("チャンネルは #general です")])]);
+    const asked: number[] = [];
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
+      transcript: [], target: "[1] user: チャンネルを教えて", web: null,
+      askContinue: async (turns) => (asked.push(turns), true),
+    });
+    assert.equal(asked.length, 1);
+    assert.equal(result.text, "チャンネルは #general です");
+    assert.equal(result.toolCalls.length, 15);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});
+
+test("a speaker who says stop at the turn limit gets the limit's message", async () => {
+  const faux = fauxProvider();
+  llm.setProvider(faux.provider);
+  try {
+    faux.setResponses(Array.from({ length: 30 }, () => fauxAssistantMessage([fauxToolCall("list_channels", {})], { stopReason: "toolUse" })));
+    let asked = 0;
+    const result = await respond({
+      model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
+      transcript: [], target: "[1] user: チャンネルを教えて", web: null,
+      askContinue: async () => (asked++, false),
+    });
+    assert.equal(asked, 1);
+    assert.match(result.text, /手順が多くなりすぎた/);
+  } finally {
+    llm.deleteProvider(faux.provider.id);
+  }
+});

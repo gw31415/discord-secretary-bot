@@ -222,6 +222,7 @@ const conversations = new Conversations({
     },
   },
   askWiden: (input) => widenPrompts.ask(input),
+  askContinue: (input) => widenPrompts.askContinue(input),
   onAwake: () => presence.refresh(),
   log,
 });

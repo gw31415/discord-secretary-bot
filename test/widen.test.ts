@@ -49,3 +49,15 @@ test("no answer in time counts as not allowed and takes the buttons away", async
   assert.equal(await prompts.ask({ channelId: "10", replyToId: "1", speakerId: "2", reason: "x" }), false);
   assert.equal(f.edits.length, 1);
 });
+
+test("going on past the turn limit is asked the same way", async () => {
+  const f = fakeApi();
+  const prompts = new WidenPrompts(f.api);
+  const answer = prompts.askContinue({ channelId: "10", replyToId: "1", speakerId: "2", turns: 12 });
+  await new Promise((r) => setImmediate(r));
+  assert.match((f.posted[0] as unknown as { content: string }).content, /手順が12回に達した/);
+  const [, no] = f.posted[0]!.components[0]!.components.map((b) => b.custom_id);
+  await prompts.handleInteraction(press(no!, "2"));
+  assert.equal(await answer, false);
+  assert.match(f.updates[0]!, /ここで終えました/);
+});
