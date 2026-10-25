@@ -1,0 +1,17 @@
+{
+  "name": "wasm-compiler",
+  "version": "0.1.0",
+  "description": "Compiles source code to WASI Wasm modules in a throwaway bubblewrap sandbox, one directory per language",
+  "private": true,
+  "type": "module",
+  "main": "src/main.ts",
+  "scripts": {
+    "start": "node src/main.ts serve",
+    "check": "tsc -p .",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.19"
+  }
+}

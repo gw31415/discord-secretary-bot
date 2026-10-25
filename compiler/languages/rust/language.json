@@ -1,0 +1,14 @@
+{
+  "id": "rust",
+  "name": "Rust",
+  "version": "1",
+  "toolchain": "rust-1.90.0",
+  "rootfs": "base",
+  "entry": ["src/main.rs"],
+  "extensions": [".rs"],
+  "paths": "^src/([a-z0-9_]+/)*[a-z0-9_]+\\.rs$",
+  "maxFiles": 32,
+  "timeoutMs": 180000,
+  "abi": ["secretary/1"],
+  "libraries": ["serde (derive)", "serde_json"]
+}

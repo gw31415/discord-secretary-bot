@@ -1,0 +1,14 @@
+{
+  "id": "c",
+  "name": "C/C++",
+  "version": "1",
+  "toolchain": "wasi-sdk-25",
+  "rootfs": "base",
+  "entry": ["main.c", "main.cpp", "main.cc"],
+  "extensions": [".c", ".h", ".cc", ".cpp", ".hpp"],
+  "paths": "^([A-Za-z0-9_-]+/)?[A-Za-z0-9_-]+\\.(c|h|cc|cpp|hpp)$",
+  "maxFiles": 32,
+  "timeoutMs": 60000,
+  "abi": ["secretary/1"],
+  "libraries": ["cJSON 1.7.18"]
+}

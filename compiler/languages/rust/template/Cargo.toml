@@ -1,0 +1,20 @@
+# Fixed for every build: a request carries source files only. Changing this
+# (or the libraries) needs `setup rust` again, which vendors and prebuilds them.
+[package]
+name = "module"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+
+[profile.speed]
+inherits = "release"
+opt-level = 3
