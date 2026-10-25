@@ -27,12 +27,14 @@ ProtectHome=true
 PrivateTmp=true
 PrivateNetwork=true
 PrivateDevices=true
-ProtectKernelTunables=true
 ProtectKernelModules=true
-ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
-# No ProtectHostname: its seccomp filter also stops bwrap naming the box's own UTS namespace.
+# Left out on purpose, as they stop bwrap making the box: ProtectHostname (its
+# seccomp filter refuses naming the box's own UTS namespace) and
+# ProtectKernelTunables/ProtectKernelLogs (their mounts over /proc forbid a
+# fresh /proc inside it). The service is not root, so /proc/sys and the kernel
+# log stay out of its reach anyway.
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
