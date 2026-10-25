@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { REST } from "@discordjs/rest";
 import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider, Type } from "@earendil-works/pi-ai";
 import { llm } from "../src/llm/models.ts";
-import { Inbox, ReplyFailed, respond, takeReactTags, typicalLength } from "../src/agent/respond.ts";
+import { hasWrittenToolCall, Inbox, ReplyFailed, respond, stripWrittenToolCalls, typicalLength } from "../src/agent/respond.ts";
 import { isTransient } from "../src/agent/retry.ts";
 import { attachedResult, ImageBox } from "../src/agent/attachments.ts";
 import { stripComments } from "../src/agent/summarize.ts";
@@ -423,24 +423,50 @@ test("a speaker who says stop at the turn limit gets the limit's message", async
   }
 });
 
-test("a react call written as text reacts instead of showing up in the reply", async () => {
-  assert.deepEqual(takeReactTags('<react emoji="🙂">'), { text: "", emojis: ["🙂"] });
-  assert.deepEqual(takeReactTags("いいね <react emoji='👍'/>"), { text: "いいね", emojis: ["👍"] });
-  assert.deepEqual(takeReactTags('<react emoji="🎉"></react>おめでとう'), { text: "おめでとう", emojis: ["🎉"] });
-  assert.deepEqual(takeReactTags("ふつうの返事"), { text: "ふつうの返事", emojis: [] });
+test("a tool call written as text is asked for again, and never posted", async () => {
+  const tools = ["react", "list_channels"];
+  for (const written of ['<react emoji="🙂">', "<react emoji='👍'/>", '<list_channels></list_channels>', '<tool_call>{"name":"react","arguments":{"emoji":"🙂"}}</tool_call>', "<function=react>{\"emoji\":\"🙂\"}</function>"]) {
+    assert.ok(hasWrittenToolCall(`了解 ${written}`, tools), written);
+    assert.equal(stripWrittenToolCalls(`了解 ${written}`, tools), "了解", written);
+  }
+  // Other tags, and tags inside code, are text.
+  assert.ok(!hasWrittenToolCall("<messages> は履歴です", tools));
+  assert.ok(!hasWrittenToolCall("`<react emoji=\"🙂\">` と書かれていました", tools));
+  assert.ok(!hasWrittenToolCall("```html\n<react emoji=\"🙂\">\n```", tools));
+
   const faux = fauxProvider();
   llm.setProvider(faux.provider);
   try {
-    faux.setResponses([fauxAssistantMessage([fauxText('<react emoji="🙂">')])]);
+    faux.setResponses([
+      fauxAssistantMessage([fauxText('<react emoji="🙂">')]),
+      fauxAssistantMessage([fauxToolCall("react", { emoji: "🙂" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxText("")]),
+    ]);
     const reacted: string[] = [];
     const result = await respond({
       model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
       transcript: [], target: "[1] user: ありがとう", web: null, react: async (e) => { reacted.push(e); },
     });
-    assert.equal(result.text, "");
     assert.deepEqual(reacted, ["🙂"]);
-    assert.deepEqual(result.reactions, ["🙂"]);
+    assert.equal(result.text, "");
   } finally {
     llm.deleteProvider(faux.provider.id);
+  }
+
+  // Asked once: a second written call is taken out of the reply.
+  const again = fauxProvider();
+  llm.setProvider(again.provider);
+  try {
+    again.setResponses([
+      fauxAssistantMessage([fauxText('<react emoji="🙂">')]),
+      fauxAssistantMessage([fauxText('どういたしまして <react emoji="🙂">')]),
+    ]);
+    const result = await respond({
+      model: again.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
+      transcript: [], target: "[1] user: ありがとう", web: null, react: async () => undefined,
+    });
+    assert.equal(result.text, "どういたしまして");
+  } finally {
+    llm.deleteProvider(again.provider.id);
   }
 });
