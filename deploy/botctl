@@ -208,7 +208,13 @@ cmd_compiler() {
       sudo chown -R root:root "$CHOME/app"
       sudo chmod -R u=rwX,go=rX "$CHOME/app"
       sudo install -m 755 "$NODE" "$CHOME/node"
-      printf 'WASM_COMPILER_SOCKET_GID=%s\n' "$(getent group wasm-compiler-clients | cut -d: -f3)" | sudo tee "$CHOME/env" >/dev/null
+      # Its own bwrap, so the AppArmor profile that lets it make user namespaces covers nothing else.
+      sudo install -D -m 755 /usr/bin/bwrap "$CHOME/bin/bwrap"
+      if [[ -d /etc/apparmor.d ]] && command -v apparmor_parser >/dev/null; then
+        sudo install -m 644 "$src/deploy/apparmor/wasm-compiler-bwrap" /etc/apparmor.d/wasm-compiler-bwrap
+        sudo apparmor_parser -r /etc/apparmor.d/wasm-compiler-bwrap
+      fi
+      printf 'WASM_COMPILER_SOCKET_GID=%s\nBWRAP=%s\n' "$(getent group wasm-compiler-clients | cut -d: -f3)" "$CHOME/bin/bwrap" | sudo tee "$CHOME/env" >/dev/null
       sudo install -m 644 "$src/deploy/$CUNIT.service" "/etc/systemd/system/$CUNIT.service"
       sudo systemctl daemon-reload
       sudo systemctl enable -q "$CUNIT"
@@ -217,7 +223,10 @@ cmd_compiler() {
       ;;
     rootfs) command -v mmdebstrap >/dev/null || sudo apt-get install -y -q mmdebstrap; compiler_node rootfs "${1:-base}" ;;
     setup) [[ $# -gt 0 ]] || die "言語を指定してください(c, rust, go など)"; for lang in "$@"; do compiler_node setup "$lang"; done; sudo systemctl restart "$CUNIT" ;;
-    selftest) sudo -u wasmc env WASM_COMPILER_HOME="$CHOME" WASM_COMPILER_JOBS=/var/lib/wasm-compiler/selftest "$CHOME/node" "$CHOME/app/src/main.ts" selftest ;;
+    # As a unit like the service, so it meets the same AppArmor and systemd limits a login shell does not.
+    selftest) sudo systemd-run --quiet --wait --pipe --collect -p User=wasmc -p EnvironmentFile="$CHOME/env" \
+        -E WASM_COMPILER_HOME="$CHOME" -E WASM_COMPILER_JOBS=/var/tmp/wasm-compiler-selftest \
+        "$CHOME/node" "$CHOME/app/src/main.ts" selftest ;;
     status)
       say "wasm-compiler: $(systemctl is-active "$CUNIT" 2>/dev/null || true)"
       sudo curl -fsS --unix-socket /run/wasm-compiler/compiler.sock http://compiler/v1/languages 2>/dev/null \

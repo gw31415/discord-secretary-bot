@@ -36,6 +36,8 @@ export interface CompilerOptions {
 
 export class Busy extends Error {}
 export class NotReady extends Error {}
+/** bubblewrap could not make the box; nothing about the source, so it is not cached. */
+export class BoxFailed extends Error {}
 
 export class Compiler {
   readonly languages: Map<string, Language>;
@@ -120,6 +122,8 @@ export class Compiler {
       const durationMs = Date.now() - started;
       const base = { log, durationMs, cached: false, language: language.id, version };
       if (outcome.timedOut) return { ok: false, stage: "limit", diagnostics: [], ...base, log: `${log}\nコンパイルが${language.timeoutMs / 1000}秒を超えたので止めました`.trim() };
+      // bubblewrap itself failed before the build began: the service is broken, not the source.
+      if (outcome.exitCode !== 0 && /^bwrap: /.test(log)) throw new BoxFailed(`ビルド用の箱を作れませんでした(${log.split("\n")[0]!.slice(0, 200)})`);
       if (outcome.exitCode !== 0) {
         const diagnostics = parseDiagnostics(log);
         return { ok: false, stage: outcome.signal || /(No space left|File size limit|Killed)/i.test(log) ? "limit" : "compile", diagnostics, ...base };

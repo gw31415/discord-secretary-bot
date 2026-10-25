@@ -5,7 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Busy, Compiler, NotReady } from "../src/compiler.ts";
+import { BoxFailed, Busy, Compiler, NotReady } from "../src/compiler.ts";
 import { parseDiagnostics } from "../src/diagnostics.ts";
 import { type Language, loadLanguage, loadLanguages } from "../src/languages.ts";
 import { parseCompileRequest, RequestError, safePath } from "../src/request.ts";
@@ -232,6 +232,17 @@ test("a build past its time is a limit and is not cached", async () => {
   const result = await compiler.compile(compileC(languages));
   assert.ok(!result.ok && result.stage === "limit");
   await compiler.compile(compileC(languages));
+  assert.equal(builds, 2);
+});
+
+test("a box that bubblewrap cannot make is the service's failure, not the source's, and is not cached", async () => {
+  let builds = 0;
+  const { compiler, languages } = setup(async () => {
+    builds++;
+    return { exitCode: 1, signal: null, timedOut: false, output: "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n", truncated: false };
+  });
+  await assert.rejects(compiler.compile(compileC(languages)), BoxFailed);
+  await assert.rejects(compiler.compile(compileC(languages)), BoxFailed);
   assert.equal(builds, 2);
 });
 

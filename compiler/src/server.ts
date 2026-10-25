@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { Busy, type Compiler, NotReady } from "./compiler.ts";
+import { BoxFailed, Busy, type Compiler, NotReady } from "./compiler.ts";
 import { describe, guide } from "./languages.ts";
 import { parseCompileRequest, RequestError } from "./request.ts";
 
@@ -54,7 +54,10 @@ async function handle(compiler: Compiler, req: IncomingMessage, res: ServerRespo
       return send(res, 200, result.ok ? { ...result, wasm: result.wasm.toString("base64") } : result);
     } catch (e) {
       if (e instanceof RequestError) return send(res, 400, { error: e.message });
-      if (e instanceof Busy || e instanceof NotReady) return send(res, 503, { error: e.message });
+      if (e instanceof Busy || e instanceof NotReady || e instanceof BoxFailed) {
+        if (e instanceof BoxFailed) log(e.message);
+        return send(res, 503, { error: e.message });
+      }
       throw e;
     }
   }
