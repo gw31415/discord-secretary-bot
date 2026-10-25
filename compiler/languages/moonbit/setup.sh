@@ -20,3 +20,6 @@ echo "$SUM  $TMP/moonbit.tar.gz" | sha256sum -c -
 echo "$CORE_SUM  $TMP/core.tar.gz" | sha256sum -c -
 tar xzf "$TMP/moonbit.tar.gz" -C "$DEST"
 tar xzf "$TMP/core.tar.gz" -C "$DEST/lib"
+# The archive's files come without the execute bit (the upstream installer adds it).
+chmod -R a+rX "$DEST"
+chmod a+x "$DEST"/bin/* "$DEST"/bin/internal/*

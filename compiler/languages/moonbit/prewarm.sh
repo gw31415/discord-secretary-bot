@@ -3,7 +3,6 @@
 # core library for the wasm target, lists its packages for build.sh, and builds a sample.
 set -eu
 . /lang/env.sh
-chmod +x /toolchain/bin/* /toolchain/bin/internal/* 2>/dev/null || true
 moon -C /toolchain/lib/core bundle --target wasm --warn-list -a
 # "alias path" for every core package; the shortest path wins an alias.
 (cd /toolchain/lib/core && find . -name 'moon.pkg*' -not -path './_build/*' -not -path '*/internal/*' \
