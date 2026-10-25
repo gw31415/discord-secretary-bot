@@ -73,11 +73,11 @@ test("a mention wakes the bot and replies with the speaker's key", async () => {
   assert.equal(t.store.getConversation("10")!.startedBy, "1");
 });
 
-test("while awake, other members are judged with the waker's key and answered with their own", async () => {
+test("while awake, other members are judged and answered with their own key", async () => {
   const t = setup();
   await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
   await t.conv.handle(message("2", "2", "and what about roles?"));
-  assert.deepEqual(t.judged, ["sk-ant-key-for-1"]);
+  assert.deepEqual(t.judged, ["sk-ant-key-for-2"]);
   assert.equal(t.responded[1]!.apiKey, "sk-ant-key-for-2");
 });
 

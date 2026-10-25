@@ -264,7 +264,7 @@ function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
     return body;
   }
   body.push(
-    { type: ComponentType.TextDisplay, content: "**宛先の判定**\nあなたが始めた会話で、発言がBot宛てかどうかを決めます。" },
+    { type: ComponentType.TextDisplay, content: "**宛先の判定**\nBotが起きている間に、あなたのメンションのない発言がBot宛てかどうかを決めます。" },
     ...roleSelects(store, userId, "addressee", "宛先を判定するモデル", "判定モデルと同じ"),
     { type: ComponentType.TextDisplay, content: "**コード**\n調べもの、変更案、ルールのコードを書きます。" },
     ...roleSelects(store, userId, "code", "コードを書くモデル", "言語モデルと同じ"),
