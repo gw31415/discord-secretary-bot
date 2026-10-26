@@ -19,6 +19,8 @@ ROOT="${BOT_ROOT:-$HOME/discord-secretary-bot}"
 REPO="${BOT_REPO:-https://github.com/gw31415/discord-secretary-bot.git}"
 NODE="${BOT_NODE:-$HOME/.local/share/mise/installs/node/26.8.2/bin/node}"
 UNIT="discord-secretary-bot"
+# The units' node: a root-owned copy, since the services cannot see $HOME.
+SERVICE_NODE="/opt/discord-secretary-bot/node"
 STATE="$ROOT/state"
 PATH="$(dirname "$NODE"):$PATH"
 export PATH
@@ -163,20 +165,39 @@ cmd_logs() {
   journalctl -u "$(unit "${1:-prod}")" -n "${2:-50}" --no-pager -o cat
 }
 
+# The environment's own user reads its clone and writes its data; default ACLs
+# keep that true for what git and npm write later, and let this user read and
+# replace the database the service writes. The .env stays root:root 600.
+access() {
+  local user="secretary-$1" dir="$ROOT/$1"
+  id "$user" >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$user"
+  if [[ -f "$dir/.env" ]]; then
+    sudo chown root:root "$dir/.env"
+    sudo chmod 600 "$dir/.env"
+  fi
+  # The .env is root's, so setfacl only reports it.
+  setfacl -R -m "u:$user:rX,d:u:$user:rX" "$dir" 2>/dev/null || true
+  setfacl -R -m "u:$user:rwX,d:u:$user:rwX,d:u:$(id -un):rwX" "$dir/data"
+}
+
 cmd_install() {
   local env
   mkdir -p "$STATE"
+  command -v setfacl >/dev/null || sudo apt-get install -y -q acl
+  getent group wasm-compiler-clients >/dev/null || sudo groupadd --system wasm-compiler-clients
   for env in prod dev; do
     [[ -d "$ROOT/$env/.git" ]] || git clone -q "$REPO" "$ROOT/$env"
     mkdir -p "$ROOT/$env/data"
     chmod 700 "$ROOT" "$ROOT/$env" "$ROOT/$env/data"
+    access "$env"
   done
-  sed -e "s#@ROOT@#$ROOT#g" -e "s#@NODE@#$NODE#g" -e "s#@USER@#$(id -un)#g" \
+  sudo install -D -m 755 "$NODE" "$SERVICE_NODE"
+  sed -e "s#@ROOT@#$ROOT#g" -e "s#@NODE@#$SERVICE_NODE#g" \
     "$ROOT/dev/deploy/$UNIT@.service" | sudo tee "/etc/systemd/system/$UNIT@.service" >/dev/null
   sudo systemctl daemon-reload
   # A copy, so checking out another branch in dev never changes the tool itself.
   sudo install -m 755 "$ROOT/dev/deploy/botctl" /usr/local/bin/botctl
-  say "設置しました。prod/.env と dev/.env を用意してから: sudo systemctl enable --now $UNIT@prod $UNIT@dev"
+  say "設置しました。prod/.env と dev/.env を用意したら、もう一度 botctl install を実行して(.env を root だけが読めるようにします)から: sudo systemctl enable --now $UNIT@prod $UNIT@dev"
 }
 
 # --- wasm-compiler ------------------------------------------------------------
