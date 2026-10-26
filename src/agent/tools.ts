@@ -89,13 +89,16 @@ export function formatMessage(m: Omit<APIMessage, "reactions"> & Partial<Pick<AP
 /**
  * The first line of a search result. It comes first so that a long page cut
  * short still says whether more follow; without a total, a full page is easy
- * to take for every hit.
+ * to take for every hit. In time order the next page starts past the last
+ * hit shown (max_id going back, min_id going forward), which reads no pages
+ * twice and has no depth limit; by relevance only offset works.
  */
-export function searchHeader(offset: number, shown: number, more: boolean): string {
-  const range = `${offset + 1}〜${offset + shown}件目`;
-  return more
-    ? `${range}を表示(続きがあります。これで全部ではありません。次は offset: ${offset + shown} で読めます)`
-    : `${range}を表示(これで最後です)`;
+export function searchHeader(offset: number | null, shown: number, more: boolean, next?: { key: "max_id" | "min_id"; id: string }): string {
+  // A page reached by max_id or min_id has no place in the whole to show.
+  const range = offset === null ? `${shown}件` : `${offset + 1}〜${offset + shown}件目`;
+  if (!more) return `${range}を表示(これで最後です)`;
+  const how = next ? `${next.key}: "${next.id}" で読めます(offset は付けません)` : `offset: ${(offset ?? 0) + shown} で読めます`;
+  return `${range}を表示(続きがあります。これで全部ではありません。次は ${how})`;
 }
 
 function channelLabel(c: APIChannel): string {
@@ -195,7 +198,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     name: "search_messages",
     label: "メッセージ検索",
     description:
-      "サーバー内のメッセージを検索します。本文・投稿者・チャンネル・メンション・添付の有無で絞り込めます。検索対象は今のチャンネルで扱えるチャンネルに自動で限定されます。1回で返るのは最大25件で、該当の総数は返しません。結果の先頭に続きがあると出たら、それで全部ではありません。件数や「全部」を答えるときは、続きがないと出るまで offset を進めて読みます。offset で読めるのは先頭から200件までで、それより先は max_id・min_id で範囲を絞ります。",
+      "サーバー内のメッセージを検索します。本文・投稿者・チャンネル・メンション・添付の有無で絞り込めます。検索対象は今のチャンネルで扱えるチャンネルに自動で限定されます。1回で返るのは最大25件で、該当の総数は返しません。結果の先頭に続きがあると出たら、それで全部ではありません。件数や「全部」を答えるときは、続きがないと出るまで、案内に出た max_id(古い順なら min_id)か offset で次を読みます。時刻順(既定)なら max_id・min_id で続きを読み、関連度順のときだけ offset を使います(offset は先頭から200件まで)。",
     parameters: Type.Object({
       content: Type.Optional(Type.String({ description: "本文に含む語" })),
       author_id: Type.Optional(Type.Array(Type.String())),
@@ -216,7 +219,10 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       }
       const lines = res.messages.map((group) => group.map((m) => `#${m.channel_id} ${formatMessage(m)}`).join("\n"));
       if (lines.length === 0) return text("該当するメッセージはありません");
-      return text(`${searchHeader(params.offset ?? 0, lines.length, res.has_more)}\n${lines.join("\n")}`);
+      const last = res.messages.at(-1)?.at(-1)?.id;
+      const next = params.sort_by !== "relevance" && last ? { key: params.sort_order === "asc" ? ("min_id" as const) : ("max_id" as const), id: last } : undefined;
+      const offset = params.max_id || params.min_id ? null : (params.offset ?? 0);
+      return text(`${searchHeader(offset, lines.length, res.has_more, next)}\n${lines.join("\n")}`);
     },
   });
 

@@ -282,4 +282,7 @@ test("a full search page says, before the hits, that it is not all of them", asy
   const { searchHeader } = await import("../src/agent/tools.ts");
   assert.match(searchHeader(0, 25, true), /^1〜25件目.*続きがあります.*offset: 25/);
   assert.match(searchHeader(25, 3, false), /^26〜28件目.*最後/);
+  // In time order the next page is asked for by the last hit shown, not by offset.
+  assert.match(searchHeader(0, 25, true, { key: "max_id", id: "77" }), /続きがあります.*max_id: "77"/);
+  assert.match(searchHeader(null, 25, true, { key: "max_id", id: "52" }), /^25件を表示/);
 });
