@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
-import { findChatModel, judgeRef, lightestThinking, selectableModels } from "../src/llm/models.ts";
+import { findChatModel, isMustThinkError, judgeRef, lightestThinking, llm, selectableModels } from "../src/llm/models.ts";
 import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
 import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
 
@@ -280,4 +280,26 @@ test("a person who chose Claude's web tools moves to the response model's standa
   assert.equal(after.getSettings("u1").web, "auto");
   after.db.close();
   rmSync(dir, { recursive: true });
+});
+
+test("OpenRouter models that must think are retried once with the lightest level and remembered", async () => {
+  const model = llm.getModels("openrouter").find((m) => m.reasoning && m.api === "openai-completions" && !m.thinkingLevelMap)!;
+  const bodies: { reasoning?: { effort?: string } }[] = [];
+  const fetch = async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    bodies.push(body);
+    if (body.reasoning?.effort === "none") {
+      return new Response(JSON.stringify({ error: { message: "Reasoning is mandatory for this endpoint and cannot be disabled.", code: 400 } }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+    const chunk = { id: "x", object: "chat.completion.chunk", created: 0, model: model.id, choices: [{ index: 0, delta: { role: "assistant", content: "はい" }, finish_reason: "stop" }] };
+    return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const context = { messages: [{ role: "user" as const, content: "こんにちは", timestamp: Date.now() }] };
+  const first = await llm.completeSimple(model, context, { apiKey: "k", fetch, maxRetries: 0 } as never);
+  assert.equal(first.stopReason, "stop", first.errorMessage);
+  assert.deepEqual(bodies.map((b) => b.reasoning?.effort), ["none", "minimal"]);
+  assert.equal(lightestThinking(model), "minimal");
+  await llm.completeSimple(model, context, { apiKey: "k", fetch, maxRetries: 0 } as never);
+  assert.deepEqual(bodies.map((b) => b.reasoning?.effort), ["none", "minimal", "minimal"]);
+  assert.ok(isMustThinkError('400: {"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}'));
 });

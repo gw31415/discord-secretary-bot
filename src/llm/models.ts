@@ -1,4 +1,4 @@
-import { createModels, isModelType } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, createModels, isModelType } from "@earendil-works/pi-ai";
 import type { Api, ClassifierApi, ClassifierModel, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
@@ -57,6 +57,49 @@ llm.setProvider(zaiProvider());
 llm.setProvider(openaiProvider());
 llm.setProvider(openrouterProvider());
 
+/**
+ * OpenRouter models whose endpoint refuses requests with thinking off but are not marked
+ * `off: null` in the catalog. They are learned from the 400 and kept until restart.
+ */
+const mustThink = new Set<string>();
+const MUST_THINK_ERROR = /Reasoning is mandatory/i;
+
+export function isMustThinkError(message: string | undefined): boolean {
+  return !!message && MUST_THINK_ERROR.test(message);
+}
+
+function thinksAnyway(model: Model<Api>): boolean {
+  return model.provider === "openrouter" && mustThink.has(model.id);
+}
+
+/** Mark a model as one that cannot skip thinking (also used by tests). */
+export function rememberMustThink(model: Model<Api>): void {
+  mustThink.add(model.id);
+}
+
+// The bot asks for no thinking, which OpenRouter sends as `reasoning: { effort: "none" }`.
+// When the endpoint answers that thinking is mandatory, the request is sent again once with the
+// lightest level, and later requests to that model start there.
+const streamWithoutRetry = llm.streamSimple.bind(llm);
+llm.streamSimple = (model, context, options) => {
+  if (model.provider !== "openrouter" || !model.reasoning || options?.reasoning) return streamWithoutRetry(model, context, options);
+  const thinking = { ...options, reasoning: lightestLevel(model), maxTokens: Math.max(options?.maxTokens ?? 0, 2000) };
+  if (thinksAnyway(model)) return streamWithoutRetry(model, context, thinking);
+  const out = createAssistantMessageEventStream();
+  void (async () => {
+    for await (const event of streamWithoutRetry(model, context, options)) {
+      if (event.type === "error" && event.reason === "error" && isMustThinkError(event.error.errorMessage)) {
+        rememberMustThink(model);
+        for await (const retried of streamWithoutRetry(model, context, thinking)) out.push(retried);
+        return out.end();
+      }
+      out.push(event);
+    }
+    out.end();
+  })();
+  return out;
+};
+
 // Dated snapshots duplicate their alias (claude-sonnet-4-5 vs claude-sonnet-4-5-20250929)
 // and only lengthen the select menus.
 const DATED_SNAPSHOT = /-\d{8}$|-\d{4}-\d{2}-\d{2}$/;
@@ -100,10 +143,16 @@ const THINKING_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high", "x
 /**
  * The bot answers without thinking where it can. Some models reject requests
  * with thinking off, marked by `off: null` in their level map; those get their
- * lightest supported level instead.
+ * lightest supported level instead, as do OpenRouter models learned to refuse
+ * (see llm.streamSimple above).
  */
 export function lightestThinking(model: Model<Api>): ThinkingLevel | undefined {
+  if (thinksAnyway(model)) return lightestLevel(model);
   const map = model.thinkingLevelMap;
   if (!model.reasoning || !map || map.off !== null) return undefined;
-  return THINKING_LEVELS.find((level) => map[level] !== null);
+  return lightestLevel(model);
+}
+
+function lightestLevel(model: Model<Api>): ThinkingLevel {
+  return THINKING_LEVELS.find((level) => model.thinkingLevelMap?.[level] !== null) ?? "minimal";
 }
