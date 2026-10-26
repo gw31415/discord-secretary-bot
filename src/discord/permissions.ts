@@ -101,6 +101,17 @@ export function canView(guild: GuildState, member: MemberState, channelId: strin
   return has(channelPermissions(guild, member, channelId), PermissionFlagsBits.ViewChannel);
 }
 
+/**
+ * True when seeing `channelId` also takes being one of its members: a private
+ * thread, for someone without Manage Threads there (Discord shows private
+ * threads only to their members and to those who manage threads). Channel
+ * permissions alone cannot tell, because a thread takes its parent's.
+ */
+export function needsThreadMembership(guild: GuildState, member: MemberState, channelId: string): boolean {
+  if (guild.channels.get(channelId)?.type !== ChannelType.PrivateThread) return false;
+  return !has(channelPermissions(guild, member, channelId), PermissionFlagsBits.ManageThreads);
+}
+
 export function canReadHistory(guild: GuildState, member: MemberState, channelId: string): boolean {
   return has(
     channelPermissions(guild, member, channelId),

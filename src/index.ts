@@ -134,6 +134,8 @@ const engine = new RuleEngine({
   selfId: () => selfId,
   now: () => Date.now(),
   makeReader,
+  // 404 when they are not in it; any failure counts as not in it.
+  threadMember: (threadId, userId) => rest.get(`/channels/${threadId}/thread-members/${userId}`).then(() => true, () => false),
   notifyOwner: sendDm,
   decide: (userId) => decideFor(store, userId),
   wasm,
