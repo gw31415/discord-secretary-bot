@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { toChannel } from "../discord/cache.ts";
-import { canView } from "../discord/permissions.ts";
+import { canView, needsThreadMembership } from "../discord/permissions.ts";
 import { ownerAllowProblems } from "./allow.ts";
 import type { GuildState } from "../discord/permissions.ts";
 import type { Reader, ReadScope } from "../discord/reader.ts";
@@ -60,6 +60,11 @@ export interface RuleEngineDeps {
   wasm?: Pick<WasmRegistry, "compiled">;
   /** The judge model of whoever the run acts as, for judge() and rank() in rule code. */
   decide?: (userId: string) => Decide | undefined;
+  /**
+   * Whether the user is a member of the thread, asked of Discord because the
+   * cache does not track thread members. Without it, private threads are never shown.
+   */
+  threadMember?: (threadId: string, userId: string) => Promise<boolean>;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -212,6 +217,27 @@ export class RuleEngine {
     // A created or deleted channel may not be in the cache; its own overwrites decide.
     if (spec.isChannel && data.id) view = { ...guild, channels: new Map(guild.channels).set(data.id, toChannel(data as never)) };
     return canView(view, owner, channelId);
+  }
+
+  /**
+   * #visible goes by channel permissions, which a thread takes from its parent;
+   * a private thread is also shown only to its members (and to those who manage
+   * threads), so they are asked of Discord. Only when the run starts, as it is async.
+   */
+  async #inThread(guild: GuildState, event: string, data: Data, userId: string): Promise<boolean> {
+    const spec = TRIGGERS[event]!;
+    const channelId = spec.channel?.(data);
+    if (!channelId) return true;
+    const member = guild.members.get(userId);
+    if (!member) return false;
+    let view = guild;
+    if (spec.isChannel && data.id) view = { ...guild, channels: new Map(guild.channels).set(data.id, toChannel(data as never)) };
+    if (!needsThreadMembership(view, member, channelId)) return true;
+    try {
+      return (await this.deps.threadMember?.(channelId, userId)) ?? false;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -388,7 +414,9 @@ export class RuleEngine {
     if (!guild) return null;
     // Checked again now, not only when the events came: a debounced, held-back or queued run
     // may start well after them, and roles can change in between.
-    const visible = batch.filter((item) => this.#visible(rule, guild, item.eventName, item.event, actor));
+    const shown = batch.filter((item) => this.#visible(rule, guild, item.eventName, item.event, actor));
+    const members = await Promise.all(shown.map((item) => this.#inThread(guild, item.eventName, item.event, actor)));
+    const visible = shown.filter((_, i) => members[i]);
     if (visible.length === 0) return command ? { outcome: "skipped", error: "このチャンネルを見られる人として確認できないため、ここでは動きません", reply: null, images: [], steps: 0 } : null;
     batch = visible;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });

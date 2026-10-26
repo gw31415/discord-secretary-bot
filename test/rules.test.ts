@@ -53,7 +53,7 @@ test("an allow list is checked for shape and for the permissions it needs", () =
   assert.deepEqual(missingPermissions(guild, guild.members.get("3")!, [{ op: "PATCH /guilds/{guild}/members/{user}", body: { type: "object", properties: { nick: {} } } }]), ["ManageNicknames"]);
 });
 
-function world(now = { t: 1_000_000 }) {
+function world(now = { t: 1_000_000 }, threadMembers: string[] = []) {
   const store = new Store(":memory:", randomBytes(32));
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
@@ -71,6 +71,7 @@ function world(now = { t: 1_000_000 }) {
     selfId: () => SELF,
     now: () => now.t,
     makeReader: () => ({ get: async () => null }) as never,
+    threadMember: async (threadId, userId) => threadMembers.includes(`${threadId}/${userId}`),
     notifyOwner: async (_u, content) => void notices.push(content),
     log: () => {},
     run: async (_code, bindings) => (seen.push(bindings), code()),
@@ -92,6 +93,22 @@ function world(now = { t: 1_000_000 }) {
 }
 
 const message = (channel: string, author: string, id = "700") => ({ id, channel_id: channel, guild_id: GUILD, content: "hello", author: { id: author } });
+
+test("an event in a private thread runs only the rules of its members or of those who manage threads", async () => {
+  const w = world(undefined, ["14/2"]);
+  const outsider = w.admin.save(GUILD, "3", w.definition);
+  const member = w.admin.save(GUILD, "2", { ...w.definition, name: "挨拶2" });
+  const owner = w.admin.save(GUILD, "1", { ...w.definition, name: "挨拶3" });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("14", "5"));
+  await w.engine.idle();
+  // "3" sees the parent channel but is not in the thread; the server owner manages threads.
+  assert.deepEqual(w.runs.map((r) => r.rule.id).sort(), [member.id, owner.id].sort());
+  assert.equal(w.store.recentRuleRuns(outsider.id, 1).length, 0);
+  // A public thread follows its parent.
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("13", "5", "701"));
+  await w.engine.idle();
+  assert.equal(w.runs.filter((r) => r.rule.id === outsider.id).length, 1);
+});
 
 test("a matching event runs the rule as its owner; the bot's own events and hidden channels do not", async () => {
   const w = world();
