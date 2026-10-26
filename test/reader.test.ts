@@ -61,6 +61,56 @@ test("search is restricted to shareable channels and filters results again", asy
   assert.equal(res.messages.length, 1);
 });
 
+/** Discord's search over `hits`, a page of 25 at the requested offset, counting every hit as Discord does. */
+function searchRest(hits: Array<{ id: string; channel: string }>, threads: unknown[]) {
+  const calls: URLSearchParams[] = [];
+  const rest = {
+    get: async (_path: string, opts?: { query?: URLSearchParams }) => {
+      calls.push(opts!.query!);
+      const offset = Number(opts!.query!.get("offset") ?? 0);
+      const page = hits.slice(offset, offset + 25);
+      return { doing_deep_historical_index: false, total_results: hits.length, messages: page.map((h) => [msg(h.id, h.channel)]), threads, members: [{ id: "14" }] };
+    },
+  } as unknown as REST;
+  return { rest, calls };
+}
+
+test("hits in a private thread leave no trace: no count, no short page, no thread", async () => {
+  const privateThread = { id: "14", type: 12, parent_id: "10", name: "secret-thread" };
+  const visible = Array.from({ length: 30 }, (_, i) => ({ id: `v${i}`, channel: "10" }));
+  const run = async (hidden: number) => {
+    // The hidden hits come first, as the newest would.
+    const hits = [...Array.from({ length: hidden }, (_, i) => ({ id: `h${i}`, channel: "14" })), ...visible];
+    const { rest, calls } = searchRest(hits, [privateThread]);
+    const reader = makeReader(rest, "10", "3");
+    const res = (await reader.get(`/guilds/${GUILD}/messages/search`, { content: "x" })) as Record<string, unknown> & { messages: Array<Array<{ id: string }>> };
+    return { res, calls };
+  };
+  const clean = await run(0);
+  for (const hidden of [1, 24, 40]) {
+    const { res } = await run(hidden);
+    assert.deepEqual(res, clean.res, `${hidden} hidden hits`);
+  }
+  assert.equal(clean.res.messages.length, 25);
+  assert.equal(clean.res.has_more, true);
+  assert.equal("total_results" in clean.res, false);
+  assert.equal("members" in clean.res, false);
+  // The second page in visible hits is the same too.
+  const next = async (hidden: number) => {
+    const hits = [...Array.from({ length: hidden }, (_, i) => ({ id: `h${i}`, channel: "14" })), ...visible];
+    const { rest } = searchRest(hits, [privateThread]);
+    return makeReader(rest, "10", "3").get(`/guilds/${GUILD}/messages/search`, { content: "x", offset: 25 });
+  };
+  assert.deepEqual(await next(30), await next(0));
+  assert.deepEqual(((await next(0)) as { messages: Array<Array<{ id: string }>> }).messages.map((g) => g[0]!.id), ["v25", "v26", "v27", "v28", "v29"]);
+});
+
+test("search reaches only so far by offset", async () => {
+  const { rest, calls } = searchRest([], []);
+  await assert.rejects(makeReader(rest, "10", "3").get(`/guilds/${GUILD}/messages/search`, { offset: 190, limit: 25 }), /max_id/);
+  assert.equal(calls.length, 0);
+});
+
 test("guild routes that need a permission require it from the whole audience", async () => {
   const { rest } = fakeRest({ [`/guilds/${GUILD}/audit-logs`]: { audit_log_entries: [] } });
   await assert.rejects(makeReader(rest, "10", "2").get(`/guilds/${GUILD}/audit-logs`), /必要な権限/);
@@ -210,4 +260,20 @@ test("widening never goes past the speaker's own permissions", async () => {
   reader.widen();
   await assert.rejects(reader.get("/channels/11/messages"), (e: Error) => /この場所では扱えません/.test(e.message) && !/widen_read/.test(e.message));
   await assert.rejects(reader.get(`/guilds/${GUILD}/audit-logs`), /必要な権限/);
+});
+
+test("a channel that does not exist reads the same as one that may not be shown", async () => {
+  const rest = { get: async () => Promise.reject(new Error("404: Unknown Channel")) } as unknown as REST;
+  const reader = makeReader(rest, "10", "3");
+  const missing = String(await reader.get("/channels/4242/messages").catch((e: Error) => e.message));
+  const hidden = String(await reader.get("/channels/11/messages").catch((e: Error) => e.message));
+  assert.equal(missing.replace("4242", "X"), hidden.replace("11", "X"));
+});
+
+test("scheduled events in channels this reply may not show are left out", async () => {
+  const { rest } = fakeRest({
+    [`/guilds/${GUILD}/scheduled-events`]: [{ id: "e1", channel_id: "10" }, { id: "e2", channel_id: "11" }, { id: "e3", channel_id: null }],
+  });
+  const events = (await makeReader(rest, "10", "3").get(`/guilds/${GUILD}/scheduled-events`)) as Array<{ id: string }>;
+  assert.deepEqual(events.map((e) => e.id), ["e1", "e3"]);
 });

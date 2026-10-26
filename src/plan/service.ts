@@ -9,7 +9,7 @@ import type { PlanRow, Store, StepRow } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { toChannel, toMember, toRole } from "../discord/cache.ts";
 import { modalValue } from "../discord/modal.ts";
-import { canView, shareableChannels } from "../discord/permissions.ts";
+import { canView, needsThreadMembership, shareableChannels } from "../discord/permissions.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
@@ -23,7 +23,7 @@ import type { Reader } from "../discord/reader.ts";
 import { allowProblems, allowRisk, needsChannel, needsTarget, ownerAllowProblems } from "../rules/allow.ts";
 import type { Targets } from "../rules/allow.ts";
 import type { RuleProposal } from "../rules/types.ts";
-import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, visibilityProblems } from "./validate.ts";
+import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, stepProblems } from "./validate.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
 // bot makes on someone's behalf goes through here.
@@ -261,7 +261,7 @@ export class Planner {
     const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId() };
     const replaced = input.replaces ? this.deps.store.getPlan(input.replaces)?.plan : undefined;
     const files = attachmentsFor(steps, [input.images, replaced?.attachments]);
-    const problems = [...steps.flatMap((s) => [...permissionProblems(s, ctx), ...visibilityProblems(s, input.shareable)]), ...files.problems];
+    const problems = [...steps.flatMap((s) => stepProblems(s, ctx, input.shareable)), ...files.problems];
     if (problems.length > 0) throw new PlanRejected(problems);
     const rules = ruleInputs.length > 0
       ? await this.deps.rules!.prepare({
@@ -340,13 +340,18 @@ export class Planner {
     const id = randomBytes(6).toString("hex");
     const steps = normalizeSteps(input.drafts, input.guildId, id);
     const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId() };
+    // Who may not see or do a step learns only that. The state of its target is
+    // read and checked against the allow list after, since the reasons go back
+    // to the owner's run history (and a command's runner).
+    const access = await this.#ruleAccessProblems(guild, steps, [...new Set([input.actorId, input.rule.ownerId ?? input.actorId])], ctx);
+    if (access.length > 0) throw new PlanRejected(access);
     const [targets, channels, preconditions] = await Promise.all([
       this.#targets(input.guildId, steps, input.rule.allow),
       this.#channelStates(steps, input.rule.allow),
       this.#preconditions(input.guildId, steps),
     ]);
     const files = attachmentsFor(steps, [input.images]);
-    const problems = [...allowProblems(steps, input.rule.allow, targets, undefined, channels), ...steps.flatMap((s) => permissionProblems(s, ctx)), ...files.problems];
+    const problems = [...allowProblems(steps, input.rule.allow, targets, undefined, channels), ...files.problems];
     if (problems.length > 0) throw new PlanRejected(problems);
 
     const labels = await this.#labels(input.guildId, guild, [], input.actorId);
@@ -371,6 +376,38 @@ export class Planner {
     await this.execute(plan.id, { fresh: true });
     const row = this.deps.store.getPlan(plan.id)!;
     return { plan, status: row.status, reason: row.reason };
+  }
+
+  /**
+   * A rule's steps may act only in channels its runner and its owner can both
+   * see (a private thread also takes being its member or managing threads).
+   * A hidden channel and one that does not exist get the same reason, and
+   * nothing else is checked for that step.
+   */
+  async #ruleAccessProblems(guild: GuildState, steps: Step[], people: string[], ctx: { guild: GuildState; actorId: string; selfId: string }): Promise<string[]> {
+    const problems: string[] = [];
+    for (const step of steps) {
+      const spec = specOf(step);
+      const ids = (spec.channels?.(step.pathParams, step.body as Body) ?? []).filter((id): id is string => typeof id === "string");
+      const hidden: string[] = [];
+      for (const id of ids) if (!(await this.#seenByAll(guild, id, people))) hidden.push(id);
+      if (hidden.length > 0) problems.push(...hidden.map((id) => `${step.id}(${spec.label}): チャンネル ${id} は実行する人とルールの作成者の両方が見られるチャンネルではないため操作できません`));
+      else problems.push(...permissionProblems(step, ctx));
+    }
+    return problems;
+  }
+
+  async #seenByAll(guild: GuildState, channelId: string, people: string[]): Promise<boolean> {
+    if (!guild.channels.has(channelId)) return false;
+    for (const userId of people) {
+      const member = guild.members.get(userId);
+      if (!member || !canView(guild, member, channelId)) return false;
+      if (needsThreadMembership(guild, member, channelId)) {
+        const joined = await this.#get(`/channels/${channelId}/thread-members/${userId}`).catch(() => null);
+        if (!joined) return false;
+      }
+    }
+    return true;
   }
 
   /** Current state of the targets an allow list puts conditions on, for steps whose target is known. */

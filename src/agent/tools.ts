@@ -183,7 +183,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     name: "search_messages",
     label: "メッセージ検索",
     description:
-      "サーバー内のメッセージを検索します。本文・投稿者・チャンネル・メンション・添付の有無で絞り込めます。検索対象は今のチャンネルで扱えるチャンネルに自動で限定されます。",
+      "サーバー内のメッセージを検索します。本文・投稿者・チャンネル・メンション・添付の有無で絞り込めます。検索対象は今のチャンネルで扱えるチャンネルに自動で限定されます。該当の総数は返しません。offset で読めるのは先頭から200件までで、それより先は max_id・min_id で範囲を絞ります。",
     parameters: Type.Object({
       content: Type.Optional(Type.String({ description: "本文に含む語" })),
       author_id: Type.Optional(Type.Array(Type.String())),
@@ -192,7 +192,9 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       has: Type.Optional(Type.Array(Type.String({ description: "link, embed, file, image, video, sound, sticker, poll など。先頭に-で否定" }))),
       sort_by: Type.Optional(Type.Union([Type.Literal("timestamp"), Type.Literal("relevance")])),
       sort_order: Type.Optional(Type.Union([Type.Literal("asc"), Type.Literal("desc")])),
-      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 9975 })),
+      max_id: Type.Optional(Type.String({ description: "このIDより古いものだけ" })),
+      min_id: Type.Optional(Type.String({ description: "このIDより新しいものだけ" })),
+      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 199 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 25 })),
     }),
     execute: async (_id, params) => {
@@ -201,7 +203,9 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
         return text(`サーバーの検索索引がまだできていません。${res.retry_after}秒ほど後にもう一度試してください。`);
       }
       const lines = res.messages.map((group) => group.map((m) => `#${m.channel_id} ${formatMessage(m)}`).join("\n"));
-      return text(`該当 ${res.total_results}件(表示 ${lines.length}件)\n${lines.join("\n")}`);
+      if (lines.length === 0) return text("該当するメッセージはありません");
+      const more = res.has_more ? `\n(続きがあるかもしれません。offset を ${(params.offset ?? 0) + lines.length} にすると次を読めます)` : "";
+      return text(`${lines.length}件\n${lines.join("\n")}${more}`);
     },
   });
 

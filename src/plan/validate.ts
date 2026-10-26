@@ -213,6 +213,16 @@ export function visibilityProblems(step: Step, shareable: Set<string>): string[]
     .map((id) => `${step.id}(${spec.label}): チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
 }
 
+/**
+ * Visibility first: a step on a channel this conversation may not show gets
+ * only that answer. Whether the channel exists, or who may do what there,
+ * would otherwise come back in the reasons and tell one hidden channel from another.
+ */
+export function stepProblems(step: Step, ctx: CheckContext, shareable: Set<string>): string[] {
+  const hidden = visibilityProblems(step, shareable);
+  return hidden.length > 0 ? hidden : permissionProblems(step, ctx);
+}
+
 /** Replaces refs with values from earlier steps' responses. */
 export function resolveRefs<T>(value: T, results: Map<string, unknown>): T {
   return replaceRefs(value, (ref) => {

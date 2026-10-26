@@ -1,7 +1,7 @@
 import type { REST } from "@discordjs/rest";
 import { ChannelType, PermissionFlagsBits } from "discord-api-types/v10";
 import { EMOJI_FORMAT } from "../plan/catalog.ts";
-import type { APIChannel, APIMessage, RESTGetAPIGuildMessagesSearchResult } from "discord-api-types/v10";
+import type { APIChannel, APIMessage, APIMessageSearchIndexNotReadyResponse, APIThreadChannel, RESTGetAPIGuildMessagesSearchResult } from "discord-api-types/v10";
 import type { GuildCache } from "./cache.ts";
 import { toChannel } from "./cache.ts";
 import { audienceHasGuildPermission, basePermissions, has, readableChannels, shareableChannels } from "./permissions.ts";
@@ -22,6 +22,19 @@ export interface ReadScope {
    * "owner": what the speaker alone may read, for a rule that runs with its owner's permissions.
    */
   audience?: "channel" | "owner";
+}
+
+/** Discord returns at most this many search hits per request. */
+const SEARCH_PAGE = 25;
+/** Search requests one search may make; how far into the hits a search can reach. */
+export const SEARCH_SCAN_PAGES = 8;
+
+/** A search narrowed to this reply: no count, since Discord's would include hits that are not shown. */
+export interface SearchResult {
+  messages: Array<Omit<APIMessage, "reactions">[]>;
+  threads: APIThreadChannel[];
+  /** The page is full, so more may follow at a larger offset. */
+  has_more: boolean;
 }
 
 export interface ReaderLimits {
@@ -68,7 +81,7 @@ const RULES: RouteRule[] = [
   { pattern: /^\/guilds\/(\d+)\/members\/(\d+)$/, handle: (r, [g, u]) => r.guildRoute(g!, `/guilds/${g}/members/${u}`, {}) },
   { pattern: /^\/guilds\/(\d+)\/emojis$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}/emojis`, {}) },
   { pattern: /^\/guilds\/(\d+)\/stickers$/, handle: (r, [g]) => r.guildRoute(g!, `/guilds/${g}/stickers`, {}) },
-  { pattern: /^\/guilds\/(\d+)\/scheduled-events$/, handle: (r, [g], q) => r.guildRoute(g!, `/guilds/${g}/scheduled-events`, q) },
+  { pattern: /^\/guilds\/(\d+)\/scheduled-events$/, handle: (r, [g], q) => r.scheduledEvents(g!, q) },
   { pattern: /^\/guilds\/(\d+)\/channels$/, handle: (r, [g]) => r.listChannels(g!) },
   { pattern: /^\/guilds\/(\d+)\/voice-states$/, handle: async (r, [g], q) => r.voiceStates(g!, q) },
   { pattern: /^\/guilds\/(\d+)\/threads\/active$/, handle: (r, [g]) => r.activeThreads(g!) },
@@ -153,9 +166,10 @@ export class Reader {
    */
   async assertChannel(channelId: string): Promise<void> {
     if (!this.shareable().has(channelId) && !this.guild.channels.has(channelId)) {
-      const raw = (await this.rest.get(`/channels/${channelId}`)) as APIChannel & { guild_id?: string };
-      const fetched = toChannel(raw);
-      if (raw.guild_id === this.guild.id && fetched.type !== ChannelType.PrivateThread && fetched.parentId && this.shareable().has(fetched.parentId)) {
+      // A channel that does not exist must look like one that may not be shown; otherwise the error tells them apart.
+      const raw = (await this.rest.get(`/channels/${channelId}`).catch(() => null)) as (APIChannel & { guild_id?: string }) | null;
+      const fetched = raw && toChannel(raw);
+      if (raw && fetched && raw.guild_id === this.guild.id && fetched.type !== ChannelType.PrivateThread && fetched.parentId && this.shareable().has(fetched.parentId)) {
         this.shareable().add(fetched.id);
       }
     }
@@ -261,6 +275,13 @@ export class Reader {
       .map(([userId, channelId]) => ({ user_id: userId, channel_id: channelId }));
   }
 
+  /** Events in a channel this reply may not show are left out, as Discord hides them from those who cannot see it. */
+  async scheduledEvents(guildId: string, query: Query): Promise<unknown[]> {
+    const events = (await this.guildRoute(guildId, `/guilds/${guildId}/scheduled-events`, query)) as Array<{ channel_id?: string | null }>;
+    const allowed = this.shareable();
+    return events.filter((e) => !e.channel_id || allowed.has(e.channel_id));
+  }
+
   async activeThreads(guildId: string): Promise<unknown> {
     this.#assertGuild(guildId);
     const res = (await this.rest.get(`/guilds/${guildId}/threads/active`)) as { threads: APIChannel[]; members: unknown[] };
@@ -278,24 +299,58 @@ export class Reader {
     return result;
   }
 
-  async searchMessages(guildId: string, query: Query): Promise<RESTGetAPIGuildMessagesSearchResult> {
+  /**
+   * Discord's search counts and pages every hit, including hits in private
+   * threads under a listed channel. Those are dropped here, and nothing about
+   * them may show: not Discord's total, not a short page. So pages are read
+   * from the start until `limit` visible hits after `offset` visible ones are
+   * found, and the result carries no count. Only `has_more` (a full page) is
+   * told, which follows from the visible hits alone.
+   */
+  async searchMessages(guildId: string, query: Query): Promise<SearchResult | APIMessageSearchIndexNotReadyResponse> {
     this.#assertGuild(guildId);
     const allowed = this.shareable();
-    const requested = query.channel_id === undefined ? [] : [query.channel_id].flat().map(String);
+    const { offset: rawOffset, limit: rawLimit, channel_id: rawChannels, ...rest } = query;
+    const requested = rawChannels === undefined ? [] : [rawChannels].flat().map(String);
     const channels = requested.length > 0 ? requested.filter((id) => allowed.has(id)) : [...allowed];
     if (channels.length === 0) throw new ReadDenied("検索できるチャンネルがありません");
-    const limit = Math.min(Number(query.limit ?? 25), 25);
-    const res = (await this.rest.get(`/guilds/${guildId}/messages/search`, {
-      query: toSearchParams({ ...query, limit, channel_id: channels.slice(0, 500) }),
-    })) as RESTGetAPIGuildMessagesSearchResult;
-    if (!("messages" in res)) return res; // index not ready (code 110000)
-    // Hits inside threads carry the thread id; allow public threads of shareable channels.
-    const threadParent = new Map(
-      (res.threads ?? []).filter((t) => t.type !== ChannelType.PrivateThread).map((t) => [t.id, t.parent_id]),
-    );
+    const limit = Math.max(1, Math.min(Math.trunc(Number(rawLimit ?? SEARCH_PAGE)) || SEARCH_PAGE, SEARCH_PAGE));
+    const offset = Math.max(0, Math.trunc(Number(rawOffset ?? 0)) || 0);
+    const reach = SEARCH_SCAN_PAGES * SEARCH_PAGE;
+    if (offset + limit > reach) {
+      throw new ReadDenied(`検索で読めるのは先頭から${reach}件までです(offset は ${reach - limit} まで)。続きは max_id(それより古い)か min_id(それより新しい)で範囲を絞って検索してください`);
+    }
+    const threadParent = new Map<string, string | null | undefined>();
+    const threads = new Map<string, APIThreadChannel>();
     const visible = (id: string) => allowed.has(id) || allowed.has(threadParent.get(id) ?? "");
-    const messages = res.messages.filter((group) => group.every((m) => visible(m.channel_id)));
-    this.#countMessages(messages.length);
-    return { ...res, messages, threads: res.threads?.filter((t) => visible(t.id)) };
+    const found: Array<Omit<APIMessage, "reactions">[]> = [];
+    let skipped = 0;
+    for (let page = 0; page < SEARCH_SCAN_PAGES && found.length < limit; page++) {
+      const res = (await this.rest.get(`/guilds/${guildId}/messages/search`, {
+        query: toSearchParams({ ...rest, limit: SEARCH_PAGE, offset: page * SEARCH_PAGE, channel_id: channels.slice(0, 500) }),
+      })) as RESTGetAPIGuildMessagesSearchResult;
+      if (!("messages" in res)) return res; // index not ready (code 110000)
+      // Hits inside threads carry the thread id; allow public threads of shareable channels.
+      for (const t of res.threads ?? []) {
+        if (t.type === ChannelType.PrivateThread) continue;
+        threadParent.set(t.id, t.parent_id);
+        threads.set(t.id, t);
+      }
+      for (const group of res.messages) {
+        if (found.length >= limit) break;
+        if (!group.every((m) => visible(m.channel_id))) continue;
+        if (skipped < offset) skipped++;
+        else found.push(group);
+      }
+      if (res.messages.length < SEARCH_PAGE) break;
+    }
+    this.#countMessages(found.length);
+    const shownThreads = new Set(found.flat().map((m) => m.channel_id));
+    return {
+      messages: found,
+      threads: [...threads.values()].filter((t) => shownThreads.has(t.id) && visible(t.id)),
+      has_more: found.length === limit,
+    };
   }
+
 }
