@@ -76,7 +76,8 @@ export class RuleAdmin {
 
   get(guildId: string, userId: string, ruleId: string): Rule {
     const rule = this.#rule(guildId, ruleId);
-    if (rule.ownerId !== userId && !this.canSeeAll(guildId, userId)) throw new AdminDenied("このルールを見る権限がありません");
+    // The same answer as a missing rule, so a rule id tells nothing to someone who may not see it.
+    if (rule.ownerId !== userId && !this.canSeeAll(guildId, userId)) throw new AdminDenied("ルールが見つかりません");
     return rule;
   }
 
@@ -106,12 +107,15 @@ export class RuleAdmin {
   }
 
   /** Another enabled rule of the server already using this rule's command name. */
-  #commandClash(guildId: string, trigger: RuleDefinition["trigger"], self?: string): string[] {
+  #commandClash(guildId: string, ownerId: string, trigger: RuleDefinition["trigger"], self?: string): string[] {
     const name = trigger.command?.name;
     if (!name) return [];
     const other = this.deps.store.enabledRules(guildId, "COMMAND").find((r) => r.id !== self && r.trigger.command?.name === name);
-    return other ? [`コマンド名 /${name} はルール「${other.name}」が使っています`] : [];
+    if (!other) return [];
+    // Someone else's rule is not named; the command itself is visible to everyone anyway.
+    return [other.ownerId === ownerId ? `コマンド名 /${name} はルール「${other.name}」が使っています` : `コマンド名 /${name} はほかの人のルールが使っています`];
   }
+
 
   /** Registers an approved rule, or a new version of one the owner already has. */
   save(guildId: string, ownerId: string, definition: RuleDefinition, replaces?: string): Rule {
@@ -121,7 +125,7 @@ export class RuleAdmin {
   }
 
   #save(guildId: string, ownerId: string, definition: RuleDefinition, replaces?: string): Rule {
-    const problems = [...this.ownershipProblems(guildId, ownerId, definition), ...this.#commandClash(guildId, definition.trigger, replaces)];
+    const problems = [...this.ownershipProblems(guildId, ownerId, definition), ...this.#commandClash(guildId, ownerId, definition.trigger, replaces)];
     if (problems.length > 0) throw new AdminDenied(problems.join("\n"));
     const { store } = this.deps;
     const actor = { kind: "user" as const, userId: ownerId, via: "panel" as const };
@@ -157,7 +161,7 @@ export class RuleAdmin {
       if (rule.ownerId !== userId) throw new AdminDenied("ルールを有効にできるのは作成者だけです");
       const missing = missingPermissions(this.#viewer(guildId, userId).guild, this.#viewer(guildId, userId).member, rule.allow);
       if (missing.length > 0) throw new AdminDenied(`許す操作に必要な権限をあなたが持っていません: ${missing.join(", ")}`);
-      const clash = this.#commandClash(guildId, rule.trigger, rule.id);
+      const clash = this.#commandClash(guildId, userId, rule.trigger, rule.id);
       if (clash.length > 0) throw new AdminDenied(`${clash[0]}。そちらを止めるか、コマンド名を変えてください`);
       this.deps.store.setRuleEnabled(rule.id, true, null);
       this.deps.store.audit(actor, "rule.enable", { guildId }, undefined, rule.id);

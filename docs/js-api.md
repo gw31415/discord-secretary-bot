@@ -163,11 +163,12 @@ const id = attachImage(c, "count");
 | `/guilds/{guild}` | サーバー |
 | `/guilds/{guild}/roles` | ロール |
 | `/guilds/{guild}/members`、`/members/search`、`/members/{user}` | メンバー |
-| `/guilds/{guild}/emojis`、`/stickers`、`/scheduled-events` | 絵文字・スタンプ・イベント |
+| `/guilds/{guild}/emojis`、`/stickers` | 絵文字・スタンプ |
+| `/guilds/{guild}/scheduled-events` | イベント(読める範囲のチャンネルのものと、場所がチャンネルでないもの) |
 | `/guilds/{guild}/channels` | 読める範囲のチャンネル |
 | `/guilds/{guild}/voice-states` | ボイスチャンネルにいる人 `[{ user_id, channel_id }]` |
 | `/guilds/{guild}/threads/active` | 動いているスレッド |
-| `/guilds/{guild}/messages/search` | メッセージ検索 |
+| `/guilds/{guild}/messages/search` | メッセージ検索。`{ messages, threads, has_more }` を返し、総数(`total_results`)は返さない。`offset` + `limit` は200まで |
 | `/channels/{channel}` | チャンネル |
 | `/channels/{channel}/messages`、`/messages/{message}` | メッセージ |
 | `/channels/{channel}/messages/{message}/reactions/{emoji}` | その絵文字を付けた人(絵文字は 👍 か `名前:ID`) |

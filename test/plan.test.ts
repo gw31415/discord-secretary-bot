@@ -416,6 +416,21 @@ test("proposals outside the conversation's visible channels are rejected before 
   assert.equal(replies.length, 0);
 });
 
+test("a step on a hidden channel is turned down for that alone, whether or not the channel exists", async () => {
+  const { planner } = setup();
+  const reasons = async (channel: string) => {
+    const e = await planner.propose({
+      guildId: GUILD, channelId: "10", replyToId: null, actorId: "3", shareable: new Set(["10"]),
+      drafts: [{ op: "PATCH /channels/{channel}", path: { channel }, body: { name: "x" } }],
+    }).catch((e: unknown) => e);
+    assert.ok(e instanceof PlanRejected);
+    return e.reasons.map((r) => r.replace(channel, "X"));
+  };
+  // Nothing about who may manage the staff channel comes back, and it reads like a channel that is not there.
+  assert.deepEqual(await reasons("11"), await reasons("4242"));
+  assert.doesNotMatch((await reasons("11")).join(), /権限/);
+});
+
 test("only irreversible steps ask for typed confirmation; reversible plans run on one click", async () => {
   const { planner, store, replies } = setup();
   const reversible = await planner.propose({
@@ -622,6 +637,23 @@ test("a rule's target conditions are checked on the target as it is right before
   assert.equal(calls.length, 0);
   assert.equal((await run("60")).status, "succeeded");
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["DELETE /channels/60"]);
+});
+
+test("a rule's step in a channel its runner cannot see says only that, before the target is read", async () => {
+  const { planner, channels } = setup();
+  channels["11"].name = "📞 secret";
+  const rule = { ...RULE, ownerId: "1", allow: [{ op: "DELETE /channels/{channel}", target: { properties: { name: { pattern: "^📞" } }, required: ["name"] }, maxStepsPerRun: 1 }] };
+  const read: string[] = [];
+  const get = planner.deps.api.rest.get.bind(planner.deps.api.rest);
+  (planner.deps.api.rest as any).get = (path: string, ...rest: unknown[]) => (read.push(path), get(path as never, ...(rest as [])));
+  const reasons = async (channel: string) => {
+    const e = await planner.runForRule({ guildId: GUILD, actorId: "3", rule, drafts: [{ op: "DELETE /channels/{channel}", path: { channel } }] }).catch((e: unknown) => e);
+    assert.ok(e instanceof PlanRejected);
+    return e.reasons.map((r) => r.replace(channel, "X"));
+  };
+  assert.deepEqual(await reasons("11"), await reasons("4242"));
+  assert.match((await reasons("11")).join(), /見られるチャンネルではない/);
+  assert.deepEqual(read, []);
 });
 
 // The dynamic voice channel example: a lobby made by the plan, and two rules that use it.

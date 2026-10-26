@@ -14,7 +14,7 @@ import { stepLines } from "../plan/dialog.ts";
 import type { PrepareRulesInput } from "../plan/service.ts";
 import { isRef } from "../plan/types.ts";
 import type { Plan, PlanRuleDraft, RuleDryRun } from "../plan/types.ts";
-import { badRefs, normalizeSteps, permissionProblems, PlanRejected, planRisk, visibilityProblems } from "../plan/validate.ts";
+import { badRefs, normalizeSteps, permissionProblems, PlanRejected, planRisk, stepProblems } from "../plan/validate.ts";
 import { AdminDenied } from "./admin.ts";
 import type { RuleAdmin } from "./admin.ts";
 import { allowProblems } from "./allow.ts";
@@ -168,8 +168,7 @@ export class RuleService {
     const ctx = { guild, actorId: ownerId, selfId: this.deps.selfId() };
     const problems = [
       ...allowProblems(steps, rule.allow),
-      ...steps.flatMap((s) => permissionProblems(s, ctx)),
-      ...(shareable ? steps.flatMap((s) => visibilityProblems(s, shareable)) : []),
+      ...steps.flatMap((s) => (shareable ? stepProblems(s, ctx, shareable) : permissionProblems(s, ctx))),
       ...attachmentsFor(steps, [Object.fromEntries((result.images ?? []).map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }]))]).problems,
     ];
     const label = cacheLabel(guild);
@@ -215,18 +214,18 @@ export class RuleService {
       own.push(...triggerIssues);
       for (const ref of [...badRefs(r.allow, stepIds), ...badRefs(r.params ?? {}, stepIds)]) own.push(`参照 ${ref} はこの変更のステップの結果を指していません`);
       const definition: RuleDefinition = { name: r.name, sourcePrompt: "", trigger: r.trigger, allow: r.allow, program, summary: null, limits: ruleLimits(r.limits) };
-      if (triggerIssues.length === 0) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
+      // A pinned channel this conversation may not show gets only that answer, not who holds which permission there.
+      const hiddenPins = pinnedIds(r).filter((id) => !input.shareable.has(id));
+      if (triggerIssues.length === 0 && hiddenPins.length === 0) own.push(...this.deps.admin.ownershipProblems(input.guildId, input.ownerId, definition).filter((p) => !p.startsWith("きっかけ")));
       if (r.trigger.command && triggerIssues.length === 0) {
         own.push(...this.commandNameProblems(input.guildId, r.trigger.command.name, r.replaces, input.rules.slice(0, i).map((o) => o.trigger.command?.name)));
       }
-      for (const id of pinnedIds(r)) {
-        if (!input.shareable.has(id)) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
-      }
+      for (const id of hiddenPins) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
       let replaces: PlanRuleDraft["replaces"];
       if (r.replaces) {
         const rule = this.deps.store.getRule(r.replaces);
-        if (!rule || rule.guildId !== input.guildId) own.push(`ルール ${r.replaces} が見つかりません`);
-        else if (rule.ownerId !== input.ownerId) own.push("ルールを直せるのは作成者だけです");
+        // Someone else's rule reads the same as a missing one, so its id tells nothing.
+        if (!rule || rule.guildId !== input.guildId || rule.ownerId !== input.ownerId) own.push(`ルール ${r.replaces} は見つからないか、あなたのルールではありません(直せるのは作成者だけです)`);
         else {
           // The old version's contents follow the same visibility as the new one's.
           const shown = pinnedIds(rule).every((id) => input.shareable.has(id));
