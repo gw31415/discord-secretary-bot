@@ -2,8 +2,9 @@ import type { Api, ClassifierApi, ClassifierModel, Model, ThinkingLevel } from "
 import { isClassifier, lightestThinking, llm } from "../llm/models.ts";
 import type { JudgeModel } from "../llm/models.ts";
 
-// Decides whether a message in an awake channel is addressed to the bot.
-// Mentions and replies never reach here; they are answered deterministically.
+// Decides whether a message is addressed to the bot.
+// Mentions (and replies that ping the bot) never reach here; they are answered deterministically.
+// A reply to the bot with its mention off is judged here, even while the bot is asleep.
 
 export interface Judgement {
   addressed: boolean;

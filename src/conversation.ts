@@ -116,7 +116,7 @@ export type Decision =
   | { kind: "ignore" }
   | { kind: "notify-unregistered" }
   | { kind: "reply"; wake: boolean }
-  | { kind: "judge" };
+  | { kind: "judge"; wake: boolean };
 
 /** The DM to someone who has not set up; with the command's id, /settings is a link that opens it. */
 export function setupNotice(settingsCommandId?: string): string {
@@ -175,9 +175,18 @@ export class Conversations {
     this.deps = deps;
   }
 
+  /**
+   * A mention, including a reply that pings the bot: Discord lists the replied-to
+   * author in `mentions` only when the reply's mention is left on.
+   */
   isDirect(message: APIMessage): boolean {
     const self = this.deps.selfId();
-    return message.mentions.some((u) => u.id === self) || message.referenced_message?.author.id === self;
+    return message.mentions.some((u) => u.id === self);
+  }
+
+  /** A reply to the bot with its mention turned off: judged like any other message, even while asleep. */
+  #quietReply(message: APIMessage): boolean {
+    return message.referenced_message?.author.id === this.deps.selfId();
   }
 
   /** Deterministic triage. Only the "judge" outcome costs an LLM call. */
@@ -187,7 +196,7 @@ export class Conversations {
     const direct = this.isDirect(message);
     const conv = store.getConversation(message.channel_id);
     const awake = conv !== undefined && conv.awakeUntil > this.deps.now();
-    if (!direct && !awake) return { kind: "ignore" };
+    if (!direct && !awake && !this.#quietReply(message)) return { kind: "ignore" };
 
     if (!setupStatus(store, message.author.id).complete) {
       // Unregistered speakers are never judged; a mention gets one DM per session.
@@ -198,7 +207,7 @@ export class Conversations {
     }
     if (direct) return { kind: "reply", wake: !awake };
     // Judged with the speaker's own key and model, so nobody pays for others' messages.
-    return { kind: "judge" };
+    return { kind: "judge", wake: !awake };
   }
 
   handle(message: GuildMessage): Promise<void> {
@@ -230,7 +239,7 @@ export class Conversations {
       case "judge": {
         const context = await this.#context(message);
         if (!(await this.#addressed(context.transcript, message))) return;
-        return this.#reply(message, context, false);
+        return this.#reply(message, context, decision.wake);
       }
       case "reply":
         return this.#reply(message, await this.#context(message), decision.wake);
@@ -265,7 +274,10 @@ export class Conversations {
       apiKey,
       botName: this.deps.botName(),
       transcript,
-      message: formatMessage(message),
+      // The bot's message may be older than the transcript; show what is being answered.
+      message: message.referenced_message
+        ? `${formatMessage(message)}\n(返信先の発言: ${formatMessage(message.referenced_message)})`
+        : formatMessage(message),
     });
     return verdict.addressed && verdict.confidence >= CONFIDENCE_THRESHOLD;
   }

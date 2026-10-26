@@ -115,12 +115,38 @@ test("a refused DM is ignored", async () => {
   assert.equal(t.replies.length, 0);
 });
 
-test("replies to the bot count as addressed without judging", async () => {
+test("replies that ping the bot count as addressed without judging", async () => {
   const t = setup();
   const botMessage = message("0", SELF, "earlier answer");
-  await t.conv.handle(message("1", "2", "thanks, and roles?", { referenced_message: botMessage }));
+  await t.conv.handle(message("1", "2", "thanks, and roles?", { referenced_message: botMessage, mentions: [mention] }));
   assert.equal(t.judged.length, 0);
   assert.equal(t.replies.length, 1);
+});
+
+test("replies to the bot with the mention off are judged, even while asleep", async () => {
+  const t = setup({ judge: { addressed: false, confidence: 0.9 } });
+  const botMessage = message("0", SELF, "earlier answer");
+  await t.conv.handle(message("1", "2", "lol nice", { referenced_message: botMessage }));
+  assert.deepEqual(t.judged, ["sk-ant-key-for-2"]);
+  assert.equal(t.replies.length, 0);
+  assert.equal(t.store.getConversation("10"), undefined);
+});
+
+test("a quiet reply judged as addressed is answered and wakes the bot", async () => {
+  const t = setup();
+  const botMessage = message("0", SELF, "earlier answer");
+  await t.conv.handle(message("1", "2", "what about roles?", { referenced_message: botMessage }));
+  assert.equal(t.judged.length, 1);
+  assert.deepEqual(t.replies, ["answer"]);
+  assert.equal(t.store.getConversation("10")!.startedBy, "2");
+});
+
+test("unregistered speakers get nothing for a quiet reply", async () => {
+  const t = setup();
+  const botMessage = message("0", SELF, "earlier answer");
+  await t.conv.handle(message("1", "3", "hm", { referenced_message: botMessage }));
+  assert.equal(t.judged.length, 0);
+  assert.deepEqual(t.dms, []);
 });
 
 test("other bots are ignored", async () => {
