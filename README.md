@@ -141,3 +141,5 @@ npm test        # テスト
 ```sh
 botctl status | dev [branch] | promote | rollback | logs prod|dev [n] | install
 ```
+
+それぞれ専用のユーザー(`secretary-prod` / `secretary-dev`)で動きます。`.env` は root だけが読めるファイルにしてあり、systemd が起動のときに読んで環境変数として渡します。Bot からは `.env` も、もう一方の環境も、ホームのほかのファイルも見えません。`.env` を作り直したときは `botctl install` をもう一度実行してください。
