@@ -86,6 +86,18 @@ export function formatMessage(m: Omit<APIMessage, "reactions"> & Partial<Pick<AP
   return line;
 }
 
+/**
+ * The first line of a search result. It comes first so that a long page cut
+ * short still says whether more follow; without a total, a full page is easy
+ * to take for every hit.
+ */
+export function searchHeader(offset: number, shown: number, more: boolean): string {
+  const range = `${offset + 1}〜${offset + shown}件目`;
+  return more
+    ? `${range}を表示(続きがあります。これで全部ではありません。次は offset: ${offset + shown} で読めます)`
+    : `${range}を表示(これで最後です)`;
+}
+
 function channelLabel(c: APIChannel): string {
   const kind = ChannelType[c.type] ?? String(c.type);
   const name = "name" in c ? c.name : "";
@@ -183,7 +195,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     name: "search_messages",
     label: "メッセージ検索",
     description:
-      "サーバー内のメッセージを検索します。本文・投稿者・チャンネル・メンション・添付の有無で絞り込めます。検索対象は今のチャンネルで扱えるチャンネルに自動で限定されます。該当の総数は返しません。offset で読めるのは先頭から200件までで、それより先は max_id・min_id で範囲を絞ります。",
+      "サーバー内のメッセージを検索します。本文・投稿者・チャンネル・メンション・添付の有無で絞り込めます。検索対象は今のチャンネルで扱えるチャンネルに自動で限定されます。1回で返るのは最大25件で、該当の総数は返しません。結果の先頭に続きがあると出たら、それで全部ではありません。件数や「全部」を答えるときは、続きがないと出るまで offset を進めて読みます。offset で読めるのは先頭から200件までで、それより先は max_id・min_id で範囲を絞ります。",
     parameters: Type.Object({
       content: Type.Optional(Type.String({ description: "本文に含む語" })),
       author_id: Type.Optional(Type.Array(Type.String())),
@@ -204,8 +216,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       }
       const lines = res.messages.map((group) => group.map((m) => `#${m.channel_id} ${formatMessage(m)}`).join("\n"));
       if (lines.length === 0) return text("該当するメッセージはありません");
-      const more = res.has_more ? `\n(続きがあるかもしれません。offset を ${(params.offset ?? 0) + lines.length} にすると次を読めます)` : "";
-      return text(`${lines.length}件\n${lines.join("\n")}${more}`);
+      return text(`${searchHeader(params.offset ?? 0, lines.length, res.has_more)}\n${lines.join("\n")}`);
     },
   });
 

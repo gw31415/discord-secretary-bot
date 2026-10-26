@@ -277,3 +277,9 @@ test("scheduled events in channels this reply may not show are left out", async 
   const events = (await makeReader(rest, "10", "3").get(`/guilds/${GUILD}/scheduled-events`)) as Array<{ id: string }>;
   assert.deepEqual(events.map((e) => e.id), ["e1", "e3"]);
 });
+
+test("a full search page says, before the hits, that it is not all of them", async () => {
+  const { searchHeader } = await import("../src/agent/tools.ts");
+  assert.match(searchHeader(0, 25, true), /^1〜25件目.*続きがあります.*offset: 25/);
+  assert.match(searchHeader(25, 3, false), /^26〜28件目.*最後/);
+});
