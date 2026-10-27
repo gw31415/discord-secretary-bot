@@ -684,3 +684,28 @@ test("later() takes a cron expression too, and runs at its next match only, once
     assert.match(errors(), reason);
   }
 });
+
+test("later() takes ISO 8601 durations and date-times, read in the rule's time zone", async () => {
+  const w = world({ t: Date.parse("2026-10-27T10:00:00Z") });
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  const due = async (when: string) => {
+    w.store.setRuleEnabled(rule.id, true, null);
+    const before = w.store.countRuleTimers(rule.id);
+    w.setCode(() => (w.seen.at(-1).later(when), { ok: true, value: null, logs: [] }));
+    w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", `77${w.seen.length}`));
+    await w.engine.idle();
+    if (w.store.countRuleTimers(rule.id) === before) return w.store.recentRuleRuns(rule.id, 1)[0]!.error;
+    const [timer] = w.store.takeDueRuleTimers(GUILD, Number.MAX_SAFE_INTEGER);
+    return new Date(timer!.dueAt).toISOString();
+  };
+  assert.equal(await due("PT10M"), "2026-10-27T10:10:00.000Z");
+  assert.equal(await due("P1DT2H"), "2026-10-28T12:00:00.000Z");
+  // No offset: Tokyo time.
+  assert.equal(await due("2026-10-28T09:00"), "2026-10-28T00:00:00.000Z");
+  assert.equal(await due("2026-10-28T09:00Z"), "2026-10-28T09:00:00.000Z");
+  assert.match((await due("PT10S")) ?? "", /1分〜7日/);
+  assert.match((await due("P8D")) ?? "", /1分〜7日/);
+  assert.match((await due("2026-10-26T09:00+09:00")) ?? "", /7日以内/);
+  assert.match((await due("2026-13-01")) ?? "", /読めません/);
+  assert.match((await due("PXM")) ?? "", /読めません/);
+});
