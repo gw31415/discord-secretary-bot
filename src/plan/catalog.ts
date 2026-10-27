@@ -148,9 +148,10 @@ const EMOJI_FIELDS = {
 const StickerName = Type.String({ minLength: 2, maxLength: 30 });
 /** The emoji the sticker stands for, which Discord uses to suggest it. */
 const StickerTags = Type.String({ minLength: 1, maxLength: 200, description: "関連する絵文字(Unicodeの絵文字か名前。例: 😀 か grinning)" });
+const StickerDescription = Type.Union([Type.Literal(""), Type.String({ minLength: 2, maxLength: 100 })]);
 const STICKER_FIELDS = {
   name: Type.Optional(StickerName),
-  description: Type.Optional(Type.Union([Type.Literal(""), Type.String({ minLength: 2, maxLength: 100 }), Type.Null()])),
+  description: Type.Optional(Type.Union([StickerDescription, Type.Null()])),
   tags: Type.Optional(StickerTags),
 };
 
@@ -585,7 +586,7 @@ const ops: OpSpec[] = [
     label: "スタンプの登録",
     risk: "write",
     always: P.CreateGuildExpressions,
-    body: Type.Object({ ...STICKER_FIELDS, name: StickerName, tags: StickerTags, file: FileId }, { additionalProperties: false }),
+    body: Type.Object({ ...STICKER_FIELDS, name: StickerName, description: StickerDescription, tags: StickerTags, file: FileId }, { additionalProperties: false }),
     describe: (_p, b) => ({ target: `スタンプ「${b?.name}」`, change: `登録(画像 ${b?.file}、関連する絵文字 ${b?.tags}${b?.description ? `、説明「${short(b.description, 40)}」` : ""})` }),
     inverse: (_p, _b, _s, result) => (result?.id ? { op: "DELETE /guilds/{guild}/stickers/{sticker}", path: { sticker: result.id } } : null),
   },

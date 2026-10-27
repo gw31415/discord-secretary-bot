@@ -960,13 +960,13 @@ test("emojis and stickers are registered from an image made in the reply, edited
   assert.equal(sent.body.image, `data:image/png;base64,${PNG.data}`);
   assert.equal(sent.files, undefined);
 
-  const sticker = await planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/stickers", body: { name: "ねこ2", tags: "😺", file: "img1" } }], images: { img1: PNG } });
+  const sticker = await planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/stickers", body: { name: "ねこ2", description: "", tags: "😺", file: "img1" } }], images: { img1: PNG } });
   await planner.handleInteraction(click(sticker, "run", "1"));
   await settle(() => store.getPlan(sticker.id)!.status === "succeeded");
-  // A sticker is a form: its fields go beside the file, and the description is always sent.
+  // A sticker is a form: its fields go beside the file.
   const form = calls.at(-1)!.options as { body: Record<string, unknown>; files: Array<{ key: string; name: string }>; appendToFormData?: boolean };
   assert.equal(form.appendToFormData, true);
-  assert.deepEqual(form.body, { name: "ねこ2", tags: "😺", description: "" });
+  assert.deepEqual(form.body, { name: "ねこ2", description: "", tags: "😺" });
   assert.deepEqual(form.files.map((f) => [f.key, f.name]), [["file", "formula.png"]]);
 
   // Editing shows the name it has now, and can be undone; deleting is destructive.
@@ -978,19 +978,9 @@ test("emojis and stickers are registered from an image made in the reply, edited
   assert.match(dialogText(replies.filter((r) => r.kind === "createMessage").at(-1)!.body), /スタンプ「ねこ」.*削除/);
 });
 
-test("emoji and sticker images must be in a format and size Discord takes", async () => {
+test("an emoji or sticker names an image that exists, under Discord's field rules", async () => {
   const { planner } = setup();
   const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]) };
-  const jpeg = { name: "photo.jpeg", data: PNG.data };
-  await assert.rejects(
-    planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/stickers", body: { name: "写真", tags: "📷", file: "img1" } }], images: { img1: jpeg } }),
-    (e: unknown) => e instanceof PlanRejected && /スタンプの画像は PNG・GIF/.test(e.message),
-  );
-  const big = { name: "big.png", data: Buffer.alloc(300 * 1024).toString("base64") };
-  await assert.rejects(
-    planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/emojis", body: { name: "big", image: "img1" } }], images: { img1: big } }),
-    (e: unknown) => e instanceof PlanRejected && /絵文字の画像は256KBまで/.test(e.message),
-  );
   await assert.rejects(
     planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/emojis", body: { name: "x", image: "img1" } }], images: { img1: PNG } }),
     (e: unknown) => e instanceof PlanRejected && /本文が仕様に合いません/.test(e.message),

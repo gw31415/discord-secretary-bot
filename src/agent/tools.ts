@@ -1028,7 +1028,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
         : []),
       "使える操作(これ以外と、仕様にないフィールドは拒否されます):",
       catalogSummary(),
-      "絵文字・スタンプの登録では、画像を convert_image などで用意して、そのIDを絵文字は body.image に、スタンプは body.file に入れます(例: { op: \"POST /guilds/{guild}/stickers\", body: { name, tags: \"😀\", file: \"img1\" } })。絵文字は PNG・JPEG・GIF・WebP で256KBまで(128×128 が目安)、スタンプは PNG か GIF で512KBまで(320×320 にします)。今ある絵文字とスタンプは discord.get(`/guilds/${guild}/emojis`)・discord.get(`/guilds/${guild}/stickers`) で読めます。",
+      "絵文字の image・スタンプの file には、画像のデータではなく用意した画像のID(\"img1\" など)を入れます。",
     ].join("\n"),
     parameters: Type.Object({
       steps: Type.Optional(Type.Array(StepDraftSchema, { maxItems: 100 })),
