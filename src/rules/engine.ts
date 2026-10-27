@@ -426,7 +426,10 @@ export class RuleEngine {
       return; // runTimers sleeps until it after this.
     }
     const actor = timer.actorId && timer.actorId !== rule.ownerId ? timer.actorId : undefined;
-    const reader = actor ? this.deps.makeReader({ guildId: rule.guildId, channelId: timer.message?.channelId ?? "", speakerId: actor, audience: "owner" }) : undefined;
+    // A command's reply is read as the command was: from its channel (a private thread too), within what everyone there can see.
+    const reader = timer.message
+      ? this.deps.makeReader({ guildId: rule.guildId, channelId: timer.message.channelId, speakerId: actor ?? rule.ownerId, audience: "channel" })
+      : actor ? this.deps.makeReader({ guildId: rule.guildId, channelId: "", speakerId: actor, audience: "owner" }) : undefined;
     this.#enqueue(serialKey(rule, event), () => this.#run(rule.id, rule.version, `TIMER:${timer.id}`, [{ eventName: "TIMER", event }], reader, actor));
   }
 
