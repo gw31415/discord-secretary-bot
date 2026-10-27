@@ -1,3 +1,4 @@
+import { PermissionFlagsBits as P } from "discord-api-types/v10";
 import { Value } from "typebox/value";
 import { POST_OPS } from "./files.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
@@ -138,6 +139,8 @@ export interface CheckContext {
   guild: GuildState;
   actorId: string;
   selfId: string;
+  /** A command's public reply that whoever ran it may edit without managing messages, as Discord lets an interaction edit its own reply. */
+  ownReply?: { channelId: string; messageId: string };
 }
 
 /**
@@ -169,10 +172,12 @@ export function permissionProblems(step: Step, ctx: CheckContext): string[] {
   for (const key of Object.keys(body ?? {})) required |= spec.byField?.[key]?.perms ?? 0n;
   const grants = spec.grants?.(body) ?? 0n;
 
+  const ownReply = step.op === "PATCH /channels/{channel}/messages/{message}" && ctx.ownReply !== undefined
+    && step.pathParams.channel === ctx.ownReply.channelId && step.pathParams.message === ctx.ownReply.messageId;
   const people: Array<[string, MemberState]> = [["依頼者", actor], ["Bot", bot]];
   for (const [who, member] of people) {
     const perms = channelId ? channelPermissions(guild, member, channelId) : basePermissions(guild, member);
-    const missing = required & ~perms;
+    const missing = required & ~perms & ~(ownReply && member === actor ? P.ManageMessages : 0n);
     if (missing) problems.push(`${where}: ${who}に権限 ${permissionNames(missing).join(", ")} がありません`);
     const ungrantable = grants & ~perms;
     if (ungrantable) problems.push(`${where}: ${who}が持っていない権限は付与・設定できません(${permissionNames(ungrantable).join(", ")})`);

@@ -24,7 +24,7 @@ import type { Reader } from "../discord/reader.ts";
 import { allowProblems, allowRisk, needsChannel, needsTarget, ownerAllowProblems } from "../rules/allow.ts";
 import type { Targets } from "../rules/allow.ts";
 import type { RuleProposal } from "../rules/types.ts";
-import { normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, stepProblems } from "./validate.ts";
+import { type CheckContext, normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, stepProblems } from "./validate.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
 // bot makes on someone's behalf goes through here.
@@ -344,7 +344,7 @@ export class Planner {
     const guild = cache.guild;
     const id = randomBytes(6).toString("hex");
     const steps = normalizeSteps(input.drafts, input.guildId, id);
-    const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId() };
+    const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId(), ...(input.rule.ownReply ? { ownReply: input.rule.ownReply } : {}) };
     // Who may not see or do a step learns only that. The state of its target is
     // read and checked against the allow list after, since the reasons go back
     // to the owner's run history (and a command's runner).
@@ -389,7 +389,7 @@ export class Planner {
    * A hidden channel and one that does not exist get the same reason, and
    * nothing else is checked for that step.
    */
-  async #ruleAccessProblems(guild: GuildState, steps: Step[], people: string[], ctx: { guild: GuildState; actorId: string; selfId: string }): Promise<string[]> {
+  async #ruleAccessProblems(guild: GuildState, steps: Step[], people: string[], ctx: CheckContext): Promise<string[]> {
     const problems: string[] = [];
     for (const step of steps) {
       const spec = specOf(step);
@@ -826,7 +826,8 @@ export class Planner {
     await Promise.all(remaining.flatMap((step) => this.#namedChannels(step)).map((id) => this.#addChannelId(state, id)));
     const selfId = this.deps.selfId();
     const actorId = plan.actor.userId;
-    const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId, selfId }));
+    const ownReply = plan.rule?.ownReply;
+    const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId, selfId, ...(ownReply ? { ownReply } : {}) }));
     const actor = state.members.get(actorId);
     if (plan.actor.via === "conversation" && actor) {
       // The dialog showed these channels because the actor could read them; one that is gone reveals nothing.
@@ -862,7 +863,7 @@ export class Planner {
       plan.rule ? this.#channelStates([resolved], plan.rule.allow) : undefined,
     ]);
     const problems = [
-      ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId() }),
+      ...permissionProblems(resolved, { guild: state, actorId: plan.actor.userId, selfId: this.deps.selfId(), ...(plan.rule?.ownReply ? { ownReply: plan.rule.ownReply } : {}) }),
       // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
       ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], channels) : []),
     ];
