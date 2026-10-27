@@ -43,8 +43,8 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // pressed or reacted, like a command, unless the rule runs as its owner.
 // A run may ask with later(seconds) to run the rule again that much
 // later; the request is kept in the database (so it survives restarts) and
-// comes back from tick() as a TIMER event, acting as whoever the run that asked
-// acted as.
+// comes back as a TIMER event, acting as whoever the run that asked acted as.
+// Nothing polls for them: one timer sleeps until the earliest is due.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
@@ -58,6 +58,8 @@ export const MAX_PENDING_LATER = 100;
 export const MAX_LATER_CHAIN = 10;
 /** A rule's later() runs that came while it was over its per-minute limit wait this much longer. */
 const LATER_RETRY_MS = 60_000;
+/** The longest the timer for later() sleeps at once (timers further off are looked at again then). */
+const LATER_MAX_SLEEP_MS = 6 * 60 * 60 * 1000;
 /** A debounced rule runs at the latest this many debounce periods after the first event. */
 const MAX_WAIT_PERIODS = 5;
 
@@ -85,6 +87,8 @@ export interface RuleEngineDeps {
   threadMember?: (threadId: string, userId: string) => Promise<boolean>;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /** The servers the bot serves now, whose later() requests may run. */
+  guildIds?: () => Iterable<string>;
 }
 
 /** One event of a run, as the code reads it in `batch`. */
@@ -326,11 +330,7 @@ export class RuleEngine {
     if (minute <= this.#lastTick) return;
     this.#lastTick = minute;
     for (const guildId of guildIds) {
-      if (!this.deps.caches.get(guildId)?.guild) continue;
-      // Stopped rules drop what they asked for meanwhile, rather than act on it late.
-      const timers = this.deps.store.takeDueRuleTimers(guildId, now);
-      if (this.halted(guildId)) continue;
-      for (const timer of timers) this.#fireTimer(timer, now);
+      if (this.halted(guildId) || !this.deps.caches.get(guildId)?.guild) continue;
       for (const rule of this.deps.store.enabledRules(guildId, "SCHEDULE")) {
         try {
           if (!cronMatches(parseCron(rule.trigger.schedule ?? ""), minute, rule.trigger.timezone ?? DEFAULT_TIMEZONE)) continue;
@@ -343,6 +343,46 @@ export class RuleEngine {
   }
 
   #lastTick = 0;
+  /** The timer for the earliest later() request, and when it is due. */
+  #sleep: { timer: unknown; at: number } | null = null;
+
+  /**
+   * Runs the later() requests that are due in these servers (a server that just
+   * became ready runs what came due while it was not), then sleeps until the next.
+   */
+  runTimers(guildIds: Iterable<string>, now = this.deps.now()): void {
+    for (const guildId of guildIds) {
+      if (!this.deps.caches.get(guildId)?.guild) continue;
+      // Stopped rules drop what they asked for meanwhile, rather than act on it late.
+      const timers = this.deps.store.takeDueRuleTimers(guildId, now);
+      if (this.halted(guildId)) continue;
+      for (const timer of timers) this.#fireTimer(timer, now);
+    }
+    this.#armTimers();
+  }
+
+  /** Sleeps until the earliest later() request of the servers being served. */
+  #armTimers(): void {
+    const { setTimer = defaultSetTimer, clearTimer = defaultClearTimer } = this.deps;
+    const served = [...(this.deps.guildIds?.() ?? [])].filter((id) => this.deps.caches.get(id)?.guild);
+    const next = this.deps.store.nextRuleTimerDue(served);
+    if (next === null) {
+      if (this.#sleep) clearTimer(this.#sleep.timer);
+      this.#sleep = null;
+      return;
+    }
+    const now = this.deps.now();
+    const at = Math.min(Math.max(next, now), now + LATER_MAX_SLEEP_MS);
+    if (this.#sleep && this.#sleep.at <= at) return;
+    if (this.#sleep) clearTimer(this.#sleep.timer);
+    this.#sleep = {
+      at,
+      timer: setTimer(() => {
+        this.#sleep = null;
+        this.runTimers(this.deps.guildIds?.() ?? []);
+      }, at - now),
+    };
+  }
 
   /** A later() request's time came: the rule runs on it as whoever the run that asked acted as. */
   #fireTimer(timer: RuleTimer, now: number): void {
@@ -359,7 +399,7 @@ export class RuleEngine {
       // Kept for a little later rather than lost.
       const [id] = store.addRuleTimers(rule.id, rule.guildId, timer.actorId, [{ dueAt: now + LATER_RETRY_MS, chain: timer.chain }]);
       if (timer.message) store.setRuleTimersMessage([id!], timer.message.channelId, timer.message.messageId);
-      return;
+      return; // runTimers sleeps until it after this.
     }
     const actor = timer.actorId && timer.actorId !== rule.ownerId ? timer.actorId : undefined;
     const reader = actor ? this.deps.makeReader({ guildId: rule.guildId, channelId: timer.message?.channelId ?? "", speakerId: actor, audience: "owner" }) : undefined;
@@ -560,6 +600,7 @@ export class RuleEngine {
       if (result.later?.length) {
         const at = this.deps.now();
         timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((seconds) => ({ dueAt: at + seconds * 1000, chain: chain + 1 })));
+        this.#armTimers();
       }
     };
     if (result.kind !== "steps") {

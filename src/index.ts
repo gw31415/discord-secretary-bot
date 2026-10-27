@@ -130,6 +130,7 @@ function syncCommands(guildId: string): void {
 const engine = new RuleEngine({
   store,
   caches,
+  guildIds: () => caches.ids(),
   planner,
   selfId: () => selfId,
   now: () => Date.now(),
@@ -271,6 +272,12 @@ client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
     engine.dispatch("BOT_READY", data.id, { guild_id: data.id });
   } catch (e) {
     log(`${data.name}: BOT_READY のルールの振り分けに失敗`, e);
+  }
+  // later() requests that came due while the bot was away, then sleep until the next.
+  try {
+    engine.runTimers([data.id]);
+  } catch (e) {
+    log(`${data.name}: 予約したルールの実行に失敗`, e);
   }
 });
 

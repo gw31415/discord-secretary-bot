@@ -53,7 +53,7 @@ test("an allow list is checked for shape and for the permissions it needs", () =
   assert.deepEqual(missingPermissions(guild, guild.members.get("3")!, [{ op: "PATCH /guilds/{guild}/members/{user}", body: { type: "object", properties: { nick: {} } } }]), ["ManageNicknames"]);
 });
 
-function world(now = { t: 1_000_000 }, threadMembers: string[] = []) {
+function world(now = { t: 1_000_000 }, threadMembers: string[] = [], deps: Partial<ConstructorParameters<typeof RuleEngine>[0]> = {}) {
   const store = new Store(":memory:", randomBytes(32));
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
@@ -75,6 +75,7 @@ function world(now = { t: 1_000_000 }, threadMembers: string[] = []) {
     notifyOwner: async (_u, content) => void notices.push(content),
     log: () => {},
     run: async (_code, bindings) => (seen.push(bindings), code()),
+    ...deps,
   });
   const definition: RuleDefinition = {
     name: "挨拶",
@@ -526,10 +527,10 @@ test("later() runs the rule again as TIMER at its time, kept only from runs that
   await w.engine.idle();
   assert.equal(w.store.countRuleTimers(rule.id), 1);
   // Not yet.
-  w.engine.tick([GUILD], start + 300_000);
+  w.engine.runTimers([GUILD], start + 300_000);
   await w.engine.idle();
   assert.equal(w.seen.length, 1);
-  w.engine.tick([GUILD], start + 660_000);
+  w.engine.runTimers([GUILD], start + 660_000);
   await w.engine.idle();
   assert.equal(w.seen.length, 2);
   assert.equal(w.seen[1].eventName, "TIMER");
@@ -576,7 +577,7 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
     t += 61_000;
     w.now.t = t;
     w.engine.sweep();
-    w.engine.tick([GUILD], t);
+    w.engine.runTimers([GUILD], t);
     await w.engine.idle();
   }
   const timers = w.seen.filter((b) => b.eventName === "TIMER");
@@ -604,15 +605,40 @@ test("a TIMER run acts as whoever the run that asked acted as, and a stopped rul
   const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_REACTION_ADD" } });
   w.store.addRuleTimers(rule.id, GUILD, "3", [{ dueAt: w.now.t, chain: 1 }]);
-  w.engine.tick([GUILD], w.now.t + 60_000);
+  w.engine.runTimers([GUILD], w.now.t + 60_000);
   await w.engine.idle();
   assert.equal(w.seen[0].eventName, "TIMER");
   assert.equal(w.seen[0].actor.userId, "3");
   assert.equal(w.runs[0].actorId, "3");
   w.store.addRuleTimers(rule.id, GUILD, null, [{ dueAt: w.now.t, chain: 1 }]);
   w.store.setRuleEnabled(rule.id, false, "test");
-  w.engine.tick([GUILD], w.now.t + 120_000);
+  w.engine.runTimers([GUILD], w.now.t + 120_000);
   await w.engine.idle();
   assert.equal(w.seen.length, 1);
   assert.equal(w.store.countRuleTimers(rule.id), 0);
+});
+
+test("later() needs no polling: one timer sleeps until the earliest request and runs it", async () => {
+  const sleeps: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  const now = { t: Date.parse("2026-10-27T10:00:05Z") };
+  const w = world(now, [], {
+    guildIds: () => [GUILD],
+    setTimer: (fn, ms) => (sleeps.push({ fn, ms, cleared: false }), sleeps.at(-1)),
+    clearTimer: (handle) => void ((handle as { cleared: boolean } | null) && ((handle as { cleared: boolean }).cleared = true)),
+  });
+  w.admin.save(GUILD, "1", w.definition);
+  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later(w.seen.length === 1 ? 600 : 120), { ok: true, value: null, logs: [] })));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "750"));
+  await w.engine.idle();
+  assert.deepEqual(sleeps.map((s) => [s.ms, s.cleared]), [[600_000, false]]);
+  // An earlier request wakes it sooner.
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "751"));
+  await w.engine.idle();
+  assert.deepEqual(sleeps.map((s) => [s.ms, s.cleared]), [[600_000, true], [120_000, false]]);
+  now.t += 120_000;
+  sleeps.at(-1)!.fn();
+  await w.engine.idle();
+  assert.equal(w.seen.filter((b) => b.eventName === "TIMER").length, 1);
+  // Then it sleeps until the other one.
+  assert.equal(sleeps.at(-1)!.ms, 480_000);
 });

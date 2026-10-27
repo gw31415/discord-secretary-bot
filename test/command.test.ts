@@ -406,7 +406,7 @@ test("a public command's later() gets its reply's message, and run_as owner runs
   await w.service.handleCustomCommand(interaction({ text: "x" }));
   assert.equal(seen[0].actor.userId, "1", "run_as owner");
   assert.equal(w.store.countRuleTimers(rule.id), 1);
-  w.engine.tick([GUILD], 1_000_000 + 660_000);
+  w.engine.runTimers([GUILD], 1_000_000 + 660_000);
   await w.engine.idle();
   assert.equal(seen[1].eventName, "TIMER");
   assert.deepEqual(seen[1].event.message, { channel_id: "10", id: "880" });

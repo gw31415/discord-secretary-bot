@@ -749,6 +749,13 @@ export class Store {
     return (this.db.prepare("SELECT count(*) AS n FROM rule_timers WHERE rule_id = ?").get(ruleId) as { n: number }).n;
   }
 
+  /** When the earliest timer of these servers is due; null when they have none. */
+  nextRuleTimerDue(guildIds: string[]): number | null {
+    if (guildIds.length === 0) return null;
+    const row = this.db.prepare(`SELECT min(due_at) AS due FROM rule_timers WHERE guild_id IN (${guildIds.map(() => "?").join(", ")})`).get(...guildIds) as { due: number | null };
+    return row.due;
+  }
+
   /** Removes and returns the server's timers that are due, oldest first; each is handed out once. */
   takeDueRuleTimers(guildId: string, now: number, limit = 100): RuleTimer[] {
     return this.db.transaction(() => {
