@@ -15,10 +15,18 @@ const Content = Type.String({ minLength: 1, maxLength: 2000 });
 /** Images attached with attach_image in the same reply, by id; content or files must be present. */
 const Files = Type.Array(Type.String({ pattern: FILE_ID_PATTERN }), { minItems: 1, maxItems: MAX_IMAGES_PER_REPLY, uniqueItems: true, description: "attach_image で作った画像のID" });
 const MessageBody = Type.Object({ content: Type.Optional(Content), files: Type.Optional(Files) }, { additionalProperties: false });
+/** Buttons, selects and the rest as Discord takes them; Discord checks their shape. Presses reach INTERACTION_CREATE rules. */
+const Components = Type.Array(Type.Record(Type.String(), Type.Unknown()), { minItems: 0, maxItems: 40, description: "Discordのメッセージコンポーネント(ボタン・セレクトなど)" });
+/** Message flags, e.g. 32768 (IS_COMPONENTS_V2) or 4096 (SUPPRESS_NOTIFICATIONS). */
+const Flags = Type.Integer({ minimum: 0 });
+const ChannelMessageBody = Type.Object(
+  { content: Type.Optional(Content), files: Type.Optional(Files), components: Type.Optional(Components), flags: Type.Optional(Flags) },
+  { additionalProperties: false },
+);
 
 function filesNote(b: Record<string, unknown> | undefined): string {
   const files = Array.isArray(b?.files) ? b.files.length : 0;
-  return files > 0 ? `(画像${files}枚)` : "";
+  return `${files > 0 ? `(画像${files}枚)` : ""}${Array.isArray(b?.components) && b.components.length > 0 ? "(ボタンなど付き)" : ""}`;
 }
 
 const Overwrite = Type.Object(
@@ -177,9 +185,9 @@ const ops: OpSpec[] = [
     risk: "write",
     channel: "channel",
     always: P.ViewChannel | P.SendMessages,
-    body: MessageBody,
+    body: ChannelMessageBody,
     channels: (p) => [p.channel],
-    describe: (p, b, _before, l) => ({ target: l(p.channel), change: `${b?.content ? `「${short(b.content, 80)}」` : "画像のみ"}${filesNote(b)}` }),
+    describe: (p, b, _before, l) => ({ target: l(p.channel), change: `${b?.content ? `「${short(b.content, 80)}」` : Array.isArray(b?.files) ? "画像のみ" : ""}${filesNote(b)}` }),
     inverse: (p, _b, _s, result) => (result?.id ? { op: "DELETE /channels/{channel}/messages/{message}", path: { channel: p.channel, message: result.id } } : null),
   },
   {
@@ -212,12 +220,28 @@ const ops: OpSpec[] = [
     risk: "write",
     channel: "channel",
     always: P.ViewChannel | P.ReadMessageHistory | P.ManageMessages,
-    body: Type.Object({ content: Content }, { additionalProperties: false }),
+    body: Type.Object(
+      { content: Type.Optional(Type.Union([Content, Type.Null()])), components: Type.Optional(Components), flags: Type.Optional(Flags) },
+      { additionalProperties: false, minProperties: 1 },
+    ),
     target: (p) => `message:${p.channel}/${p.message}`,
-    targetFields: () => ["content"],
+    targetFields: (b) => Object.keys(b ?? {}),
     channels: (p) => [p.channel],
-    describe: (p, b, before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}`, change: `${before ? `「${short(before.content, 40)}」→ ` : ""}「${short(b?.content, 60)}」` }),
-    inverse: (p, _b, snapshot) => (typeof snapshot?.content === "string" && snapshot.content ? { op: "PATCH /channels/{channel}/messages/{message}", path: { channel: p.channel, message: p.message }, body: { content: snapshot.content } } : null),
+    describe: (p, b, before, l) => ({
+      target: `${l(p.channel)} のメッセージ ${p.message}`,
+      change: [
+        b?.content !== undefined ? `${before ? `「${short(before.content, 40)}」→ ` : ""}${b.content === null ? "本文なし" : `「${short(b.content, 60)}」`}` : "",
+        b?.components !== undefined ? ((b.components as unknown[]).length > 0 ? "ボタンなどを差し替え" : "ボタンなどを外す") : "",
+      ].filter(Boolean).join(" / ") || "フラグを変更",
+    }),
+    inverse: (p, b, snapshot) => {
+      if (!snapshot) return null;
+      const body: Record<string, unknown> = {};
+      if (b?.content !== undefined) body.content = typeof snapshot.content === "string" && snapshot.content ? snapshot.content : null;
+      if (b?.components !== undefined) body.components = Array.isArray(snapshot.components) ? snapshot.components : [];
+      if (b?.flags !== undefined && typeof snapshot.flags === "number") body.flags = snapshot.flags;
+      return Object.keys(body).length > 0 ? { op: "PATCH /channels/{channel}/messages/{message}", path: { channel: p.channel, message: p.message }, body } : null;
+    },
   },
   {
     op: `PUT ${REACTION_PATH}/@me`,

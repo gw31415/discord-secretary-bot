@@ -22,6 +22,8 @@ import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, re
 import type { APIMessage } from "discord-api-types/v10";
 import type { Rule, RunOutcome } from "./types.ts";
 import { NO_DECIDE, runModule } from "../wasm/run.ts";
+import { ANSWER_TTL_MS, isModalResponse } from "./interaction.ts";
+import type { InteractionResponder } from "./interaction.ts";
 import type { Program } from "../wasm/run.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 
@@ -35,7 +37,9 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // a quiet moment and run once on the batch of events. COMMAND rules run when
 // someone uses their slash command, as that person: their read scope, their
 // permissions (within the allow list) and their judge model, and the outcome
-// goes back to them.
+// goes back to them. INTERACTION_CREATE rules run on presses of the bot's
+// messages' buttons and forms sent from them, as their owner, and what the
+// code passes to respond() answers whoever pressed.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
@@ -128,6 +132,8 @@ export class RuleEngine {
   /** Runs that must not overlap, one after another in the order events arrived (see serialKey). */
   readonly #queues = new Map<string, Promise<void>>();
   #unqueued = 0;
+  /** Interactions rules may still answer, by interaction id. */
+  readonly #answers = new Map<string, { responder: InteractionResponder; at: number }>();
 
   constructor(deps: RuleEngineDeps) {
     this.deps = deps;
@@ -258,6 +264,30 @@ export class RuleEngine {
       if (!this.#visible(rule, guild, event, data)) continue;
       this.#fire(rule, event, data);
     }
+  }
+
+  /**
+   * A button, select or form on one of the bot's messages. Every enabled
+   * INTERACTION_CREATE rule whose owner can view the channel runs at once (no
+   * batching, since each press waits for its own answer); one over its
+   * per-minute limit is skipped. `responder` answers whoever pressed.
+   */
+  dispatchInteraction(guildId: string, data: Data, responder: InteractionResponder): { fired: number; limited: number } {
+    const counts = { fired: 0, limited: 0 };
+    const guild = this.deps.caches.get(guildId)?.guild;
+    if (!guild || this.halted(guildId)) return counts;
+    const rules = this.deps.store.enabledRules(guildId, "INTERACTION_CREATE").filter((rule) => this.#visible(rule, guild, "INTERACTION_CREATE", data));
+    if (rules.length === 0) return counts;
+    this.#answers.set(String(data.id), { responder, at: this.deps.now() });
+    for (const rule of rules) {
+      if (this.#allowRun(rule) !== 0) {
+        counts.limited++;
+        continue;
+      }
+      counts.fired++;
+      this.#enqueue(serialKey(rule, data), () => this.#run(rule.id, rule.version, eventIdOf("INTERACTION_CREATE", data), [{ eventName: "INTERACTION_CREATE", event: data }]));
+    }
+    return counts;
   }
 
   /**
@@ -434,17 +464,22 @@ export class RuleEngine {
     const result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND", actor);
     const reply = result.reply ?? null;
     const images = result.images ?? [];
+    // A form must be the interaction's first answer, so it goes before the changes; other answers wait for them.
+    const responder = last.eventName === "INTERACTION_CREATE" ? this.#answers.get(String(last.event.id))?.responder : undefined;
+    const response = responder ? result.response : undefined;
+    let answerError: string | null = null;
+    if (response !== undefined && (isModalResponse(response) || result.kind === "none")) answerError = await responder!.send(response);
     // Kept only when the run went through, so a failed run is retried from the same state.
     const keepState = () => {
       if (result.state) store.setRuleState(rule.id, result.state.value);
     };
     if (result.kind !== "steps") {
       if (result.kind === "none") keepState();
-      const outcome = result.kind === "none" ? "no_change" : "failed";
-      const error = result.kind === "error" ? result.error : null;
+      const error = result.kind === "error" ? result.error : answerError;
+      const outcome = error === null ? "no_change" : "failed";
       store.finishRuleRun(runId, { outcome, error, logs: result.logs });
       // A command run that failed only because whoever ran it has no judge model is not the rule's fault.
-      this.#settle(rule, result.kind === "error" && !(command && error?.includes(NO_DECIDE)), error);
+      this.#settle(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error);
       return { outcome, error, reply, images, steps: 0 };
     }
     let outcome: RunOutcome;
@@ -465,7 +500,16 @@ export class RuleEngine {
       outcome = e instanceof PlanRejected ? "rejected" : "failed";
       error = e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e);
     }
+    if (response !== undefined && !isModalResponse(response)) {
+      if (outcome === "executed") answerError = await responder!.send(response);
+      else await responder!.failed(rule.name);
+    }
     if (outcome === "executed") keepState();
+    // The changes stand (and so does the state), but an answer Discord turned down is the rule's failure.
+    if (answerError) {
+      outcome = "failed";
+      error = error ? `${error}\n${answerError}` : answerError;
+    }
     store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
     store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     // A command turned down for what its runner may not do says nothing about the rule, and must not let anyone switch it off.
@@ -533,6 +577,7 @@ export class RuleEngine {
   ): Promise<Evaluation> {
     let result: SandboxResult;
     let replied: string | null = null;
+    let response: unknown;
     const images: CommandImage[] = [];
     try {
       const source = reader ?? this.ownerReader(rule.guildId, actorId);
@@ -567,6 +612,7 @@ export class RuleEngine {
           params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
           ...(command ? { reply: (text: string) => void (replied = (replied ? `${replied}\n${text}` : text).slice(0, MAX_REPLY)) } : {}),
+          ...(eventName === "INTERACTION_CREATE" ? { respond: (r: unknown) => void (response = r) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
           ...(decider ? { decide: decider } : {}),
           // The modules the code names are its author's, as for a rule's own wasm; they run with this run's bindings.
@@ -599,7 +645,7 @@ export class RuleEngine {
     if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {
       return { kind: "error", error: `setState の値はJSONで${MAX_STATE_JSON}文字までです`, logs: result.logs };
     }
-    const saved = { ...(result.state ? { state: result.state } : {}), ...(replied !== null ? { reply: replied } : {}), ...(images.length ? { images } : {}) };
+    const saved = { ...(result.state ? { state: result.state } : {}), ...(replied !== null ? { reply: replied } : {}), ...(response !== undefined ? { response } : {}), ...(images.length ? { images } : {}) };
     const value = result.value as { steps?: unknown } | null | undefined;
     if (value === undefined || value === null) return { kind: "none", logs: result.logs, ...saved };
     if (!Array.isArray(value.steps)) return { kind: "error", error: "コードは plan([...]) を return してください", logs: result.logs };
@@ -629,6 +675,7 @@ export class RuleEngine {
   sweep(): void {
     const now = this.deps.now();
     for (const [key, write] of this.#recent) if (now - write.at >= RECENT_WRITE_MS) this.#recent.delete(key);
+    for (const [key, answer] of this.#answers) if (now - answer.at >= ANSWER_TTL_MS) this.#answers.delete(key);
     for (const [key, until] of this.#limitedNoted) if (until <= now) this.#limitedNoted.delete(key);
     for (const [key, times] of this.#runs) {
       const recent = times.filter((t) => now - t < 60_000);
@@ -666,11 +713,14 @@ function defaultClearTimer(handle: unknown): void {
   if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
-/** `state` is set when the code called setState: what to keep if the run goes through. `reply` is what a command's code passed to reply(). */
+/**
+ * `state` is set when the code called setState: what to keep if the run goes through. `reply` is what a command's
+ * code passed to reply(), `response` what an INTERACTION_CREATE run's code passed to respond().
+ */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; images?: CommandImage[] }
-  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; images?: CommandImage[] }
-  | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; images?: undefined };
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[] }
+  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[] }
+  | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; response?: undefined; images?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {

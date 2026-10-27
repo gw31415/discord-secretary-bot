@@ -61,6 +61,7 @@ Botが変更案に書く項目です。会話で頼めばBotが決めますが�
 | `SCHEDULE` | 決まった時刻になった | guild_id, scheduled_at(発火した分の ISO 時刻), schedule, timezone |
 | `BOT_READY` | Botが起動・再接続してサーバーの情報を受け取った | guild_id |
 | `COMMAND` | ルールのスラッシュコマンドが実行された | guild_id, channel_id, command, user { id, username, global_name }, member { roles, nick }, options |
+| `INTERACTION_CREATE` | Botのメッセージのボタン・セレクトが押された、フォームが送信された | Discord のインタラクションのまま(`token` を除く): id, type(3 ボタン・セレクト、5 フォーム送信), guild_id, channel_id, member, message, data { custom_id, component_type, values, components } |
 
 `BOT_READY` は、Botが止まっていた間の変化をまとめて反映するのに使います。`VOICE_STATE_UPDATE` の `before_channel_id` はBotが足した項目です。
 
@@ -240,9 +241,43 @@ Bot由来かどうかは、Botが直前15秒に書いた対象かで決めます
 
 コマンドは、ルールが変わるたびにサーバーへ登録し直します。1つのサーバーで50個までです。
 
+## ボタンとフォーム
+
+Botの投稿にボタンやセレクトを付け、押した人だけにフォーム(モーダル)を出し、送信された内容をルールで受け取れます。
+
+1. 投稿のステップの `body.components` に、Discord のコンポーネントをそのまま書きます([書き込み操作](operations.md))。Botの投稿のボタンを変えるときは `PATCH /channels/{channel}/messages/{message}` の `components` です。
+2. 押されたときの処理を、きっかけ `INTERACTION_CREATE` のルールにします。
+
+```js
+const d = event.data;
+if (event.type === 3 && d.custom_id === "apply:open") {
+  // 押した人だけにフォームを出す
+  respond({ type: 9, data: { custom_id: "apply:form", title: "参加申請", components: [
+    { type: 1, components: [{ type: 4, custom_id: "why", label: "理由", style: 2, required: true }] },
+  ] } });
+  return null;
+}
+if (event.type === 5 && d.custom_id === "apply:form") {
+  const why = d.components.flatMap((row) => row.components ?? [row.component]).find((c) => c.custom_id === "why").value;
+  respond({ type: 4, data: { content: "受け付けました", flags: 64 } });
+  return plan([call("POST /channels/{channel}/messages", { path: { channel: params.staff }, body: { content: `<@${event.member.user.id}> の申請: ${why}` } })]);
+}
+return null;
+```
+
+- 押されるたびに、サーバーの `INTERACTION_CREATE` のルールがすべて動きます。コードは `event.data.custom_id` で自分のボタンか確かめ、違えば `null` を返します。フォームの送信(`event.type` 5)も同じルールに届きます。
+- ルールは作成者として動きます(リアクションのルールと同じ)。変更は allow と作成者の権限の範囲で、読み取りも作成者の範囲です。押した人は `event.member` で分かります。
+- `respond({ type, data })` で押した人に応答します。`type` と `data` は Discord のインタラクション応答のままです。`9` はフォーム(押した人だけに出る)、`4` はメッセージ(`data.flags` に `64` で押した人だけ)、`7` はボタンのメッセージの書き換え、`6` は何も変えずに受け付けるだけです。応答のメンションは通知しません。
+- Discord は3秒以内の応答を求め、フォームは最初の応答でしか出せません。そのためフォームはコードが返ってすぐに出し、ほかの応答は変更を実行したあとに出します。変更が失敗したときは、応答の代わりに「ルール「…」の実行に失敗しました」を押した人だけに出します。
+- 2.5秒たっても応答がないときは、何も変えずに受け付けます。そのあとの `4` は追加のメッセージ、`7` はボタンのメッセージの書き換えになります。フォームは出せず、その回は失敗として記録します。`judge()` などで時間がかかるときは、フォームを先に出す作りにします。
+- 動くルールがないときは「これに応えるルールは今はありません」を押した人だけに出します。
+- `custom_id` は `llm`・`rule`・`plan`・`widen`・`wasm` で始めないでください。Botの画面が使っています。ほかのルールと重ならない名前にします。
+- `debounce_seconds` は付けられません。押されるたびに1回ずつ動き、1分あたりの回数を超えた分は動かさず「混み合っています」と出します。
+- 応答だけで変更をしないルールは `allow` を空にできます。
+
 ## 読み取りの範囲
 
-イベントと時刻のルールのコードが読めるのは、作成者とBotの両方が読めるものです。コマンドのルールは、そのチャンネルを見られる全員(と実行した人)が読めるものです。読めるルートは [JavaScript の API](js-api.md#読めるルート) にあります。
+イベント・時刻・ボタンのルールのコードが読めるのは、作成者とBotの両方が読めるものです。コマンドのルールは、そのチャンネルを見られる全員(と実行した人)が読めるものです。読めるルートは [JavaScript の API](js-api.md#読めるルート) にあります。
 
 ## ドライラン
 

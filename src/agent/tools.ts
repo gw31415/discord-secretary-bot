@@ -579,7 +579,7 @@ const RULE_FIELDS = {
       max_consecutive_failures: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.maxConsecutiveFailures })),
     }),
   ),
-  allow: Type.Array(AllowSchema, { maxItems: MAX_ALLOW_ENTRIES, description: "COMMAND で返事だけのときは空でかまいません" }),
+  allow: Type.Array(AllowSchema, { maxItems: MAX_ALLOW_ENTRIES, description: "COMMAND で返事だけ、INTERACTION_CREATE で応答だけのときは空でかまいません" }),
   params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   sample_event: Type.Optional(Type.Unknown()),
   replaces_rule: Type.Optional(Type.String()),
@@ -668,7 +668,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask({ ...r, code_task: task }), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
+          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), ...(r.trigger_event === "INTERACTION_CREATE" ? { respond: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
           tools,
         });
         return { ...rest, code };
@@ -733,7 +733,7 @@ const RULES_DESCRIPTION = [
   "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
   "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
-  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。10枚まで), judge・rank(作成者の判定モデル、COMMAND では実行した人の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), runWasm(登録済みのWasmモジュールを1回動かして { exitCode, stdout, logs } を返す。モジュールの指定は wasm と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
+  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), respond(INTERACTION_CREATE のときだけ。押した人への応答), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。10枚まで), judge・rank(作成者の判定モデル、COMMAND では実行した人の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), runWasm(登録済みのWasmモジュールを1回動かして { exitCode, stdout, logs } を返す。モジュールの指定は wasm と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
   "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
   "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, channel?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の、channel はステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の実行直前の状態の JSON Schema です。決まったカテゴリの中のチャンネルにだけ投稿させるなら channel: { properties: { parent_id: { const: \"<カテゴリID>\" } }, required: [\"parent_id\"] } のようにします。コードが出したステップはどれか1つに合わないと実行されません。",
   "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
@@ -744,6 +744,7 @@ const RULES_DESCRIPTION = [
   "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 10 } を加えます。",
   "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
   "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND だけにし、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに実行した人の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。コマンドは実行した人として動きます。変更は allow の範囲で、さらに実行した人が持つ権限の分だけ実行され、読み取りはそのチャンネルを見られる全員(と実行した人)が読めるものに限られます。permissions(例: [\"ManageChannels\"])を付けると、その権限がない人にはコマンドが出ず実行もできません。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
+  "  ボタン・セレクト・入力フォームを使うとき(「ボタンを押した人にフォームを出して、送信内容を◯◯に投稿」など)は、ステップでメッセージを投稿し(POST /channels/{channel}/messages の body.components に Discord のコンポーネントのまま。例: [{ type: 1, components: [{ type: 2, style: 1, label: \"申請\", custom_id: \"apply:open\" }] }]。Components V2 なら flags: 32768 を付け content は付けません。Botの投稿のボタンを変えるのは PATCH /channels/{channel}/messages/{message} の components)、押されたときの処理を trigger_event INTERACTION_CREATE のルールにします。押されるたびに作成者として動き、event は Discord のインタラクションのまま(押した人は event.member、ボタンは event.data.custom_id、フォームの入力は event.data.components)です。コードは event.data.custom_id で自分のボタンか確かめ(違えば return null)、respond({ type, data }) で押した人に応答します: type 9 はフォーム(data は { custom_id, title, components }。押した人だけに出ます)、4 はメッセージ(data.flags 64 で押した人だけ)、7 はボタンのメッセージの書き換え。フォームはコードが返ってすぐ(3秒以内)に出し、ほかの応答は変更を実行したあとに出ます。フォームの送信(event.type 5)も同じルールに届くので、custom_id で区別します。custom_id は llm・rule・plan・widen・wasm で始めない(Botの画面が使います)、他のルールと重ならない名前にします。応答だけで変更がなければ allow は [] でかまいません。sample_event にはインタラクションの例(type・data・member など)を付けます。",
   "  ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
   "  きっかけにできるイベント:",
   triggerSummary(),

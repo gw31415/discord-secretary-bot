@@ -9,7 +9,7 @@ import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { allowShapeProblems, missingPermissions, ownerAllowProblems } from "./allow.ts";
 import { haltKey } from "./engine.ts";
 import type { Halt } from "./engine.ts";
-import { triggerProblems } from "./triggers.ts";
+import { triggerEvents, triggerProblems } from "./triggers.ts";
 import type { Rule, RuleDefinition, RuleRun } from "./types.ts";
 
 // The rule management functions. The /rule panel is a view over these; a web
@@ -100,7 +100,7 @@ export class RuleAdmin {
   /** Problems with owning a rule like this: its shape and the permissions its allow list needs. */
   ownershipProblems(guildId: string, ownerId: string, definition: RuleDefinition): string[] {
     const viewer = this.#viewer(guildId, ownerId);
-    const problems = [...allowShapeProblems(definition.allow, definition.trigger.event === "COMMAND")];
+    const problems = [...allowShapeProblems(definition.allow, triggerEvents(definition.trigger).some((e) => e === "COMMAND" || e === "INTERACTION_CREATE"))];
     problems.push(...triggerProblems(definition.trigger));
     problems.push(...ownerAllowProblems(viewer.guild, ownerId, this.deps.selfId(), definition.allow));
     return problems;

@@ -67,7 +67,7 @@ ABI の名前は `secretary/1` です。
 
 ```json
 { "steps": [ { "op": "POST /channels/{channel}/messages", "path": { "channel": "…" }, "body": { "content": "…" } } ],
-  "state": { … }, "reply": "コマンドへの返事" }
+  "state": { … }, "reply": "コマンドへの返事", "response": { "type": 9, "data": { … } } }
 ```
 
 | 項目 | 中身 |
@@ -75,6 +75,7 @@ ABI の名前は `secretary/1` です。
 | `steps` | 変更のステップ。各要素は `{ id?, op, path?, query?, body? }` で、JavaScript の `call()` と同じ形。`$ref` で前のステップの結果を指せる |
 | `state` | 次の実行の `state`。書くと、実行が通ったときだけ保存する。書かなければ変わらない |
 | `reply` | コマンドの返事。`COMMAND` のルールでだけ使える(ほかで書くと失敗) |
+| `response` | 押した人への応答。JavaScript の `respond()` と同じ `{ type, data }`。`INTERACTION_CREATE` のルールでだけ使える(ほかで書くと失敗) |
 
 - 標準エラー出力は実行履歴のログになります(100行・1行2000文字まで)。
 - 終了コードが0以外なら失敗です。標準エラー出力の最後の行を失敗の理由として記録します。

@@ -185,6 +185,16 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     channel: (d) => d.channel_id,
     actorId: (d) => d.user?.id,
   },
+  INTERACTION_CREATE: {
+    label: "Botのメッセージのボタン・セレクトが押されたとき、フォームが送信されたとき",
+    intent: 0,
+    // Interactions reach the bot over the Gateway, but the bot's own panels take theirs first.
+    synthetic: true,
+    payload:
+      "Discordのインタラクションのまま(token は除く): id, type(3 ボタン・セレクト, 5 フォーム送信), guild_id, channel_id, member { user, roles, nick, permissions }(押した人), message(ボタンが付いたメッセージ), data { custom_id, component_type, values(セレクト), components(フォームの入力欄。各 component に custom_id と value) }。respond({ type, data }) で押した人に応答します(type 9 でフォーム、4 でメッセージ、7 でボタンのメッセージを書き換え。data は Discord の形のまま。flags: 64 で押した人だけに見せる)",
+    channel: (d) => d.channel_id ?? d.channel?.id,
+    actorId: (d) => d.member?.user?.id ?? d.user?.id,
+  },
   VOICE_STATE_UPDATE: {
     label: "ボイスチャンネルに入った・出た・移ったとき",
     intent: GatewayIntentBits.GuildVoiceStates,
@@ -261,6 +271,7 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
     if (debounce !== undefined) problems.push("きっかけ COMMAND には debounce_seconds を付けられません");
     problems.push(...commandProblems(trigger.command).map((p) => `きっかけ: ${p}`));
   } else if (trigger.command !== undefined) problems.push("きっかけの command は COMMAND と一緒に使います");
+  if (events.includes("INTERACTION_CREATE") && debounce !== undefined) problems.push("きっかけ INTERACTION_CREATE には debounce_seconds を付けられません");
   const serial = trigger.serialBy;
   if (serial !== undefined && !(typeof serial === "string" && serial.length <= 64 && /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(serial))) {
     problems.push("きっかけの serial_by は \"rule\" か、イベントの項目のパス(user_id、member.user.id など)にしてください");

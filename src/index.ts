@@ -354,6 +354,7 @@ client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
     if (await rules.handleCustomCommand(data)) return;
     if (await rules.handleInteraction(data)) return;
     if (await wasmPanel.handleInteraction(data)) return;
+    if (await rules.handleRuleInteraction(data)) return;
     await handleInteraction(api, store, data);
   } catch (e) {
     log("インタラクションの処理に失敗", e);

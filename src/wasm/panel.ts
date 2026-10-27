@@ -42,7 +42,7 @@ function view(texts: string[], rows: APIButtonComponent[][], select?: APICompone
 const HOW_TO = [
   "WASI(preview 1)のコマンドとしてビルドした .wasm を登録できます(Rust の wasm32-wasip1、Go の GOOS=wasip1、C の wasi-sdk、Zig など)。",
   "**登録のしかた**: Botにメンションして .wasm を添付し、何に使いたいかを相談すると、Botが登録してルールやコマンドの案を出します。下の「Wasmを登録」から登録だけしておくこともできます。",
-  "標準入力でイベントなどのJSONを受け取り、標準出力に `{ \"steps\": [...], \"reply\": \"…\", \"state\": … }` を書きます。Discordの読み取りなどはホスト関数 `secretary.call` で呼びます。",
+  "標準入力でイベントなどのJSONを受け取り、標準出力に `{ \"steps\": [...], \"reply\": \"…\", \"response\": { … }, \"state\": … }` を書きます。Discordの読み取りなどはホスト関数 `secretary.call` で呼びます。",
   "登録しただけでは動きません。会話で「このWasmを /xxx コマンドにして」のように頼むと、ルールとして確認画面が出ます。実行はルールの作成者(コマンドでは実行した人)の権限の範囲だけです。",
 ].join("\n");
 

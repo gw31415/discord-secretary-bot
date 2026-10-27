@@ -2,6 +2,7 @@ import { toUploadable } from "../media.ts";
 import type { API } from "@discordjs/core";
 import { InteractionType, MessageFlags, PermissionFlagsBits } from "discord-api-types/v10";
 import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
+import { InteractionAnswer, interactionEvent, isRuleInteraction } from "./interaction.ts";
 import type { CommandReport } from "./engine.ts";
 import type { APIInteraction, APIMessage } from "discord-api-types/v10";
 import type { Store, WasmSource } from "../db.ts";
@@ -48,7 +49,7 @@ export interface RuleServiceDeps {
   store: Store;
   caches: Pick<GuildCaches, "get">;
   admin: RuleAdmin;
-  engine: Pick<RuleEngine, "evaluate" | "ownerReader" | "runCommand">;
+  engine: Pick<RuleEngine, "evaluate" | "ownerReader" | "runCommand" | "dispatchInteraction">;
   selfId: () => string;
   now: () => number;
   log: (message: string, error?: unknown) => void;
@@ -156,7 +157,12 @@ export class RuleService {
     const state = saved && this.deps.store.getRule(saved)?.ownerId === ownerId ? this.deps.store.getRuleState(saved) : null;
     const result = await this.deps.engine.evaluate({ guildId, ownerId, program: rule.program, ...(rule.params ? { params: rule.params } : {}) }, event, reader, rule.trigger.event, undefined, state);
     if (result.kind === "error") return { source, outcome: "error", lines: [], problems: [result.error], logs: result.logs };
-    const kept = { ...(result.state ? { state: JSON.stringify(result.state.value) } : {}), ...(result.reply !== undefined ? { reply: result.reply } : {}), ...(result.images?.length ? { images: result.images.length } : {}) };
+    const kept = {
+      ...(result.state ? { state: JSON.stringify(result.state.value) } : {}),
+      ...(result.reply !== undefined ? { reply: result.reply } : {}),
+      ...(result.response !== undefined ? { response: JSON.stringify(result.response) } : {}),
+      ...(result.images?.length ? { images: result.images.length } : {}),
+    };
     if (result.kind === "none") return { source, outcome: "none", lines: [], problems: [], logs: result.logs, ...kept };
     const guild = this.#guild(guildId);
     let steps;
@@ -405,6 +411,24 @@ export class RuleService {
     } else {
       await api.interactions.editReply(interaction.application_id, interaction.token, body);
     }
+    return true;
+  }
+
+  /**
+   * A press or form on a message that is not the bot's own panel goes to the
+   * server's INTERACTION_CREATE rules; false for anything else.
+   */
+  async handleRuleInteraction(interaction: APIInteraction): Promise<boolean> {
+    if (!isRuleInteraction(interaction)) return false;
+    const guildId = interaction.guild_id;
+    if (!guildId || !interaction.member) return false;
+    const answer = new InteractionAnswer(this.deps.api, interaction, this.deps.log);
+    const { fired, limited } = this.deps.engine.dispatchInteraction(guildId, interactionEvent(interaction), answer);
+    if (fired === 0) {
+      await answer.note(limited ? "混み合っています。少し待ってからもう一度試してください" : "これに応えるルールは今はありません");
+      return true;
+    }
+    answer.arm();
     return true;
   }
 
