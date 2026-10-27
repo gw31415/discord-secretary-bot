@@ -88,6 +88,21 @@ if (a.spam.probability < 0.9) return null;
 
 `judge` と `rank` は合わせて1回の実行で10回までです。
 
+### Wasm を動かす(runWasm)
+
+`runWasm(module, { input, stdin })` は登録済みの Wasm モジュールを1回動かし、`{ exitCode, stdout, logs }` を返します。会話の `run_wasm` と同じことを、コードの中からします。会話の `run_code`・変更案のコード・ルールのコードのどれでも使えます。
+
+- `module` はモジュールの名前(自分のもの)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。ルールとコマンドでは、名前はルールの作成者のモジュールから探します。名前は動くたびに引くので、同じ名前で上げ直すと次の実行から新しいほうが動きます。変わらないようにするなら sha256 で書きます。
+- 標準入力は `run_wasm` と同じ `{ guild, actor, eventName: null, event: input, batch: null, params: null, state: null }` の JSON か、`stdin` に渡した文字列そのものです。
+- モジュールの `secretary.call` は、呼んだコードと同じ読み取り範囲・判定モデル・画像で答えます。`discord.get` などの回数と実行時間は、呼んだコードと合わせて数えます。動かしたモジュールから `runWasm` はできません。
+- `stdout` の `steps` は実行されません。使うなら、コードが自分の `plan(...)` に入れて返します。そのときも allow と権限の確かめはいつもどおりです。
+
+```js
+const r = runWasm("summarize", { input: { messages: discord.get(`/channels/${event.channel_id}/messages`, { query: { limit: 20 } }) } });
+if (r.exitCode !== 0) throw new Error(r.logs.at(-1) ?? "失敗しました");
+return plan(JSON.parse(r.stdout).steps);
+```
+
 ### 画像
 
 会話の `run_code` とルールのコードで使えます。変更案のコードでは使えません。どの関数も画像のID(`"img1"` など)を返します。作れるのは3つの関数を合わせて1回の実行で4枚までです。

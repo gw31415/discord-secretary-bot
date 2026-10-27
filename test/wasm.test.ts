@@ -251,6 +251,70 @@ test("run_wasm runs an attached or kept module once, read-only, and points steps
   await assert.rejects(run.execute("t", {}), /message_id・module・compiled/);
 });
 
+/** A module that sends `request` through secretary.call and prints the answer. */
+function asker(request: string): Uint8Array {
+  return wasm({
+    types: [[[I32, I32, I32, I32], [I32]], [[], []]],
+    imports: [["secretary", "call", 0], ["wasi_snapshot_preview1", "fd_write", 0]],
+    memory: [1],
+    funcs: [[1, [
+      ...i32(512), ...i32(1024), 0x36, 2, 0,
+      ...i32(516), ...i32(0), ...i32(Buffer.byteLength(request)), ...i32(1024), ...i32(4096), 0x10, 0, 0x36, 2, 0,
+      ...i32(1), ...i32(512), ...i32(1), ...i32(600), 0x10, 1, 0x1a,
+    ]]],
+    exports: [["_start", 0, 2], ["memory", 2, 0]],
+    data: [[0, request]],
+  });
+}
+
+test("rule code runs a kept module with runWasm, within the run's own reads and limits", async () => {
+  const { runRuleCode } = await import("../src/sandbox.ts");
+  const step = { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "hi" } };
+  const modules: Record<string, Uint8Array> = {
+    post: printer(JSON.stringify({ steps: [step] })),
+    reads: asker(JSON.stringify({ fn: "get", route: "/guilds/1" })),
+    nests: asker(JSON.stringify({ fn: "runWasm", module: "post" })),
+  };
+  const loaded: string[] = [];
+  const gets: string[] = [];
+  const bindings = {
+    guildId: "1",
+    actor: { kind: "user" as const, userId: "2" },
+    get: async (route: string) => (gets.push(route), { name: "鯖" }),
+    wasm: async (ref: string) => {
+      loaded.push(ref);
+      if (!modules[ref]) throw new Error(`Wasmモジュール「${ref}」が見つかりません`);
+      return WebAssembly.compile(modules[ref]!);
+    },
+    state: null,
+  };
+  const limits = { wallTimeMs: 10_000, maxGets: 1 };
+
+  const steps = await runRuleCode("var r = runWasm('post'); return plan(JSON.parse(r.stdout).steps);", bindings, limits);
+  assert.equal(steps.ok, true, steps.error);
+  assert.deepEqual(steps.value, { steps: [step] });
+
+  // The module's reads go through the run's bindings and count toward its limit.
+  const reads = await runRuleCode("var r = runWasm('reads'); log(r.exitCode, JSON.parse(r.stdout)); discord.get('/guilds/1'); return null;", bindings, limits);
+  assert.deepEqual(gets, ["/guilds/1"]);
+  assert.equal(reads.ok, false);
+  assert.match(reads.error!, /discord.get は1回の実行で1回まで/);
+  assert.deepEqual(reads.logs, ['0 {"value":{"name":"鯖"}}']);
+
+  // A module it runs cannot run another.
+  const nested = await runRuleCode("log(JSON.parse(runWasm('nests').stdout)); return null;", bindings, limits);
+  assert.equal(nested.ok, true, nested.error);
+  assert.match(nested.logs[0]!, /"error":"fn は .*のどれかです"/);
+  assert.doesNotMatch(nested.logs[0]!, /runWasm/);
+
+  const missing = await runRuleCode("runWasm('none'); return null;", bindings, limits);
+  assert.match(missing.error!, /見つかりません/);
+  const { wasm: _, ...without } = bindings;
+  const off = await runRuleCode("runWasm('post'); return null;", without, limits);
+  assert.match(off.error!, /runWasm はここでは使えません/);
+  assert.deepEqual(loaded, ["post", "reads", "nests", "none"]);
+});
+
 test("rules saved before programs were a union read as a JS or a Wasm program", async () => {
   const { mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

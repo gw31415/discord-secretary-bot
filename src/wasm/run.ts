@@ -46,11 +46,14 @@ export interface Execution {
 
 /**
  * Runs a module once on `stdin`. Requests through secretary.call go to `host`.
+ * `nested` is for a module run from inside another run, which already holds a slot.
  * Throws when the module traps, runs out of time or cannot start.
  */
-export async function execute(module: WebAssembly.Module, stdin: Uint8Array, host: (request: string) => Promise<string>, wallTimeMs: number): Promise<Execution> {
+export async function execute(module: WebAssembly.Module, stdin: Uint8Array, host: (request: string) => Promise<string>, wallTimeMs: number, nested = false): Promise<Execution> {
   const deadline = Date.now() + wallTimeMs;
-  const timeUp = () => new Error(`実行時間の上限(${wallTimeMs / 1000}秒)を超えました`);
+  const timeUp = () => new Error(`実行時間の上限(${Math.round(wallTimeMs / 100) / 10}秒)を超えました`);
+  // A run started by a running module (runWasm) uses that module's slot, which waits on it.
+  if (nested) return executeIn(module, stdin, host, deadline, timeUp);
   if (!(await slot(deadline))) throw timeUp();
   try {
     return await executeIn(module, stdin, host, deadline, timeUp);
@@ -246,10 +249,12 @@ export async function runModule(program: Program, bindings: WasmBindings, limits
 
 /**
  * Answers a module's requests; every answer is JSON, { value } or { error }.
- * The public ABI is get, judge, rank, renderMath, convertImage and image
- * (docs/wasm.md); canvas and measure serve the JS engine's createCanvas.
+ * The public ABI is get, judge, rank, renderMath, convertImage, image and
+ * runWasm (docs/wasm.md); canvas and measure serve the JS engine's createCanvas.
+ * A module run with runWasm reaches the same bindings and limits, all but runWasm.
  */
 export function hostCalls(bindings: WasmBindings, limits: SandboxLimits, engine = false): (request: string) => Promise<string> {
+  const deadline = Date.now() + limits.wallTimeMs;
   let gets = 0;
   let decides = 0;
   let images = 0;
@@ -312,16 +317,28 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits, engine 
       return bindings.image(Buffer.from(r.data, "base64"), name(r.name));
     },
   };
-  Object.assign(fns, publicFns);
-  if (engine) Object.assign(fns, engineFns);
-  return async (request) => {
+  const answer = async (request: string, own: typeof fns) => {
     try {
       const r = JSON.parse(request) as Record<string, unknown>;
-      const fn = typeof r?.fn === "string" && Object.hasOwn(fns, r.fn) ? fns[r.fn] : undefined;
-      if (!fn) throw new Error(`fn は ${Object.keys(fns).join("・")} のどれかです`);
+      const fn = typeof r?.fn === "string" && Object.hasOwn(own, r.fn) ? own[r.fn] : undefined;
+      if (!fn) throw new Error(`fn は ${Object.keys(own).join("・")} のどれかです`);
       return JSON.stringify({ value: (await fn(r)) ?? null });
     } catch (e) {
       return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
     }
   };
+  // The module it runs reads what run_wasm's would and has the time left.
+  const nestedFns = { ...fns, ...publicFns };
+  publicFns.runWasm = async (r) => {
+    if (!bindings.wasm) throw new Error("runWasm はここでは使えません");
+    if (typeof r.module !== "string") throw new Error("runWasm には module(モジュール名か sha256)が必要です");
+    if (r.stdin !== undefined && r.stdin !== null && typeof r.stdin !== "string") throw new Error("runWasm の stdin は文字列にしてください");
+    const module = await bindings.wasm(r.module);
+    const stdin = r.stdin ?? wasmInput({ ...bindings, eventName: null, event: r.input ?? null, batch: undefined, params: null, state: null });
+    const run = await execute(module, new TextEncoder().encode(stdin), (request) => answer(request, nestedFns), Math.max(0, deadline - Date.now()), true);
+    return { exitCode: run.exitCode, stdout: run.stdout.toString("utf8"), logs: run.logs };
+  };
+  Object.assign(fns, publicFns);
+  if (engine) Object.assign(fns, engineFns);
+  return (request) => answer(request, fns);
 }
