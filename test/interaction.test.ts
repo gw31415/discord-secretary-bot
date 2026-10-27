@@ -27,13 +27,14 @@ function world() {
   const admin = new RuleAdmin({ store, caches, selfId: () => SELF, now: () => 1_000_000 });
   const order: string[] = [];
   const seen: any[] = [];
+  const runsAs: string[] = [];
   let status = "succeeded";
   let respond: unknown = MODAL;
   let steps: unknown[] = [];
   const engine = new RuleEngine({
     store,
     caches,
-    planner: { runForRule: async () => (order.push("steps"), { plan: { id: "p1" }, status, reason: status === "succeeded" ? null : "だめ" }) as never },
+    planner: { runForRule: async (input: any) => (order.push("steps"), runsAs.push(input.actorId), { plan: { id: "p1" }, status, reason: status === "succeeded" ? null : "だめ" }) as never },
     selfId: () => SELF,
     now: () => 1_000_000,
     makeReader: () => ({ get: async () => null }) as never,
@@ -47,7 +48,7 @@ function world() {
   const responses: unknown[] = [];
   const responder: InteractionResponder = {
     send: async (r) => (order.push("answer"), responses.push(r), null),
-    failed: async (name) => void (order.push("failed"), responses.push(`failed:${name}`)),
+    failed: async (name, reason) => void (order.push("failed"), responses.push(`failed:${name}:${reason ?? ""}`)),
   };
   const definition: RuleDefinition = {
     name: "申請",
@@ -59,7 +60,7 @@ function world() {
     limits: DEFAULT_LIMITS,
   };
   return {
-    store, admin, engine, seen, responses, responder, definition, order,
+    store, admin, engine, seen, runsAs, responses, responder, definition, order,
     set: (o: { respond?: unknown; steps?: unknown[]; status?: string }) => {
       if ("respond" in o) respond = o.respond;
       if (o.steps) steps = o.steps;
@@ -70,19 +71,24 @@ function world() {
 
 const press = (channel: string, id = "900") => ({ id, type: InteractionType.MessageComponent, guild_id: GUILD, channel_id: channel, member: { user: { id: "3" }, roles: [] }, data: { custom_id: "apply:open", component_type: 2 } });
 
-test("a press runs the server's INTERACTION_CREATE rules as their owners, and the code's form answers it", async () => {
+test("a press runs as whoever pressed, unless the rule says to run as its owner", async () => {
   const w = world();
   const rule = w.admin.save(GUILD, "1", w.definition);
-  w.admin.save(GUILD, "3", { ...w.definition, name: "見えない" });
-  // "3" cannot see the staff channel, so only the owner's rule fires there.
-  const counts = w.engine.dispatchInteraction(GUILD, press("11"), w.responder);
+  w.engine.dispatchInteraction(GUILD, press("10"), w.responder);
   await w.engine.idle();
-  assert.deepEqual(counts, { fired: 1, limited: 0 });
-  assert.equal(w.seen.length, 1);
-  assert.equal(w.seen[0].actor.userId, "1");
-  assert.equal(w.seen[0].eventName, "INTERACTION_CREATE");
+  // Like a command: the presser's permissions, read scope and judge model.
+  assert.equal(w.seen.at(-1).actor.userId, "3");
+  assert.equal(w.seen.at(-1).eventName, "INTERACTION_CREATE");
   assert.deepEqual(w.responses, [MODAL]);
   assert.equal(w.store.recentRuleRuns(rule.id, 1)[0]!.outcome, "no_change");
+
+  // The presser cannot see the staff channel, so a presser rule does not fire there; an owner rule does.
+  assert.deepEqual(w.engine.dispatchInteraction(GUILD, press("11", "904"), w.responder), { fired: 0, limited: 0 });
+  w.admin.save(GUILD, "1", { ...w.definition, name: "作成者", trigger: { event: "INTERACTION_CREATE", runAs: "owner" } });
+  assert.deepEqual(w.engine.dispatchInteraction(GUILD, press("11", "905"), w.responder), { fired: 1, limited: 0 });
+  await w.engine.idle();
+  assert.equal(w.seen.at(-1).actor.userId, "1");
+  assert.match(triggerProblems({ event: "MESSAGE_CREATE", runAs: "owner" }).join(), /run_as/);
 });
 
 test("a form goes out before the changes, other answers after them, and a failed run tells whoever pressed", async () => {
@@ -106,6 +112,8 @@ test("a form goes out before the changes, other answers after them, and a failed
   w.engine.dispatchInteraction(GUILD, press("10", "903"), w.responder);
   await w.engine.idle();
   assert.deepEqual(w.order, ["steps", "failed"]);
+  // Run as whoever pressed, the reason is theirs to read.
+  assert.match(String(w.responses.at(-1)), /だめ/);
 });
 
 test("nothing fires without a rule, and debounce does not go with presses", () => {
@@ -178,4 +186,24 @@ test("posts and the bot's edits carry components as Discord takes them", () => {
   // Undo puts back what the message had.
   const inverse = edit.inverse!({ channel: "10", message: "7" }, { components: [] }, { content: "x", components }, null);
   assert.deepEqual(inverse?.body, { components });
+});
+
+test("a reaction rule acts as whoever reacted unless it runs as its owner", async () => {
+  const w = world();
+  const reaction = { user_id: "3", channel_id: "10", message_id: "50", guild_id: GUILD, emoji: { name: "👍" } };
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_REACTION_ADD" }, allow: [{ op: "POST /channels/{channel}/messages" }] });
+  w.engine.dispatch("MESSAGE_REACTION_ADD", GUILD, reaction);
+  await w.engine.idle();
+  assert.equal(w.seen.at(-1).actor.userId, "3");
+  // Someone who cannot see the staff channel sets off no reactor rule there.
+  w.engine.dispatch("MESSAGE_REACTION_ADD", GUILD, { ...reaction, channel_id: "11", message_id: "51" });
+  await w.engine.idle();
+  assert.equal(w.seen.length, 1);
+
+  const w2 = world();
+  w2.admin.save(GUILD, "1", { ...w2.definition, trigger: { event: "MESSAGE_REACTION_ADD", runAs: "owner" }, allow: [{ op: "POST /channels/{channel}/messages" }] });
+  w2.engine.dispatch("MESSAGE_REACTION_ADD", GUILD, { ...reaction, channel_id: "11" });
+  await w2.engine.idle();
+  assert.equal(w2.seen.at(-1).actor.userId, "1");
+  assert.deepEqual(triggerProblems({ event: "MESSAGE_REACTION_REMOVE", runAs: "owner" }), []);
 });

@@ -53,6 +53,12 @@ export interface RuleTrigger {
    * makes only runs with the same value there wait for each other.
    */
   serialBy?: string;
+  /**
+   * Whose permissions, read scope and judge model a run on a reaction or an
+   * INTERACTION_CREATE uses: whoever reacted or pressed (the default, as for a
+   * command) or the owner (e.g. a form that posts where the presser cannot).
+   */
+  runAs?: "presser" | "owner";
   /** The slash command that starts a COMMAND rule. */
   command?: CommandSpec;
 }

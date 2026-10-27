@@ -14,7 +14,7 @@ import { jsProgram, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
 import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
 import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
-import { createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
+import { ACTOR_EVENTS, createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
 import { fetchImage, imageRefs } from "../agent/images.ts";
@@ -38,8 +38,9 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // someone uses their slash command, as that person: their read scope, their
 // permissions (within the allow list) and their judge model, and the outcome
 // goes back to them. INTERACTION_CREATE rules run on presses of the bot's
-// messages' buttons and forms sent from them, as their owner, and what the
-// code passes to respond() answers whoever pressed.
+// messages' buttons and forms sent from them, and what the code passes to
+// respond() answers whoever pressed. Those and reaction rules act as whoever
+// pressed or reacted, like a command, unless the rule runs as its owner.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
@@ -261,22 +262,29 @@ export class RuleEngine {
     const origin = TRIGGERS[event]!.synthetic ? null : this.origin(event, guildId, data);
     for (const rule of rules) {
       if (origin && !this.#firesOnBot(rule, origin)) continue;
-      if (!this.#visible(rule, guild, event, data)) continue;
+      const actor = this.#actorFor(rule, event, data);
+      if (actor === null || !this.#visible(rule, guild, event, data, actor ?? rule.ownerId)) continue;
       this.#fire(rule, event, data);
     }
   }
 
   /**
    * A button, select or form on one of the bot's messages. Every enabled
-   * INTERACTION_CREATE rule whose owner can view the channel runs at once (no
-   * batching, since each press waits for its own answer); one over its
-   * per-minute limit is skipped. `responder` answers whoever pressed.
+   * INTERACTION_CREATE rule runs at once (no batching, since each press waits
+   * for its own answer); one over its per-minute limit is skipped. By default
+   * a run acts as whoever pressed, like a command: what everyone in the
+   * channel may read, the allow list within their permissions, their judge
+   * model. A rule set to run as its owner acts as an event rule does.
+   * `responder` answers whoever pressed.
    */
   dispatchInteraction(guildId: string, data: Data, responder: InteractionResponder): { fired: number; limited: number } {
     const counts = { fired: 0, limited: 0 };
     const guild = this.deps.caches.get(guildId)?.guild;
     if (!guild || this.halted(guildId)) return counts;
-    const rules = this.deps.store.enabledRules(guildId, "INTERACTION_CREATE").filter((rule) => this.#visible(rule, guild, "INTERACTION_CREATE", data));
+    const rules = this.deps.store.enabledRules(guildId, "INTERACTION_CREATE").filter((rule) => {
+      const actor = this.#actorFor(rule, "INTERACTION_CREATE", data);
+      return actor !== null && this.#visible(rule, guild, "INTERACTION_CREATE", data, actor ?? rule.ownerId);
+    });
     if (rules.length === 0) return counts;
     this.#answers.set(String(data.id), { responder, at: this.deps.now() });
     for (const rule of rules) {
@@ -285,7 +293,9 @@ export class RuleEngine {
         continue;
       }
       counts.fired++;
-      this.#enqueue(serialKey(rule, data), () => this.#run(rule.id, rule.version, eventIdOf("INTERACTION_CREATE", data), [{ eventName: "INTERACTION_CREATE", event: data }]));
+      const actor = this.#actorFor(rule, "INTERACTION_CREATE", data) ?? undefined;
+      const reader = actor ? this.#actorReader(guildId, "INTERACTION_CREATE", data, actor) : undefined;
+      this.#enqueue(serialKey(rule, data), () => this.#run(rule.id, rule.version, eventIdOf("INTERACTION_CREATE", data), [{ eventName: "INTERACTION_CREATE", event: data }], reader, actor));
     }
     return counts;
   }
@@ -313,6 +323,25 @@ export class RuleEngine {
 
   #lastTick = 0;
 
+  /**
+   * Whom a run on this event acts as: undefined for the owner, null when it
+   * cannot run (the person who did it is not known). Reactions and presses act
+   * as whoever made them, as a command does, unless the rule runs as its owner;
+   * the bot's own reactions act as the owner, as they come from what was approved.
+   */
+  #actorFor(rule: Rule, event: string, data: Data): string | null | undefined {
+    if (rule.trigger.runAs === "owner" || !ACTOR_EVENTS.has(event)) return undefined;
+    const id = TRIGGERS[event]!.actorId?.(data);
+    if (!id) return null;
+    return id === this.deps.selfId() ? undefined : id;
+  }
+
+  /** The reader of a run acting as someone else: for a press, what everyone in the channel may see (the answer may go there); else theirs. */
+  #actorReader(guildId: string, event: string, data: Data, actor: string): Reader {
+    const channelId = String(TRIGGERS[event]!.channel?.(data) ?? "");
+    return this.deps.makeReader({ guildId, channelId, speakerId: actor, audience: event === "INTERACTION_CREATE" ? "channel" : "owner" });
+  }
+
   /** Runs now, or after the rule's debounce. */
   #fire(rule: Rule, event: string, data: Data): void {
     if (rule.trigger.debounceSeconds) {
@@ -331,7 +360,11 @@ export class RuleEngine {
     const wait = this.#allowRun(rule);
     if (wait === 0) {
       const last = batch.at(-1)!;
-      this.#enqueue(serialKey(rule, last.event), () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), batch));
+      // A batch acts as whoever caused its last event; #run drops the events they may not see.
+      const actor = this.#actorFor(rule, last.eventName, last.event);
+      if (actor === null) return;
+      const reader = actor ? this.#actorReader(rule.guildId, last.eventName, last.event, actor) : undefined;
+      this.#enqueue(serialKey(rule, last.event), () => this.#run(rule.id, rule.version, eventIdOf(last.eventName, last.event), batch, reader, actor));
       return;
     }
     const { setTimer = defaultSetTimer } = this.deps;
@@ -502,7 +535,8 @@ export class RuleEngine {
     }
     if (response !== undefined && !isModalResponse(response)) {
       if (outcome === "executed") answerError = await responder!.send(response);
-      else await responder!.failed(rule.name);
+      // Acting as whoever pressed, the reasons are about their own permissions.
+      else await responder!.failed(rule.name, command ? (error ?? undefined)?.slice(0, 500) : undefined);
     }
     if (outcome === "executed") keepState();
     // The changes stand (and so does the state), but an answer Discord turned down is the rule's failure.

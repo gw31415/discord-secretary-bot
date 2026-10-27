@@ -4,8 +4,8 @@ import type { APIInteraction } from "discord-api-types/v10";
 
 // Presses of buttons and selects on the bot's messages, and forms sent from
 // them, that are not the bot's own panels go to INTERACTION_CREATE rules. The
-// rules run like any event rule (as their owner); what the code passes to
-// respond() is the interaction response, sent to whoever pressed as Discord
+// rules run as whoever pressed, like a command (or as their owner when the
+// rule says so); what the code passes to respond() is the interaction response, sent to whoever pressed as Discord
 // takes it. Discord wants an answer within 3 seconds and a form can only be
 // the first one, so a form is sent as soon as the code returns; other answers
 // wait for the run's changes. If nothing has answered in time the press is
@@ -39,8 +39,8 @@ export function isModalResponse(response: unknown): boolean {
 /** Answers one interaction; send() returns why it could not, or null. */
 export interface InteractionResponder {
   send(response: unknown): Promise<string | null>;
-  /** The run that meant to answer failed; whoever pressed is told so. */
-  failed(ruleName: string): Promise<void>;
+  /** The run that meant to answer failed; whoever pressed is told so, and why when it is theirs to know. */
+  failed(ruleName: string, reason?: string): Promise<void>;
 }
 
 const ANSWER_TYPES = new Set<number>([
@@ -124,8 +124,9 @@ export class InteractionAnswer implements InteractionResponder {
     });
   }
 
-  async failed(ruleName: string): Promise<void> {
-    const error = await this.send({ type: InteractionResponseType.ChannelMessageWithSource, data: { content: `ルール「${ruleName}」の実行に失敗しました`, flags: MessageFlags.Ephemeral } });
+  async failed(ruleName: string, reason?: string): Promise<void> {
+    const content = `ルール「${ruleName}」の実行に失敗しました${reason ? `: ${reason}` : ""}`.slice(0, 2000);
+    const error = await this.send({ type: InteractionResponseType.ChannelMessageWithSource, data: { content, flags: MessageFlags.Ephemeral } });
     if (error) this.#log(`ルール「${ruleName}」の失敗を伝えられませんでした: ${error}`);
   }
 

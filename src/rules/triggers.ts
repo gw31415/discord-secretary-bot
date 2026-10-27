@@ -230,6 +230,9 @@ export function voiceMuteKey(userId: string): string {
   return `voicemute:${userId}`;
 }
 
+/** Events a person causes on purpose; their rules act as that person unless the rule runs as its owner (run_as). */
+export const ACTOR_EVENTS: ReadonlySet<string> = new Set(["INTERACTION_CREATE", "MESSAGE_REACTION_ADD", "MESSAGE_REACTION_REMOVE"]);
+
 export function isTrigger(name: string): boolean {
   return Object.hasOwn(TRIGGERS, name);
 }
@@ -271,6 +274,10 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
     if (debounce !== undefined) problems.push("きっかけ COMMAND には debounce_seconds を付けられません");
     problems.push(...commandProblems(trigger.command).map((p) => `きっかけ: ${p}`));
   } else if (trigger.command !== undefined) problems.push("きっかけの command は COMMAND と一緒に使います");
+  if (trigger.runAs !== undefined) {
+    if (!events.some((e) => ACTOR_EVENTS.has(e))) problems.push("きっかけの run_as は INTERACTION_CREATE・MESSAGE_REACTION_ADD・MESSAGE_REACTION_REMOVE と一緒に使います");
+    else if (trigger.runAs !== "presser" && trigger.runAs !== "owner") problems.push("きっかけの run_as は \"presser\" か \"owner\" です");
+  }
   if (events.includes("INTERACTION_CREATE") && debounce !== undefined) problems.push("きっかけ INTERACTION_CREATE には debounce_seconds を付けられません");
   const serial = trigger.serialBy;
   if (serial !== undefined && !(typeof serial === "string" && serial.length <= 64 && /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(serial))) {

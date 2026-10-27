@@ -7,7 +7,7 @@ import type { RuleDryRun } from "../plan/types.ts";
 import { allowLines, allowRisk, valueText } from "./allow.ts";
 import type { Halt } from "./engine.ts";
 import { DEFAULT_TIMEZONE } from "./schedule.ts";
-import { TRIGGERS, triggerEvents } from "./triggers.ts";
+import { ACTOR_EVENTS, TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
 const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
@@ -111,6 +111,7 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 export function triggerLabel(trigger: Rule["trigger"]): string {
   const label = triggerEvents(trigger)
     .map((e) => {
+      if (ACTOR_EVENTS.has(e)) return `${TRIGGERS[e]!.label}(\`${e}\`、${trigger.runAs === "owner" ? "⚠️ 作成者の権限で動きます" : e === "INTERACTION_CREATE" ? "押した人の権限で動きます" : "付けた人・外した人の権限で動きます"})`;
       if (e === "COMMAND" && trigger.command) return `\`/${trigger.command.name}\` が実行されたとき${VISIBILITY_LABEL[trigger.command.visibility ?? "auto"]}`;
       const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
       return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
