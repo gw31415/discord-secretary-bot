@@ -516,3 +516,103 @@ test("a run that starts late drops the events its owner can no longer see", asyn
   await w.engine.idle();
   assert.equal(w.seen.length, 1);
 });
+
+test("later() runs the rule again as TIMER at its time, kept only from runs that went through", async () => {
+  const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  const start = w.now.t;
+  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later(600, { message: "700" }), { ok: true, value: null, logs: [] })));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "720"));
+  await w.engine.idle();
+  assert.equal(w.store.countRuleTimers(rule.id), 1);
+  // Not yet.
+  w.engine.tick([GUILD], start + 300_000);
+  await w.engine.idle();
+  assert.equal(w.seen.length, 1);
+  w.engine.tick([GUILD], start + 660_000);
+  await w.engine.idle();
+  assert.equal(w.seen.length, 2);
+  assert.equal(w.seen[1].eventName, "TIMER");
+  assert.deepEqual(w.seen[1].event.data, { message: "700" });
+  assert.equal(w.seen[1].event.chain, 1);
+  assert.equal(w.seen[1].actor.userId, "1");
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+  // A failed run keeps no request.
+  w.setCode(() => (w.seen.at(-1).later(600, null), { ok: false, error: "boom", logs: [] }));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "721"));
+  await w.engine.idle();
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+  // TIMER is not a trigger to name.
+  const { triggerProblems } = await import("../src/rules/triggers.ts");
+  assert.match(triggerProblems({ event: "TIMER" }).join(), /later/);
+});
+
+test("later() has limits, so a rule cannot keep itself going forever", async () => {
+  const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  // Failures in a row would switch the rule off; each check starts it again.
+  const errors = () => (w.store.setRuleEnabled(rule.id, true, null), w.store.recentRuleRuns(rule.id, 1)[0]!.error ?? "");
+  for (const [seconds, data] of [[30, null], [8 * 24 * 60 * 60, null], [600, "x".repeat(3000)]] as const) {
+    w.setCode(() => (w.seen.at(-1).later(seconds, data), { ok: true, value: null, logs: [] }));
+    w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", `73${seconds}`));
+    await w.engine.idle();
+    assert.match(errors(), /later/);
+  }
+  w.setCode(() => {
+    for (let i = 0; i < 11; i++) w.seen.at(-1).later(600, i);
+    return { ok: true, value: null, logs: [] };
+  });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "740"));
+  await w.engine.idle();
+  assert.match(errors(), /10回/);
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+
+  // Each TIMER run asks again: the chain stops at its tenth run.
+  w.setCode(() => (w.seen.at(-1).later(60, null), { ok: true, value: null, logs: [] }));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "741"));
+  await w.engine.idle();
+  let t = w.now.t;
+  for (let i = 0; i < 15; i++) {
+    t += 61_000;
+    w.now.t = t;
+    w.engine.sweep();
+    w.engine.tick([GUILD], t);
+    await w.engine.idle();
+  }
+  const timers = w.seen.filter((b) => b.eventName === "TIMER");
+  assert.equal(timers.length, 10);
+  assert.equal(timers.at(-1).event.chain, 10);
+  assert.match(errors(), /続けて予約できるのは10回/);
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+
+  // At most 100 waiting per rule.
+  w.store.addRuleTimers(rule.id, GUILD, null, Array.from({ length: 95 }, () => ({ dueAt: t + 3_600_000, data: null, chain: 1 })));
+  w.setCode(() => {
+    for (let i = 0; i < 6; i++) w.seen.at(-1).later(600, i);
+    return { ok: true, value: null, logs: [] };
+  });
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "742"));
+  await w.engine.idle();
+  assert.match(errors(), /100件/);
+  assert.equal(w.store.countRuleTimers(rule.id), 95);
+  // Deleting the rule drops what it waits for.
+  w.admin.remove(GUILD, "1", rule.id);
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+});
+
+test("a TIMER run acts as whoever the run that asked acted as, and a stopped rule's requests are dropped", async () => {
+  const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_REACTION_ADD" } });
+  w.store.addRuleTimers(rule.id, GUILD, "3", [{ dueAt: w.now.t, data: null, chain: 1 }]);
+  w.engine.tick([GUILD], w.now.t + 60_000);
+  await w.engine.idle();
+  assert.equal(w.seen[0].eventName, "TIMER");
+  assert.equal(w.seen[0].actor.userId, "3");
+  assert.equal(w.runs[0].actorId, "3");
+  w.store.addRuleTimers(rule.id, GUILD, null, [{ dueAt: w.now.t, data: null, chain: 1 }]);
+  w.store.setRuleEnabled(rule.id, false, "test");
+  w.engine.tick([GUILD], w.now.t + 120_000);
+  await w.engine.idle();
+  assert.equal(w.seen.length, 1);
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+});
