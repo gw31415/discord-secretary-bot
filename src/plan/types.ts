@@ -108,6 +108,8 @@ export interface PlanRule {
   ownerId?: string;
   /** What the rule's owner approved; every step must fit one entry, checked again with real values. */
   allow: AllowEntry[];
+  /** For a run `later()` scheduled from a command, that command's public reply, which whoever ran it may edit. */
+  ownReply?: { channelId: string; messageId: string };
 }
 
 /**

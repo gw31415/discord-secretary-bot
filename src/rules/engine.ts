@@ -635,6 +635,9 @@ export class RuleEngine {
       this.#settle(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error);
       return { outcome, error, reply, images, steps: 0, ...(result.response !== undefined ? { response: result.response } : {}), ...(timers.length ? { timers } : {}) };
     }
+    // A TIMER from a command may edit that command's reply as whoever ran it, without managing messages.
+    const replied = last.eventName === "TIMER" ? (last.event.message as { channel_id?: string; id?: string } | undefined) : undefined;
+    const ownReply = replied?.channel_id && replied.id ? { channelId: replied.channel_id, messageId: replied.id } : undefined;
     let outcome: RunOutcome;
     let planId: string | null = null;
     let error: string | null = null;
@@ -642,7 +645,7 @@ export class RuleEngine {
       const done = await this.deps.planner.runForRule({
         guildId: rule.guildId,
         actorId: actor,
-        rule: { id: rule.id, version: rule.version, name: rule.name, eventId, ownerId: rule.ownerId, allow: rule.allow },
+        rule: { id: rule.id, version: rule.version, name: rule.name, eventId, ownerId: rule.ownerId, allow: rule.allow, ...(ownReply ? { ownReply } : {}) },
         drafts: result.drafts,
         ...(images.length ? { images: Object.fromEntries(images.map((image, i) => [`img${i + 1}`, { name: image.name, data: image.data.toString("base64") }])) } : {}),
       });

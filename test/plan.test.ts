@@ -65,6 +65,21 @@ test("an op with its ids written into the path names the same operation", () => 
   rejects(() => normalizeSteps([{ op: "PATCH /guilds/555/emojis/700", body: { name: "x_y" } }], GUILD, "p"), /別のサーバー/);
 });
 
+test("whoever ran a command may edit its public reply without managing messages, and only that message", () => {
+  const guild = makeGuild();
+  const [own, other] = normalizeSteps([
+    { op: "PATCH /channels/{channel}/messages/{message}", path: { channel: "10", message: "880" }, body: { components: [] } },
+    { op: "PATCH /channels/{channel}/messages/{message}", path: { channel: "10", message: "881" }, body: { components: [] } },
+  ], GUILD, "p");
+  const ctx = { guild, actorId: "3", selfId: SELF, ownReply: { channelId: "10", messageId: "880" } };
+  assert.deepEqual(permissionProblems(own!, ctx), []);
+  assert.match(permissionProblems(other!, ctx).join(), /依頼者に権限 ManageMessages/);
+  assert.match(permissionProblems(own!, { guild, actorId: "3", selfId: SELF }).join(), /依頼者に権限 ManageMessages/);
+  // The bot still needs the permissions it always does.
+  guild.roles.set(BOT_ROLE, { id: BOT_ROLE, permissions: P.ViewChannel, position: 2 });
+  assert.match(permissionProblems(own!, ctx).join(), /Botに権限/);
+});
+
 test("a field can raise the risk (role permissions are destructive)", () => {
   const steps = normalizeSteps([{ op: "PATCH /guilds/{guild}/roles/{role}", path: { role: MOD_ROLE }, body: { permissions: "0" } }], GUILD, "p");
   assert.equal(planRisk(steps), "destructive");
