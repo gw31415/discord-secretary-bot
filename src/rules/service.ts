@@ -406,9 +406,15 @@ export class RuleService {
     const files = commandFailed(report) ? [] : await toUploadable(report.images.map((i) => ({ name: i.name, data: i.data })));
     // respond({ type: 4, data }) adds Discord's message fields (buttons and the like) to the reply as they are.
     const data = commandFailed(report) ? undefined : ((report.response as { data?: Record<string, unknown> } | undefined)?.data ?? undefined);
-    const { flags: _flags, allowed_mentions: _mentions, ...extra } = data ?? {};
+    const { flags, allowed_mentions: _mentions, ...extra } = data ?? {};
     const body = { content, ...extra, allowed_mentions: { parse: [] }, ...(files.length ? { files } : {}) };
-    if (visibility === "auto" && (report.reply || files.length) && !commandFailed(report) && (await this.#showToAll(member.user.id, spec, event, report))) {
+    // A failure, or a reply the code marks ephemeral (flags 64, e.g. its own error message), is seen
+    // only by whoever ran the command, even when the command's replies are public.
+    const privately = commandFailed(report) || (Number(flags ?? 0) & MessageFlags.Ephemeral) !== 0;
+    if (privately && visibility === "public") {
+      await api.interactions.followUp(interaction.application_id, interaction.token, { ...body, flags: MessageFlags.Ephemeral });
+      await api.interactions.deleteReply(interaction.application_id, interaction.token);
+    } else if (!privately && visibility === "auto" && (report.reply || files.length) && (await this.#showToAll(member.user.id, spec, event, report))) {
       await api.interactions.followUp(interaction.application_id, interaction.token, body);
       await api.interactions.deleteReply(interaction.application_id, interaction.token);
     } else {
