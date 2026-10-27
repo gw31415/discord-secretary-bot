@@ -705,7 +705,39 @@ test("later() takes ISO 8601 durations and date-times, read in the rule's time z
   assert.equal(await due("2026-10-28T09:00Z"), "2026-10-28T09:00:00.000Z");
   assert.match((await due("PT10S")) ?? "", /1分〜7日/);
   assert.match((await due("P8D")) ?? "", /1分〜7日/);
-  assert.match((await due("2026-10-26T09:00+09:00")) ?? "", /7日以内/);
+  assert.match((await due("2026-10-26T09:00+09:00")) ?? "", /今より後/);
   assert.match((await due("2026-13-01")) ?? "", /読めません/);
   assert.match((await due("PXM")) ?? "", /読めません/);
+});
+
+test("later() reads the other ISO 8601 forms: week and ordinal dates, basic format, a time alone, intervals and repeats", async () => {
+  const { isoNext } = await import("../src/rules/schedule.ts");
+  // 19:00 in Tokyo on Tuesday 2026-10-27 (day 300, week 44).
+  const now = Date.parse("2026-10-27T10:00:00Z");
+  const at = (text: string) => {
+    const due = isoNext(text, "Asia/Tokyo", now);
+    return due === null ? null : new Date(due).toISOString();
+  };
+  const nine = "2026-10-28T00:00:00.000Z"; // 09:00 on the 28th in Tokyo
+  assert.equal(at("2026-W44-3T09:00"), nine);
+  assert.equal(at("2026-301T09:00"), nine);
+  assert.equal(at("20261028T0900"), nine);
+  assert.equal(at("20261028T000000Z"), nine);
+  assert.equal(at("21:30"), "2026-10-27T12:30:00.000Z");
+  assert.equal(at("T21:30"), "2026-10-27T12:30:00.000Z");
+  assert.equal(at("09:00"), null); // today's 09:00 has passed
+  // An interval runs at its start, in any of its forms.
+  assert.equal(at("2026-10-28T09:00/PT1H"), nine);
+  assert.equal(at("2026-10-28T09:00/2026-10-28T10:00"), nine);
+  assert.equal(at("2026-10-28T09:00/10:00"), nine);
+  assert.equal(at("PT1H/2026-10-28T10:00"), nine);
+  // A repeat runs at its next start only.
+  assert.equal(at("R/2026-10-01T09:00/P1D"), nine);
+  assert.equal(at("R3/2026-10-26T09:00/P1D"), nine);
+  assert.equal(at("R2/2026-10-26T09:00/P1D"), null); // its two starts have passed
+  assert.equal(at("R/P1D/2026-10-30T09:00"), nine);
+  assert.equal(at("R0/2026-10-28T09:00/P1D"), null);
+  assert.throws(() => at("2026-10-28T09:00/PT0S"), /読めません/);
+  assert.throws(() => at("R/2026-10-28T09:00"), /読めません/);
+  assert.throws(() => at("tomorrow"), /読めません/);
 });

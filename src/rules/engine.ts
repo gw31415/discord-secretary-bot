@@ -13,8 +13,7 @@ import { PlanRejected } from "../plan/validate.ts";
 import { jsProgram, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
 import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
-import { DateTime, Duration } from "luxon";
-import { DEFAULT_TIMEZONE, parseCron, startCron } from "./schedule.ts";
+import { DEFAULT_TIMEZONE, isoNext, parseCron, startCron } from "./schedule.ts";
 import { ACTOR_EVENTS, createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
@@ -880,10 +879,9 @@ function defaultClearTimer(handle: unknown): void {
 }
 
 /**
- * When a later() request is due, run once: `when` seconds from now, an ISO 8601
- * duration from now (PT10M) or date and time (2026-10-28T09:00+09:00), or the
- * next match of a cron expression. Times without an offset and cron are read in
- * the rule's time zone. `asked` is how many the run asked for before.
+ * When a later() request is due, run once: `when` seconds from now, the next
+ * time an ISO 8601 value names (see isoNext), or the next match of a cron
+ * expression. Times without an offset and cron are read in the rule's time zone. `asked` is how many the run asked for before.
  */
 function checkLater(when: number | string, asked: number, timezone: string, now: number): number {
   if (asked >= MAX_LATER_PER_RUN) throw new Error(`later() は1回の実行で${MAX_LATER_PER_RUN}回までです`);
@@ -895,19 +893,12 @@ function checkLater(when: number | string, asked: number, timezone: string, now:
     return now + Math.round(when) * 1000;
   }
   const text = when.trim();
-  const from = DateTime.fromMillis(now, { zone: timezone });
-  if (/^P/i.test(text)) {
-    const duration = Duration.fromISO(text);
-    if (!duration.isValid) throw new Error(`later() の期間「${text}」が読めません(ISO 8601 の PT10M・P1DT2H など)`);
-    const due = from.plus(duration).toMillis();
-    if (due < now + LATER_MIN_SECONDS * 1000 || due > max) throw new Error(`later() の期間「${text}」は1分〜7日にしてください`);
+  // A cron expression has fields apart (or is an @ alias); anything else is ISO 8601.
+  if (!/\s/.test(text) && !text.startsWith("@")) {
+    const due = isoNext(text, timezone, now);
+    if (due === null) throw new Error(`later() の「${text}」は今より後の日時を指していません`);
+    if (due < now + LATER_MIN_SECONDS * 1000 || due > max) throw new Error(`later() の「${text}」は今から1分〜7日の日時にしてください`);
     return due;
-  }
-  if (/^\d{4}-/.test(text)) {
-    const at = DateTime.fromISO(text, { zone: timezone });
-    if (!at.isValid) throw new Error(`later() の日時「${text}」が読めません(ISO 8601 の 2026-10-28T09:00+09:00 など)`);
-    if (at.toMillis() <= now || at.toMillis() > max) throw new Error(`later() の日時「${text}」は今から7日以内の先の日時にしてください`);
-    return at.toMillis();
   }
   const next = parseCron(text, timezone).nextRun(new Date(now))?.getTime();
   if (next === undefined) throw new Error(`later() の cron「${text}」に当てはまる日時がありません`);
