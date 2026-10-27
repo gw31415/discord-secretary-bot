@@ -2,7 +2,7 @@ import { Value } from "typebox/value";
 import { POST_OPS } from "./files.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { basePermissions, channelPermissions } from "../discord/permissions.ts";
-import { CATALOG, MAX_DMS_PER_PLAN, pathParamNames, permissionNames } from "./catalog.ts";
+import { CATALOG, MAX_DMS_PER_PLAN, pathParamNames, permissionNames, resolveOp } from "./catalog.ts";
 import type { Body, OpSpec, Params } from "./catalog.ts";
 import { isRef, maxRisk, REF_PATTERN } from "./types.ts";
 import type { Risk, Step, StepDraft } from "./types.ts";
@@ -56,7 +56,8 @@ export function normalizeSteps(drafts: StepDraft[], guildId: string, planId: str
     const id = draft.id ?? `s${i + 1}`;
     const where = `${id}(${draft.op})`;
     if (ids.has(id)) errors.push(`${where}: ステップIDが重複しています`);
-    const spec = CATALOG.get(draft.op);
+    const resolved = resolveOp(draft.op);
+    const spec = resolved?.spec;
     if (!spec) {
       errors.push(`${where}: 対応していない操作です`);
       ids.add(id);
@@ -65,7 +66,10 @@ export function normalizeSteps(drafts: StepDraft[], guildId: string, planId: str
     if (spec.op === "POST /users/{user}/dm") dms++;
 
     const names = pathParamNames(spec.op);
-    const path: Params = { ...(draft.path ?? {}) };
+    const path: Params = { ...resolved!.path, ...(draft.path ?? {}) };
+    for (const [key, value] of Object.entries(resolved!.path)) {
+      if (draft.path?.[key] !== undefined && draft.path[key] !== value) errors.push(`${where}: パスパラメータ ${key} が op と path で食い違っています`);
+    }
     if (path.guild === undefined && names.includes("guild")) path.guild = guildId;
     for (const key of Object.keys(path)) if (!names.includes(key)) errors.push(`${where}: 不明なパスパラメータ ${key}`);
     for (const name of names) {
