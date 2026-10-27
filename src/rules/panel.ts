@@ -7,7 +7,7 @@ import type { RuleDryRun } from "../plan/types.ts";
 import { allowLines, allowRisk, valueText } from "./allow.ts";
 import type { Halt } from "./engine.ts";
 import { DEFAULT_TIMEZONE } from "./schedule.ts";
-import { TRIGGERS, triggerEvents } from "./triggers.ts";
+import { ACTOR_EVENTS, TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 
 const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
@@ -111,6 +111,7 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
 export function triggerLabel(trigger: Rule["trigger"]): string {
   const label = triggerEvents(trigger)
     .map((e) => {
+      if (ACTOR_EVENTS.has(e)) return `${TRIGGERS[e]!.label}(\`${e}\`、${trigger.runAs === "owner" ? "⚠️ 作成者の権限で動きます" : e === "INTERACTION_CREATE" ? "押した人の権限で動きます" : "付けた人・外した人の権限で動きます"})`;
       if (e === "COMMAND" && trigger.command) return `\`/${trigger.command.name}\` が実行されたとき${VISIBILITY_LABEL[trigger.command.visibility ?? "auto"]}`;
       const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
       return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
@@ -152,6 +153,7 @@ export function dryRunText(dry: RuleDryRun): string {
       if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
   }
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
+  if (dry.response !== undefined) body.push(`応答: ${clip(dry.response, 300)}`);
   if (dry.reply !== undefined || dry.images) body.push(`返事: ${clip(dry.reply ?? "", 300)}${dry.images ? `(画像${dry.images}枚)` : ""}`);
   if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${clip(dry.state, 300)}\``);
   if (dry.logs.length > 0) body.push(`-# log: ${clip(dry.logs.slice(0, 5).join(" / "), 300)}`);

@@ -13,8 +13,8 @@ Botが行える書き込みは、下の表の操作だけです。`PATCH /guilds
 
 | 操作 | 内容 | 危険度 | 要る権限 |
 |---|---|---|---|
-| `POST /channels/{channel}/messages` | 投稿(`content`、`files` に画像ID) | 書き込み | チャンネルを見る・メッセージを送信 |
-| `PATCH /channels/{channel}/messages/{message}` | Botの投稿を編集(`content`) | 書き込み | チャンネルを見る・履歴を読む・メッセージの管理 |
+| `POST /channels/{channel}/messages` | 投稿(`content`、`files` に画像ID、`components` にボタン・セレクトなど、`flags`) | 書き込み | チャンネルを見る・メッセージを送信 |
+| `PATCH /channels/{channel}/messages/{message}` | Botの投稿を編集(`content`・`components`・`flags`) | 書き込み | チャンネルを見る・履歴を読む・メッセージの管理 |
 | `DELETE /channels/{channel}/messages/{message}` | メッセージ削除 | 破壊的 | チャンネルを見る・履歴を読む・メッセージの管理 |
 | `POST /channels/{channel}/messages/bulk-delete` | メッセージ一括削除(2〜100件、2週間以内) | 破壊的 | 同上 |
 | `PUT /channels/{channel}/messages/{message}/reactions/{emoji}/@me` | リアクションを付ける | 書き込み | チャンネルを見る・履歴を読む・リアクションの追加 |

@@ -41,8 +41,9 @@ export function attachmentsFor(steps: Step[], sources: Array<Record<string, Atta
     const field = FILE_FIELDS[step.op];
     if (!field) continue;
     const files = stepFiles(step);
-    const content = (step.body as { content?: unknown } | undefined)?.content;
-    if (POST_OPS.has(step.op) && files.length === 0 && (typeof content !== "string" || content.length === 0)) problems.push(`ステップ ${step.id}: 本文(content)か画像(files)のどちらかが必要です`);
+    const { content, components } = (step.body as { content?: unknown; components?: unknown } | undefined) ?? {};
+    const hasComponents = Array.isArray(components) && components.length > 0;
+    if (POST_OPS.has(step.op) && files.length === 0 && !hasComponents && (typeof content !== "string" || content.length === 0)) problems.push(`ステップ ${step.id}: 本文(content)か画像(files)のどちらかが必要です`);
     for (const id of files) {
       const found = sources.find((s) => s?.[id])?.[id];
       if (found) attachments[id] = found;

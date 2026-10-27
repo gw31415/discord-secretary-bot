@@ -185,6 +185,16 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     channel: (d) => d.channel_id,
     actorId: (d) => d.user?.id,
   },
+  INTERACTION_CREATE: {
+    label: "Botのメッセージのボタン・セレクトが押されたとき、フォームが送信されたとき",
+    intent: 0,
+    // Interactions reach the bot over the Gateway, but the bot's own panels take theirs first.
+    synthetic: true,
+    payload:
+      "Discordのインタラクションのまま(token は除く): id, type(3 ボタン・セレクト, 5 フォーム送信), guild_id, channel_id, member { user, roles, nick, permissions }(押した人), message(ボタンが付いたメッセージ), data { custom_id, component_type, values(セレクト), components(フォームの入力欄。各 component に custom_id と value) }。respond({ type, data }) で押した人に応答します(type 9 でフォーム、4 でメッセージ、7 でボタンのメッセージを書き換え。data は Discord の形のまま。flags: 64 で押した人だけに見せる)",
+    channel: (d) => d.channel_id ?? d.channel?.id,
+    actorId: (d) => d.member?.user?.id ?? d.user?.id,
+  },
   VOICE_STATE_UPDATE: {
     label: "ボイスチャンネルに入った・出た・移ったとき",
     intent: GatewayIntentBits.GuildVoiceStates,
@@ -219,6 +229,9 @@ export function emojiKey(emoji: { id?: string | null; name?: string | null } | u
 export function voiceMuteKey(userId: string): string {
   return `voicemute:${userId}`;
 }
+
+/** Events a person causes on purpose; their rules act as that person unless the rule runs as its owner (run_as). */
+export const ACTOR_EVENTS: ReadonlySet<string> = new Set(["INTERACTION_CREATE", "MESSAGE_REACTION_ADD", "MESSAGE_REACTION_REMOVE"]);
 
 export function isTrigger(name: string): boolean {
   return Object.hasOwn(TRIGGERS, name);
@@ -261,6 +274,11 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
     if (debounce !== undefined) problems.push("きっかけ COMMAND には debounce_seconds を付けられません");
     problems.push(...commandProblems(trigger.command).map((p) => `きっかけ: ${p}`));
   } else if (trigger.command !== undefined) problems.push("きっかけの command は COMMAND と一緒に使います");
+  if (trigger.runAs !== undefined) {
+    if (!events.some((e) => ACTOR_EVENTS.has(e))) problems.push("きっかけの run_as は INTERACTION_CREATE・MESSAGE_REACTION_ADD・MESSAGE_REACTION_REMOVE と一緒に使います");
+    else if (trigger.runAs !== "presser" && trigger.runAs !== "owner") problems.push("きっかけの run_as は \"presser\" か \"owner\" です");
+  }
+  if (events.includes("INTERACTION_CREATE") && debounce !== undefined) problems.push("きっかけ INTERACTION_CREATE には debounce_seconds を付けられません");
   const serial = trigger.serialBy;
   if (serial !== undefined && !(typeof serial === "string" && serial.length <= 64 && /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(serial))) {
     problems.push("きっかけの serial_by は \"rule\" か、イベントの項目のパス(user_id、member.user.id など)にしてください");

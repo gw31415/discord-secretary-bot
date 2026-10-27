@@ -69,3 +69,15 @@ test("rule code reads its state and sets the next one; other code has neither", 
   const agent = await runSandboxed("return [state, typeof setState]", bindings);
   assert.deepEqual(agent.value, [null, "undefined"]);
 });
+
+test("an interaction rule's code answers with respond(); other runs cannot", async () => {
+  const { runRuleCode } = await import("../src/sandbox.ts");
+  const bindings = { guildId: "100", actor: { kind: "user" as const, userId: "1" }, get: async () => null };
+  let answered: unknown;
+  const r = await runRuleCode("respond({ type: 9, data: { custom_id: 'f', title: event.data.custom_id, components: [] } }); return null", { ...bindings, event: { data: { custom_id: "apply" } }, respond: (x) => void (answered = x) });
+  assert.equal(r.ok, true);
+  assert.deepEqual(answered, { type: 9, data: { custom_id: "f", title: "apply", components: [] } });
+  const outside = await runRuleCode("respond({ type: 4 }); return null", bindings);
+  assert.equal(outside.ok, false);
+  assert.match(outside.error!, /INTERACTION_CREATE/);
+});

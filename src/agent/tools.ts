@@ -569,6 +569,7 @@ const RULE_FIELDS = {
   trigger_event: Type.String(),
   more_trigger_events: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_TRIGGER_EVENTS - 1, description: "同じルールを動かすほかのきっかけ" })),
   include_bot_origin: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("other_rules")])),
+  run_as: Type.Optional(Type.Union([Type.Literal("presser"), Type.Literal("owner")], { description: "INTERACTION_CREATE だけ。既定は押した人" })),
   schedule: Type.Optional(Type.String({ maxLength: 100, description: "SCHEDULE の cron(分 時 日 月 曜日)" })),
   timezone: Type.Optional(Type.String({ maxLength: 64 })),
   debounce_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_DEBOUNCE_SECONDS })),
@@ -579,7 +580,7 @@ const RULE_FIELDS = {
       max_consecutive_failures: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.maxConsecutiveFailures })),
     }),
   ),
-  allow: Type.Array(AllowSchema, { maxItems: MAX_ALLOW_ENTRIES, description: "COMMAND で返事だけのときは空でかまいません" }),
+  allow: Type.Array(AllowSchema, { maxItems: MAX_ALLOW_ENTRIES, description: "COMMAND で返事だけ、INTERACTION_CREATE で応答だけのときは空でかまいません" }),
   params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   sample_event: Type.Optional(Type.Unknown()),
   replaces_rule: Type.Optional(Type.String()),
@@ -668,7 +669,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask({ ...r, code_task: task }), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
+          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), ...(r.trigger_event === "INTERACTION_CREATE" || r.trigger_event === "COMMAND" ? { respond: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
           tools,
         });
         return { ...rest, code };
@@ -686,6 +687,7 @@ function toProposal(r: RuleInput): RuleProposal {
       event: r.trigger_event,
       ...(r.more_trigger_events?.length ? { events: r.more_trigger_events.filter((e) => e !== r.trigger_event) } : {}),
       ...(r.include_bot_origin ? { includeBotOrigin: r.include_bot_origin } : {}),
+      ...(r.run_as === "owner" ? { runAs: "owner" as const } : {}),
       ...(r.schedule !== undefined ? { schedule: r.schedule } : {}),
       ...(r.timezone !== undefined ? { timezone: r.timezone } : {}),
       ...(r.debounce_seconds ? { debounceSeconds: r.debounce_seconds } : {}),
@@ -725,7 +727,7 @@ function rulesFromCode(value: unknown): RuleProposal[] {
 
 const RULES_DESCRIPTION = [
   "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
-  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code か wasm, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
+  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, run_as?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code か wasm, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
   "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。true はBotの変更すべてで動き、\"other_rules\" はほかのルールや会話からの変更では動くがこのルール自身の変更では動きません(Botの投稿・リアクションでは動きません)。ほかのルールの結果に合わせて直すルール(例: 並べ替えのあとに一覧を作り直す)は \"other_rules\" にします。",
   "  時刻で動かすときは trigger_event(または more_trigger_events)に SCHEDULE を入れ、schedule に cron(分 時 日 月 曜日。例: 毎朝4時は \"0 4 * * *\"、10分おきは \"*/10 * * * *\")を、必要なら timezone(既定 Asia/Tokyo)を書きます。イベントのきっかけと一緒に使えます(例: チャンネルの作成・変更と毎日4時の作り直し)。BOT_READY はBotの起動・再接続のたびに動くので、止まっていた間の変化を取り込めます。",
   "  debounce_seconds: 短い間にイベントがまとめて来るとき(並べ替えでチャンネルの変更が何件も届くなど)に付けると、最後のイベントからその秒数待って1回だけ動きます。コードはその間のイベントを batch(古い順の [{ eventName, event }]。最大" + MAX_BATCH + "件)で読めます。batch はいつもあり、まとめないときは1件です。",
@@ -733,7 +735,7 @@ const RULES_DESCRIPTION = [
   "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
   "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
-  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。10枚まで), judge・rank(作成者の判定モデル、COMMAND では実行した人の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), runWasm(登録済みのWasmモジュールを1回動かして { exitCode, stdout, logs } を返す。モジュールの指定は wasm と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
+  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), respond(INTERACTION_CREATE では押した人への応答。COMMAND では respond({ type: 4, data: { components } }) の data が返事に加わり、返事にボタンなどを付けられます), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。10枚まで), judge・rank(作成者の判定モデル、COMMAND では実行した人の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), runWasm(登録済みのWasmモジュールを1回動かして { exitCode, stdout, logs } を返す。モジュールの指定は wasm と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
   "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
   "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, channel?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の、channel はステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の実行直前の状態の JSON Schema です。決まったカテゴリの中のチャンネルにだけ投稿させるなら channel: { properties: { parent_id: { const: \"<カテゴリID>\" } }, required: [\"parent_id\"] } のようにします。コードが出したステップはどれか1つに合わないと実行されません。",
   "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
@@ -742,8 +744,9 @@ const RULES_DESCRIPTION = [
   "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
   "  wasm: コードの代わりに、アップロードされたWasmモジュール(Botがソースからコンパイルして登録したものを含む)を動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。Wasmは会話で登録できます(/settings の「Wasm」からも登録できます)。一度動かすだけなら登録せずに run_wasm で動かします。話し手が .wasm を添付して使い道を話したら、何をするモジュールか・どう使いたいか(どのきっかけで動かすか、コマンドにするか、何を変更するか)を相談し、決まったら register_wasm で登録してからルール案を出します。登録しただけで済ませたいと言われたら登録だけします。JavaScript 以外の言語(Rust・Go・C・MoonBit・Zig・Nim など)で書きたいと頼まれたら、compile_wasm でコンパイルし、register_wasm(compiled と name)で登録してからその名前を wasm に入れます。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
   "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 10 } を加えます。",
-  "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。",
+  "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。リアクションのルール(MESSAGE_REACTION_ADD・MESSAGE_REACTION_REMOVE)は、既定では付けた人・外した人として動きます(変更は allow の範囲でその人が持つ権限の分だけ、読み取りもその人の範囲、judge・rank はその人の判定モデル)。その人にない権限が要るとき(例: リアクションでロールを付ける)だけ run_as: \"owner\" を付けて作成者として動かします。",
   "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND だけにし、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに実行した人の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。コマンドは実行した人として動きます。変更は allow の範囲で、さらに実行した人が持つ権限の分だけ実行され、読み取りはそのチャンネルを見られる全員(と実行した人)が読めるものに限られます。permissions(例: [\"ManageChannels\"])を付けると、その権限がない人にはコマンドが出ず実行もできません。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
+  "  ボタン・セレクト・入力フォームを使うとき(「ボタンを押した人にフォームを出して、送信内容を◯◯に投稿」など)は、ステップでメッセージを投稿し(POST /channels/{channel}/messages の body.components に Discord のコンポーネントのまま。例: [{ type: 1, components: [{ type: 2, style: 1, label: \"申請\", custom_id: \"apply:open\" }] }]。Components V2 なら flags: 32768 を付け content は付けません。Botの投稿のボタンを変えるのは PATCH /channels/{channel}/messages/{message} の components)、押されたときの処理を trigger_event INTERACTION_CREATE のルールにします。押されるたびに、既定ではスラッシュコマンドと同じく押した人として動きます(変更は allow の範囲で押した人が持つ権限の分だけ、読み取りはそのチャンネルを見られる全員が読めるもの、judge・rank は押した人の判定モデル)。押した人にない権限が要るとき(例: 申請を押した人が見られない管理チャンネルに投稿する)だけ run_as: \"owner\" を付けると作成者として動きます。event は Discord のインタラクションのまま(押した人は event.member、ボタンは event.data.custom_id、フォームの入力は event.data.components)です。コードは event.data.custom_id で自分のボタンか確かめ(違えば return null)、respond({ type, data }) で押した人に応答します: type 9 はフォーム(data は { custom_id, title, components }。押した人だけに出ます)、4 はメッセージ(data.flags 64 で押した人だけ)、7 はボタンのメッセージの書き換え。フォームはコードが返ってすぐ(3秒以内)に出し、ほかの応答は変更を実行したあとに出ます。フォームの送信(event.type 5)も同じルールに届くので、custom_id で区別します。custom_id は llm・rule・plan・widen・wasm で始めない(Botの画面が使います)、他のルールと重ならない名前にします。応答だけで変更がなければ allow は [] でかまいません。sample_event にはインタラクションの例(type・data・member など)を付けます。",
   "  ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
   "  きっかけにできるイベント:",
   triggerSummary(),
@@ -1040,7 +1043,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
   const rulesDescription = coder
     ? RULES_DESCRIPTION.replace(
         /\n  各要素[^\n]*\n/,
-        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code_task か wasm, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
+        `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, run_as?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code_task か wasm, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
       ).replace(/\n  code: イベントごとに[^\n]*\n    使えるもの:[^\n]*/, "")
     : RULES_DESCRIPTION;
   const sandboxBindings = bindingsOf(reader, decide, wasm);

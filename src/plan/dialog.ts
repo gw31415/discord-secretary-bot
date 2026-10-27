@@ -335,7 +335,8 @@ function codeBody(plan: Plan, room: number): string[] {
 /** The code block language for a compiler language id. */
 function replyLine(r: PlanRuleDraft): string {
   const images = r.dry.images ? `(画像${r.dry.images}枚)` : "";
-  return r.dry.reply || images ? `\n　返事: ${(r.dry.reply ?? "").slice(0, 200)}${images}` : "";
+  const response = r.dry.response ? `\n　応答: ${r.dry.response.slice(0, 200)}` : "";
+  return `${r.dry.reply || images ? `\n　返事: ${(r.dry.reply ?? "").slice(0, 200)}${images}` : ""}${response}`;
 }
 
 function dryLine(r: PlanRuleDraft): string {
