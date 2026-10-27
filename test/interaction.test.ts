@@ -91,6 +91,16 @@ test("a press runs as whoever pressed, unless the rule says to run as its owner"
   assert.match(triggerProblems({ event: "MESSAGE_CREATE", runAs: "owner" }).join(), /run_as/);
 });
 
+test("a command rule can also take the presses on its replies' buttons, as whoever pressed", async () => {
+  const w = world();
+  w.admin.save(GUILD, "1", { ...w.definition, name: "/stamp", trigger: { event: "COMMAND", events: ["INTERACTION_CREATE"], command: { name: "stamp", description: "スタンプ" } } });
+  assert.deepEqual(w.engine.dispatchInteraction(GUILD, press("10"), w.responder), { fired: 1, limited: 0 });
+  await w.engine.idle();
+  assert.equal(w.seen.at(-1).eventName, "INTERACTION_CREATE");
+  assert.equal(w.seen.at(-1).actor.userId, "3");
+  assert.deepEqual(w.responses, [MODAL]);
+});
+
 test("a form goes out before the changes, other answers after them, and a failed run tells whoever pressed", async () => {
   const w = world();
   w.admin.save(GUILD, "1", { ...w.definition, allow: [{ op: "POST /channels/{channel}/messages" }] });
