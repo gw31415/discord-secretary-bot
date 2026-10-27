@@ -57,7 +57,7 @@ export interface RuleEngineDeps {
   log: (message: string, error?: unknown) => void;
   run?: typeof runModule;
   /** Compiled uploaded modules, for rules that run one instead of JS. */
-  wasm?: Pick<WasmRegistry, "compiled">;
+  wasm?: Pick<WasmRegistry, "compiled" | "resolve">;
   /** The judge model of whoever the run acts as, for judge() and rank() in rule code. */
   decide?: (userId: string) => Decide | undefined;
   /**
@@ -569,6 +569,8 @@ export class RuleEngine {
           ...(command ? { reply: (text: string) => void (replied = (replied ? `${replied}\n${text}` : text).slice(0, MAX_REPLY)) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
           ...(decider ? { decide: decider } : {}),
+          // The modules the code names are its author's, as for a rule's own wasm; they run with this run's bindings.
+          ...(this.deps.wasm ? { wasm: (ref: string) => this.deps.wasm!.compiled(this.deps.wasm!.resolve(rule.ownerId, this.deps.caches.get(rule.guildId)?.guild, ref).sha256) } : {}),
           media: {
             math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.svg`),
             convert: async (source: unknown, raw: unknown, name: string) => {

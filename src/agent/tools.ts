@@ -14,7 +14,7 @@ import { ConvertOptionsSchema, convertImage, forModel, MathOptionsSchema, parseO
 import type { ConvertOptions, MathOptions } from "../media.ts";
 import { checkDecideInput, JUDGE_CODE_LINE, MAX_QUESTIONS, MAX_STATE_JSON as MAX_JUDGE_STATE_JSON } from "./decide.ts";
 import type { Decide } from "./decide.ts";
-import { runRuleCode, runSandboxed, SANDBOX_LIMITS } from "../sandbox.ts";
+import { runRuleCode, runSandboxed, SANDBOX_LIMITS, WASM_CODE_LINE } from "../sandbox.ts";
 import type { SandboxBindings } from "../sandbox.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
@@ -114,12 +114,13 @@ function tool<T extends TSchema>(definition: AgentTool<T>): AgentTool<any> {
 }
 
 /** The agent's code runs as the speaker, reading through the same reader as the tools. */
-function bindingsOf(reader: Reader, decide?: Decide): SandboxBindings {
+function bindingsOf(reader: Reader, decide?: Decide, wasm?: WasmTools): SandboxBindings {
   return {
     guildId: reader.guild.id,
     actor: { kind: "user", userId: reader.scope.speakerId },
     get: (route, query) => reader.get(route, query as Record<string, string>),
     ...(decide ? { decide } : {}),
+    ...(wasm ? { wasm: async (ref: string) => (await wasm.load(ref)).module } : {}),
   };
 }
 
@@ -257,7 +258,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     },
   });
 
-  const sandboxBindings = bindingsOf(reader, options.decide);
+  const sandboxBindings = bindingsOf(reader, options.decide, options.rules?.wasm);
   const box = options.attachments;
 
   /** An image the reply may use: one already in the box, or one on a message this channel may show. */
@@ -347,6 +348,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       "読めるのは許可された経路だけで、結果は今のチャンネルで扱える範囲に絞られます。ネットワーク・タイマー・ファイルはありません。",
       ...(CANVAS_LINE ? [CANVAS_LINE] : []),
       ...(options.decide ? [JUDGE_CODE_LINE] : []),
+      ...(options.rules?.wasm ? [WASM_CODE_LINE] : []),
     ].join("\n"),
     parameters: Type.Object({ code: Type.String({ description: "関数本体。最後に return で結果を返す" }) }),
     execute: async (_id, params) => {
@@ -513,7 +515,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   if (wasm) tools.push(runWasmTool);
   if (options.images) tools.push(viewImages);
   if (box) tools.push(renderMathTool, convertImageTool);
-  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide));
+  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide, options.rules?.wasm));
   if (options.decide) tools.push(judgeTool(options.decide));
   if (options.rules) tools.push(...ruleReadTools(options.rules));
   if (options.rules?.wasm) tools.push(...wasmTools(reader, options.rules.wasm, options.fetch ?? fetch));
@@ -721,7 +723,7 @@ const RULES_DESCRIPTION = [
   "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
   "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
   "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
-  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。1回4枚まで), judge・rank(作成者の判定モデル、COMMAND では実行した人の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
+  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。1回4枚まで), judge・rank(作成者の判定モデル、COMMAND では実行した人の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), runWasm(登録済みのWasmモジュールを1回動かして { exitCode, stdout, logs } を返す。モジュールの指定は wasm と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません。",
   "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
   "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, channel?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の、channel はステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の実行直前の状態の JSON Schema です。決まったカテゴリの中のチャンネルにだけ投稿させるなら channel: { properties: { parent_id: { const: \"<カテゴリID>\" } }, required: [\"parent_id\"] } のようにします。コードが出したステップはどれか1つに合わないと実行されません。",
   "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
@@ -998,7 +1000,7 @@ function judgeTool(decideFn: Decide): AgentTool<any> {
   });
 }
 
-function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = [], decide?: Decide): AgentTool<any> {
+function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = [], decide?: Decide, wasm?: WasmTools): AgentTool<any> {
   const codeLine = coder
     ? `code_task: 今すぐ行う変更を作るコードの依頼(steps と同時には使えません)。コード用のモデルが読み取り専用のJavaScriptを書いて実行し、変更の一覧を作ります。何を読んで、どんな条件で、どの対象に何をするかを書きます。${CODER_LIMIT_NOTE}`
     : `code: 今すぐ行う変更を作る読み取り専用のJavaScript(steps と同時には使えません)。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`;
@@ -1008,7 +1010,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
         `\n  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code_task か wasm, params?, sample_event?, replaces_rule? }。\n  code_task: イベントごとに動くコードの依頼。コード用のモデルが、ここに書いた内容ときっかけ・params・allow を見てコードを書きます。イベントのどの値を見て、どんなときに何をするか(何もしないのはどんなときか)を書いてください。${CODER_LIMIT_NOTE}\n`,
       ).replace(/\n  code: イベントごとに[^\n]*\n    使えるもの:[^\n]*/, "")
     : RULES_DESCRIPTION;
-  const sandboxBindings = bindingsOf(reader, decide);
+  const sandboxBindings = bindingsOf(reader, decide, wasm);
   return tool({
     name: "propose_plan",
     label: "変更を提案",

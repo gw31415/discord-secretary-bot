@@ -36,6 +36,8 @@ export interface SandboxBindings {
   reply?: (text: string) => void;
   /** Enables judge()/rank() with the person's judge model (or language model). */
   decide?: Decide;
+  /** Enables runWasm(): a kept module the person may run (their own by name, or one from someone in the server by sha256). */
+  wasm?: (ref: string) => Promise<WebAssembly.Module>;
   /** Enables renderMath()/convertImage(); each returns the new image's id. Options arrive unchecked. */
   media?: {
     math: (tex: string, options: unknown, name: string) => Promise<string>;
@@ -58,6 +60,9 @@ export interface SandboxLimits {
 /** One limit for all code, the agent's and rules'; rules are kept in check by their run limits (per minute, failures in a row). Memory is capped by the runner (64 MiB). */
 export const SANDBOX_LIMITS: SandboxLimits = { wallTimeMs: 30_000, maxGets: 200 };
 
+/** runWasm() as the models are told of it. */
+export const WASM_CODE_LINE = "runWasm(モジュール, { input?, stdin? }) は登録済みのWasmモジュール(自分のものは名前、同じサーバーの人のものは sha256 12文字以上)を1回動かし、{ exitCode, stdout, logs } を返します(同期関数)。標準入力・読める範囲は run_wasm と同じで、discord.get などの回数と時間は呼んだコードと合わせて数えます。";
+
 /** call() and plan() as both kinds of program have them. */
 const CALL_PRELUDE = "function call(op, args) { args = args || {}; return { id: args.id, op: op, path: args.path, query: args.query, body: args.body }; }";
 
@@ -70,6 +75,7 @@ const HOST_SHIM = [
   "function __measure(font, text) { return __call(\"measure\", { font: font, text: text }); }",
   "function __math(tex, options, name) { return __call(\"renderMath\", { tex: tex, options: JSON.parse(options), name: name }); }",
   "function __convert(source, options, name) { return __call(\"convertImage\", { source: JSON.parse(source), options: JSON.parse(options), name: name }); }",
+  "function runWasm(module, options) { options = options || {}; return __call(\"runWasm\", { module: String(module), input: options.input, stdin: options.stdin }); }",
   "function __judge(state, questions) { return JSON.stringify(__call(\"judge\", { state: JSON.parse(state), questions: JSON.parse(questions) })); }",
 ].join("\n");
 
