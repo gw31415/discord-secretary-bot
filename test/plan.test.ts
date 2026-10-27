@@ -991,6 +991,33 @@ test("an emoji or sticker names an image that exists, under Discord's field rule
   );
 });
 
+test("many stickers can be registered at once from a message's images, past the reply's image limit", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const { ImageBox } = await import("../src/agent/attachments.ts");
+  const attachments = Array.from({ length: 12 }, (_, i) => ({ url: `https://cdn.discordapp.com/a/${i}.gif`, content_type: "image/gif", size: 10, filename: `${i}.gif` }));
+  const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => ({ id: "900", attachments, embeds: [] }) } as never;
+  const fetchFn = (async (url: URL) => new Response(`gif-${url.pathname}`, { headers: { "content-type": "image/gif" } })) as unknown as typeof fetch;
+  const box = new ImageBox();
+  const proposed: Array<Array<{ body: { file: string } }>> = [];
+  const tool = readTools(fakeReader, { images: false, attachments: box, fetch: fetchFn, propose: async (drafts) => (proposed.push(drafts as never), ({ id: "p", steps: [], risk: "write" }) as never) })
+    .find((t) => t.name === "propose_plan")!;
+  const steps = attachments.map((_, i) => ({ op: "POST /guilds/{guild}/stickers", body: { name: `s${i}`, file: { message_id: "900", index: i } } }));
+  await tool.execute("t", { steps });
+  // Each attachment becomes an image of the plan, kept as posted (a GIF stays a GIF), and none goes out with the reply.
+  assert.deepEqual(proposed[0]!.map((d) => d.body.file), attachments.map((_, i) => `img${i + 1}`));
+  assert.match(box.get("img12")!.name, /\.gif$/);
+  assert.equal(box.get("img12")!.data.toString(), "gif-/a/11.gif");
+  assert.deepEqual(box.forReply(), []);
+
+  // The dialog shows the first ten images and counts the rest; the plan carries all of them.
+  const { planner, replies } = setup();
+  const plan = await planner.propose({ guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), drafts: proposed[0]! as never, images: box.all() });
+  assert.equal(Object.keys(plan.attachments!).length, 12);
+  const dialog = replies.find((r) => r.kind === "createMessage")!.body;
+  assert.equal(dialog.files.length, 10);
+  assert.ok(JSON.stringify(dialog.components).includes("ほかに画像2枚"));
+});
+
 test("registering needs Create Expressions; changing or deleting needs Manage Expressions", () => {
   const guild = makeGuild();
   const ctx = (actorId: string) => ({ guild, actorId, selfId: SELF });

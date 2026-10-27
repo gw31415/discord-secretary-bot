@@ -38,10 +38,10 @@ Botが行える書き込みは、下の表の操作だけです。ほかの操�
 | `PUT /guilds/{guild}/bans/{user}` | BAN(`delete_message_seconds` 0〜604800) | 破壊的 | メンバーをBAN |
 | `DELETE /guilds/{guild}/bans/{user}` | BAN解除 | 書き込み | メンバーをBAN |
 | `POST /users/{user}/dm` | DM送信(`content`、`files`) | 破壊的 | サーバー管理 |
-| `POST /guilds/{guild}/emojis` | 絵文字の登録(`name`、`image` に画像ID、`roles`) | 書き込み | エクスプレッションを作成 |
+| `POST /guilds/{guild}/emojis` | 絵文字の登録(`name`、`image` に画像、`roles`) | 書き込み | エクスプレッションを作成 |
 | `PATCH /guilds/{guild}/emojis/{emoji}` | 絵文字の変更(`name`、`roles`) | 書き込み | エクスプレッションを管理 |
 | `DELETE /guilds/{guild}/emojis/{emoji}` | 絵文字の削除 | 破壊的 | エクスプレッションを管理 |
-| `POST /guilds/{guild}/stickers` | スタンプの登録(`name`、`tags`、`description`、`file` に画像ID) | 書き込み | エクスプレッションを作成 |
+| `POST /guilds/{guild}/stickers` | スタンプの登録(`name`、`file` に画像、`tags`、`description`) | 書き込み | エクスプレッションを作成 |
 | `PATCH /guilds/{guild}/stickers/{sticker}` | スタンプの変更(`name`、`tags`、`description`) | 書き込み | エクスプレッションを管理 |
 | `DELETE /guilds/{guild}/stickers/{sticker}` | スタンプの削除 | 破壊的 | エクスプレッションを管理 |
 
@@ -60,7 +60,7 @@ Botが行える書き込みは、下の表の操作だけです。ほかの操�
 
 ### 絵文字とスタンプ
 
-絵文字の `image` とスタンプの `file` には、投稿の `files` と同じく、画像のデータではなく用意した画像のID(`img1` など)を入れます。ほかのフィールドは Discord の API のとおりです。削除は画像を残さないので戻せません。
+絵文字の `image` とスタンプの `file` には、用意した画像のID(`img1` など)か、メッセージに添付された画像 `{ message_id, channel_id?, index? }` を入れます。添付はそのまま使います(GIF は動いたまま)。返事に付ける画像の4枚の制限はかからないので、1つの変更でまとめて登録できます。確認ダイアログには最初の10枚を表示します。スタンプの `description` と `tags` は省略でき、省略すると空と名前で送ります。ほかのフィールドは Discord の API のとおりです。削除は画像を残さないので戻せません。
 
 ## 確認の決まり
 

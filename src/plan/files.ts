@@ -1,4 +1,5 @@
 import { toUploadable, uploadName } from "../media.ts";
+import { MAX_DIALOG_IMAGES } from "./types.ts";
 import type { Attachment, Plan, Step } from "./types.ts";
 
 // Images on posts, emojis and stickers. A step's body names images by id
@@ -8,7 +9,9 @@ import type { Attachment, Plan, Step } from "./types.ts";
 
 /** Operations whose body may carry `files`. */
 export const POST_OPS = new Set(["POST /channels/{channel}/messages", "POST /users/{user}/dm"]);
-const MAX_PLAN_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_PLAN_IMAGE_BYTES = 64 * 1024 * 1024;
+/** What one dialog message may upload; the images past it are counted in the text instead. */
+const MAX_DIALOG_IMAGE_BYTES = 8 * 1024 * 1024;
 
 /** The body field of each operation that names images. */
 const FILE_FIELDS: Record<string, string> = {
@@ -56,7 +59,7 @@ export function attachmentsFor(steps: Step[], sources: Array<Record<string, Atta
     }
   }
   const bytes = Object.values(attachments).reduce((n, a) => n + Math.ceil((a.data.length * 3) / 4), 0);
-  if (bytes > MAX_PLAN_IMAGE_BYTES) problems.push("画像が合わせて8MBを超えています");
+  if (bytes > MAX_PLAN_IMAGE_BYTES) problems.push(`画像が合わせて${MAX_PLAN_IMAGE_BYTES / 1024 / 1024}MBを超えています`);
   return { ...(Object.keys(attachments).length > 0 ? { attachments } : {}), problems };
 }
 
@@ -74,8 +77,20 @@ export function dialogFileName(id: string, attachment: Attachment): string {
   return `${id}.${uploadName(attachment.name).split(".").pop()}`;
 }
 
-/** Every image in the plan, for showing them in the dialog. */
+/** The plan's images the dialog shows: the first ones, as many as one message carries. */
+export function dialogImageIds(plan: Pick<Plan, "attachments">): string[] {
+  const ids: string[] = [];
+  let bytes = 0;
+  for (const [id, a] of Object.entries(plan.attachments ?? {})) {
+    bytes += Math.ceil((a.data.length * 3) / 4);
+    if (ids.length >= MAX_DIALOG_IMAGES || bytes > MAX_DIALOG_IMAGE_BYTES) break;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/** The images the dialog shows, uploaded with it. */
 export async function dialogUploads(plan: Pick<Plan, "attachments">): Promise<Array<{ name: string; data: Buffer }>> {
-  const files = await toUploadable(Object.entries(plan.attachments ?? {}).map(([id, a]) => ({ id, name: a.name, data: Buffer.from(a.data, "base64") })));
+  const files = await toUploadable(dialogImageIds(plan).map((id) => ({ id, name: plan.attachments![id]!.name, data: Buffer.from(plan.attachments![id]!.data, "base64") })));
   return files.map(({ id, data }) => ({ name: dialogFileName(id, plan.attachments![id]!), data }));
 }

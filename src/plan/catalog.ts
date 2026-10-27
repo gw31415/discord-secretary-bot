@@ -586,8 +586,9 @@ const ops: OpSpec[] = [
     label: "スタンプの登録",
     risk: "write",
     always: P.CreateGuildExpressions,
-    body: Type.Object({ ...STICKER_FIELDS, name: StickerName, description: StickerDescription, tags: StickerTags, file: FileId }, { additionalProperties: false }),
-    describe: (_p, b) => ({ target: `スタンプ「${b?.name}」`, change: `登録(画像 ${b?.file}、関連する絵文字 ${b?.tags}${b?.description ? `、説明「${short(b.description, 40)}」` : ""})` }),
+    // Discord requires a description and tags; left out, they are sent empty and as the name.
+    body: Type.Object({ ...STICKER_FIELDS, name: StickerName, file: FileId }, { additionalProperties: false }),
+    describe: (_p, b) => ({ target: `スタンプ「${b?.name}」`, change: `登録(画像 ${b?.file}、関連する絵文字 ${b?.tags ?? b?.name}${b?.description ? `、説明「${short(b.description, 40)}」` : ""})` }),
     inverse: (_p, _b, _s, result) => (result?.id ? { op: "DELETE /guilds/{guild}/stickers/{sticker}", path: { sticker: result.id } } : null),
   },
   {

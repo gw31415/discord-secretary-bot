@@ -31,7 +31,9 @@ export interface Attachment {
 }
 
 export const MAX_IMAGES_PER_REPLY = 4;
-export const FILE_ID_PATTERN = "^img[0-9]{1,2}$";
+export const FILE_ID_PATTERN = "^img[0-9]{1,3}$";
+/** Discord shows at most this many images on one message; a dialog shows the first ones. */
+export const MAX_DIALOG_IMAGES = 10;
 
 /** What the agent (or sandboxed code) proposes; ids are filled in when missing. */
 export const StepDraftSchema = Type.Object(
