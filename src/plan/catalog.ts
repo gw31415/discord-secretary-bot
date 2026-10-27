@@ -73,7 +73,8 @@ export interface OpSpec {
   inverse?: (p: Params, body: Body, snapshot: Record<string, unknown> | null, result: Record<string, unknown> | null) => StepDraft | null;
 }
 
-export const PERMISSION_NAMES: Array<[string, bigint]> = Object.entries(P);
+/** One name per bit; where Discord renamed a permission the old name comes first, so the newer one wins. */
+export const PERMISSION_NAMES: Array<[string, bigint]> = [...new Map(Object.entries(P).map(([name, bit]) => [bit, name])).entries()].map(([bit, name]) => [name, bit]);
 
 export function permissionNames(bits: bigint): string[] {
   return PERMISSION_NAMES.filter(([, bit]) => (bits & bit) === bit && bit !== 0n).map(([name]) => name);
@@ -136,6 +137,33 @@ const ROLE_FIELDS = {
 };
 
 const MEMBER_FIELDS = ["nick", "communication_disabled_until", "mute", "deaf"];
+
+/** An image made in the same reply, by id, that becomes the emoji or sticker. */
+const FileId = Type.String({ pattern: FILE_ID_PATTERN, description: "用意した画像のID(\"img1\" など)" });
+const EmojiName = Type.String({ pattern: "^[A-Za-z0-9_]{2,32}$", description: "英数字と _ で2〜32文字" });
+const EMOJI_FIELDS = {
+  name: Type.Optional(EmojiName),
+  roles: Type.Optional(Type.Array(Id, { maxItems: 250, uniqueItems: true, description: "使えるロールを限るとき。空なら全員" })),
+};
+const StickerName = Type.String({ minLength: 2, maxLength: 30 });
+/** The emoji the sticker stands for, which Discord uses to suggest it. */
+const StickerTags = Type.String({ minLength: 1, maxLength: 200, description: "関連する絵文字(Unicodeの絵文字か名前。例: 😀 か grinning)" });
+const StickerDescription = Type.Union([Type.Literal(""), Type.String({ minLength: 2, maxLength: 100 })]);
+const STICKER_FIELDS = {
+  name: Type.Optional(StickerName),
+  description: Type.Optional(Type.Union([StickerDescription, Type.Null()])),
+  tags: Type.Optional(StickerTags),
+};
+
+function roleMentions(b: Body): Array<{ id: unknown; kind: "role" }> {
+  return ((b?.roles as unknown[] | undefined) ?? []).map((id) => ({ id, kind: "role" as const }));
+}
+
+function rolesNote(b: Body, l: (id: unknown) => string): string {
+  const roles = b?.roles as unknown[] | undefined;
+  if (!roles) return "";
+  return roles.length > 0 ? `(使えるロール: ${roles.map(l).join(", ")})` : "(全員が使える)";
+}
 
 /** A Unicode emoji, or name:id for a server's custom one, as the reaction routes take it. */
 export const EMOJI_FORMAT = { pattern: /^(?!\.+$)(?:[^\s:/?#%]{1,32}|[A-Za-z0-9_]{2,32}:\d{1,20})$/u, hint: "絵文字そのもの(例: 👍)か、カスタム絵文字の 名前:ID" };
@@ -514,6 +542,76 @@ const ops: OpSpec[] = [
     mentions: (p) => [{ id: p.user, kind: "user" }],
     describe: (p, _b, _before, l) => ({ target: l(p.user), change: "BANを解除" }),
     inverse: (p) => ({ op: "PUT /guilds/{guild}/bans/{user}", path: { user: p.user }, body: {} }),
+  },
+  {
+    op: "POST /guilds/{guild}/emojis",
+    label: "絵文字の登録",
+    risk: "write",
+    always: P.CreateGuildExpressions,
+    body: Type.Object({ ...EMOJI_FIELDS, name: EmojiName, image: FileId }, { additionalProperties: false }),
+    mentions: (_p, b) => roleMentions(b),
+    describe: (_p, b, _before, l) => ({ target: `:${b?.name}:`, change: `登録(画像 ${b?.image})${rolesNote(b, l)}` }),
+    inverse: (_p, _b, _s, result) => (result?.id ? { op: "DELETE /guilds/{guild}/emojis/{emoji}", path: { emoji: result.id } } : null),
+  },
+  {
+    op: "PATCH /guilds/{guild}/emojis/{emoji}",
+    label: "絵文字の変更",
+    risk: "write",
+    always: P.ManageGuildExpressions,
+    body: Type.Object(EMOJI_FIELDS, { additionalProperties: false, minProperties: 1 }),
+    target: (p) => `emoji:${p.emoji}`,
+    targetFields: (b) => Object.keys(b ?? {}),
+    mentions: (_p, b) => roleMentions(b),
+    describe: (p, b, before, l) => {
+      const { roles: _roles, ...rest } = b ?? {};
+      const change = [Object.keys(rest).length > 0 ? diff(rest, before) : "", rolesNote(b, l)].filter(Boolean).join(" ");
+      return { target: before ? `:${before.name}:` : `絵文字 ${p.emoji}`, change };
+    },
+    inverse: (p, b, snapshot) => {
+      const restore = pick(snapshot, Object.keys(b ?? {}));
+      return restore ? { op: "PATCH /guilds/{guild}/emojis/{emoji}", path: { emoji: p.emoji }, body: restore } : null;
+    },
+  },
+  {
+    // The image is not kept, so a deleted emoji cannot be put back.
+    op: "DELETE /guilds/{guild}/emojis/{emoji}",
+    label: "絵文字の削除",
+    risk: "destructive",
+    always: P.ManageGuildExpressions,
+    target: (p) => `emoji:${p.emoji}`,
+    describe: (p, _b, before) => ({ target: before ? `:${before.name}:` : `絵文字 ${p.emoji}`, change: "削除(戻せません)" }),
+  },
+  {
+    op: "POST /guilds/{guild}/stickers",
+    label: "スタンプの登録",
+    risk: "write",
+    always: P.CreateGuildExpressions,
+    body: Type.Object({ ...STICKER_FIELDS, name: StickerName, description: StickerDescription, tags: StickerTags, file: FileId }, { additionalProperties: false }),
+    describe: (_p, b) => ({ target: `スタンプ「${b?.name}」`, change: `登録(画像 ${b?.file}、関連する絵文字 ${b?.tags}${b?.description ? `、説明「${short(b.description, 40)}」` : ""})` }),
+    inverse: (_p, _b, _s, result) => (result?.id ? { op: "DELETE /guilds/{guild}/stickers/{sticker}", path: { sticker: result.id } } : null),
+  },
+  {
+    op: "PATCH /guilds/{guild}/stickers/{sticker}",
+    label: "スタンプの変更",
+    risk: "write",
+    always: P.ManageGuildExpressions,
+    body: Type.Object(STICKER_FIELDS, { additionalProperties: false, minProperties: 1 }),
+    target: (p) => `sticker:${p.sticker}`,
+    targetFields: (b) => Object.keys(b ?? {}),
+    describe: (p, b, before) => ({ target: before ? `スタンプ「${before.name}」` : `スタンプ ${p.sticker}`, change: diff(b, before) }),
+    inverse: (p, b, snapshot) => {
+      const restore = pick(snapshot, Object.keys(b ?? {}));
+      return restore ? { op: "PATCH /guilds/{guild}/stickers/{sticker}", path: { sticker: p.sticker }, body: restore } : null;
+    },
+  },
+  {
+    // The image is not kept, so a deleted sticker cannot be put back.
+    op: "DELETE /guilds/{guild}/stickers/{sticker}",
+    label: "スタンプの削除",
+    risk: "destructive",
+    always: P.ManageGuildExpressions,
+    target: (p) => `sticker:${p.sticker}`,
+    describe: (p, _b, before) => ({ target: before ? `スタンプ「${before.name}」` : `スタンプ ${p.sticker}`, change: "削除(戻せません)" }),
   },
   {
     // Not a Discord route: the executor opens the DM channel and posts to it.

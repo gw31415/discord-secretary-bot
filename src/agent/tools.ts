@@ -1028,6 +1028,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
         : []),
       "使える操作(これ以外と、仕様にないフィールドは拒否されます):",
       catalogSummary(),
+      "絵文字の image・スタンプの file には、画像のデータではなく用意した画像のID(\"img1\" など)を入れます。",
     ].join("\n"),
     parameters: Type.Object({
       steps: Type.Optional(Type.Array(StepDraftSchema, { maxItems: 100 })),

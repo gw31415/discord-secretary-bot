@@ -9,8 +9,8 @@ import type { Step } from "./types.ts";
 // changes. Besides the ones below there are only whole-list replacements the
 // bot does not expose to plans (application commands, onboarding, welcome
 // screen); kicks, unbans, member moves, channel and role creation and
-// deletion, messages, DMs, reactions, pins, threads and invites are one per
-// request.
+// deletion, messages, DMs, reactions, pins, threads, invites, emojis and
+// stickers are one per request.
 
 const DISCORD_EPOCH = 1420070400000n;
 /** Bulk delete refuses messages older than two weeks; an hour of margin for the clock and the send. */
