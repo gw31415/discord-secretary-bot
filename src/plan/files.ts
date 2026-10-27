@@ -1,18 +1,41 @@
 import { toUploadable, uploadName } from "../media.ts";
 import type { Attachment, Plan, Step } from "./types.ts";
 
-// Images on posts. A post's body names images by id (`files: ["img1"]`); the
-// plan carries the images themselves, so the dialog shows exactly what will be
-// posted and the executor uploads the same bytes.
+// Images on posts, emojis and stickers. A step's body names images by id
+// (`files: ["img1"]`, `image: "img1"`); the plan carries the images themselves,
+// so the dialog shows exactly what will be posted and the executor uploads the
+// same bytes.
 
 /** Operations whose body may carry `files`. */
 export const POST_OPS = new Set(["POST /channels/{channel}/messages", "POST /users/{user}/dm"]);
 const MAX_PLAN_IMAGE_BYTES = 8 * 1024 * 1024;
 
+interface FileField {
+  field: string;
+  /** What Discord takes, checked at proposal so the dialog never shows an image that would be refused. */
+  maxBytes?: number;
+  formats?: string[];
+  what?: string;
+}
+
+/** The body field of each operation that names images. */
+const FILE_FIELDS: Record<string, FileField> = {
+  "POST /channels/{channel}/messages": { field: "files" },
+  "POST /users/{user}/dm": { field: "files" },
+  "POST /guilds/{guild}/emojis": { field: "image", maxBytes: 256 * 1024, formats: ["png", "jpg", "jpeg", "gif", "webp"], what: "絵文字" },
+  "POST /guilds/{guild}/stickers": { field: "file", maxBytes: 512 * 1024, formats: ["png", "gif"], what: "スタンプ" },
+};
+
 export function stepFiles(step: Pick<Step, "op" | "body">): string[] {
-  if (!POST_OPS.has(step.op)) return [];
-  const files = (step.body as { files?: unknown } | undefined)?.files;
+  const spec = FILE_FIELDS[step.op];
+  if (!spec) return [];
+  const files = (step.body as Record<string, unknown> | undefined)?.[spec.field];
+  if (typeof files === "string") return [files];
   return Array.isArray(files) ? files.filter((f): f is string => typeof f === "string") : [];
+}
+
+function formatOf(name: string): string {
+  return uploadName(name).split(".").pop()!.toLowerCase();
 }
 
 /**
@@ -24,14 +47,25 @@ export function attachmentsFor(steps: Step[], sources: Array<Record<string, Atta
   const problems: string[] = [];
   const attachments: Record<string, Attachment> = {};
   for (const step of steps) {
-    if (!POST_OPS.has(step.op)) continue;
+    const spec = FILE_FIELDS[step.op];
+    if (!spec) continue;
     const files = stepFiles(step);
     const content = (step.body as { content?: unknown } | undefined)?.content;
-    if (files.length === 0 && (typeof content !== "string" || content.length === 0)) problems.push(`ステップ ${step.id}: 本文(content)か画像(files)のどちらかが必要です`);
+    if (POST_OPS.has(step.op) && files.length === 0 && (typeof content !== "string" || content.length === 0)) problems.push(`ステップ ${step.id}: 本文(content)か画像(files)のどちらかが必要です`);
     for (const id of files) {
       const found = sources.find((s) => s?.[id])?.[id];
-      if (found) attachments[id] = found;
-      else problems.push(`ステップ ${step.id}: 画像 ${id} がありません。attach_image で作ってから、そのIDを files に入れてください`);
+      if (!found) {
+        problems.push(`ステップ ${step.id}: 画像 ${id} がありません。画像を用意してから、そのIDを ${spec.field} に入れてください`);
+        continue;
+      }
+      attachments[id] = found;
+      if (spec.formats && !spec.formats.includes(formatOf(found.name))) {
+        problems.push(`ステップ ${step.id}: ${spec.what}の画像は ${spec.formats.filter((f) => f !== "jpg").map((f) => f.toUpperCase()).join("・")} にしてください(${id} は ${formatOf(found.name).toUpperCase()}。convert_image で format を変えられます)`);
+      }
+      const bytes = Math.ceil((found.data.length * 3) / 4);
+      if (spec.maxBytes && bytes > spec.maxBytes) {
+        problems.push(`ステップ ${step.id}: ${spec.what}の画像は${spec.maxBytes / 1024}KBまでです(${id} は約${Math.ceil(bytes / 1024)}KB。convert_image で小さくできます)`);
+      }
     }
   }
   const names = new Map<string, string>();
@@ -48,7 +82,7 @@ export function attachmentsFor(steps: Step[], sources: Array<Record<string, Atta
   return { ...(Object.keys(attachments).length > 0 ? { attachments } : {}), problems };
 }
 
-/** The files to upload with a post, in the order its body names them, converted for Discord. */
+/** The files to upload with a step, in the order its body names them, converted for Discord. */
 export function uploadsFor(plan: Pick<Plan, "attachments">, step: Pick<Step, "op" | "body">): Promise<Array<{ name: string; data: Buffer }>> {
   return toUploadable(stepFiles(step).map((id) => {
     const a = plan.attachments?.[id];

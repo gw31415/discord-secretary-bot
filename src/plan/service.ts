@@ -17,6 +17,7 @@ import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomI
 import type { DialogState, DialogView } from "./dialog.ts";
 import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
 import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
+import { mimeOf } from "../agent/attachments.ts";
 import { isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
 import type { Reader } from "../discord/reader.ts";
@@ -156,7 +157,7 @@ function displayValues(kind: string, resource: Resource, fields: string[]): Reco
     values.content = resource.content;
     values.author = { username: (resource.author as { username?: string } | undefined)?.username };
   }
-  if (kind === "channel" || kind === "role") values.name = resource.name;
+  if (kind === "channel" || kind === "role" || kind === "emoji" || kind === "sticker") values.name = resource.name;
   return values;
 }
 
@@ -243,6 +244,10 @@ export class Planner {
       }
       case "ban":
         return this.#get(`/guilds/${a}/bans/${b}`);
+      case "emoji":
+        return this.#get(`/guilds/${guildId}/emojis/${a}`);
+      case "sticker":
+        return this.#get(`/guilds/${guildId}/stickers/${a}`);
       default:
         throw new Error(`不明なリソース ${key}`);
     }
@@ -893,6 +898,16 @@ export class Planner {
     }
     const reason = this.#reason(plan);
     const { method, path } = routeOf(step.op, step.pathParams);
+    if (spec.op === "POST /guilds/{guild}/emojis") {
+      // Discord takes the emoji's image as a data URI in the JSON body.
+      const image = uploads[0]!;
+      return this.#rest.post(path, { reason, body: { ...body, image: `data:${mimeOf(image.name) ?? "image/png"};base64,${image.data.toString("base64")}` } });
+    }
+    if (spec.op === "POST /guilds/{guild}/stickers") {
+      // A sticker is a form whose fields sit beside the file, not a JSON payload.
+      const { file: _file, ...fields } = body ?? {};
+      return this.#rest.post(path, { reason, appendToFormData: true, body: { ...fields, description: fields.description ?? "" }, files: [{ ...uploads[0]!, key: "file" }] });
+    }
     let payload: unknown = body;
     if (spec.op === "POST /channels/{channel}/messages") {
       // Pings only the users the approved text names; the nonce stops a retry from posting twice.

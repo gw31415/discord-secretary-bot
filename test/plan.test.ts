@@ -118,6 +118,8 @@ function fakeDiscord() {
     [SELF]: { roles: [BOT_ROLE], nick: null, user: { id: SELF, username: "bot", bot: true } },
   };
   const messages: Record<string, any> = { "500": { id: "500", content: "spam spam", author: { username: "alice" } } };
+  const emojis: Record<string, any> = { "700": { id: "700", name: "old_cat", roles: [] } };
+  const stickers: Record<string, any> = { "800": { id: "800", name: "ねこ", description: null, tags: "cat" } };
   const failures = new Set<string>();
   let next = 50;
 
@@ -130,6 +132,8 @@ function fakeDiscord() {
     if ((m = /^\/guilds\/\d+\/members\/(\d+)$/.exec(path))) return members[m[1]!] ?? Promise.reject(notFound(path));
     if ((m = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(path))) return messages[m[2]!] ?? Promise.reject(notFound(path));
     if ((m = /^\/channels\/(\d+)$/.exec(path))) return channels[m[1]!] ?? Promise.reject(notFound(path));
+    if ((m = /^\/guilds\/\d+\/emojis\/(\d+)$/.exec(path))) return emojis[m[1]!] ?? Promise.reject(notFound(path));
+    if ((m = /^\/guilds\/\d+\/stickers\/(\d+)$/.exec(path))) return stickers[m[1]!] ?? Promise.reject(notFound(path));
     throw notFound(path);
   };
   const write = (method: string) => async (path: string, options?: Call["options"]) => {
@@ -941,6 +945,72 @@ test("a rule's post carries the images its code made, and only those", async () 
   assert.equal((calls.at(-1)!.options as { files?: unknown[] }).files!.length, 1);
   // The allow list still decides: a body without files in it refuses them.
   await assert.rejects(planner.runForRule({ guildId: GUILD, actorId: "1", rule: RULE, drafts, images: { img1: PNG } }), /範囲外/);
+});
+
+test("emojis and stickers are registered from an image made in the reply, edited and deleted", async () => {
+  const { planner, store, calls, replies } = setup();
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]) };
+  const emoji = await planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/emojis", body: { name: "party_cat", image: "img1" } }], images: { img1: PNG } });
+  assert.match(dialogText(replies.find((r) => r.kind === "createMessage")!.body), /絵文字の登録.*:party_cat:/);
+  await planner.handleInteraction(click(emoji, "run", "1"));
+  await settle(() => store.getPlan(emoji.id)!.status === "succeeded");
+  // The image goes inside the JSON body as a data URI, not as an upload.
+  const sent = calls.at(-1)!.options as { body: Record<string, unknown>; files?: unknown };
+  assert.equal(calls.at(-1)!.path, `/guilds/${GUILD}/emojis`);
+  assert.equal(sent.body.image, `data:image/png;base64,${PNG.data}`);
+  assert.equal(sent.files, undefined);
+
+  const sticker = await planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/stickers", body: { name: "ねこ2", tags: "😺", file: "img1" } }], images: { img1: PNG } });
+  await planner.handleInteraction(click(sticker, "run", "1"));
+  await settle(() => store.getPlan(sticker.id)!.status === "succeeded");
+  // A sticker is a form: its fields go beside the file, and the description is always sent.
+  const form = calls.at(-1)!.options as { body: Record<string, unknown>; files: Array<{ key: string; name: string }>; appendToFormData?: boolean };
+  assert.equal(form.appendToFormData, true);
+  assert.deepEqual(form.body, { name: "ねこ2", tags: "😺", description: "" });
+  assert.deepEqual(form.files.map((f) => [f.key, f.name]), [["file", "formula.png"]]);
+
+  // Editing shows the name it has now, and can be undone; deleting is destructive.
+  const edit = await planner.propose({ ...base, drafts: [{ op: "PATCH /guilds/{guild}/emojis/{emoji}", path: { emoji: "700" }, body: { name: "new_cat" } }] });
+  assert.match(dialogText(replies.filter((r) => r.kind === "createMessage").at(-1)!.body), /:old_cat:.*name: "old_cat" → "new_cat"/);
+  assert.equal(edit.risk, "write");
+  const del = await planner.propose({ ...base, drafts: [{ op: "DELETE /guilds/{guild}/stickers/{sticker}", path: { sticker: "800" } }] });
+  assert.equal(del.risk, "destructive");
+  assert.match(dialogText(replies.filter((r) => r.kind === "createMessage").at(-1)!.body), /スタンプ「ねこ」.*削除/);
+});
+
+test("emoji and sticker images must be in a format and size Discord takes", async () => {
+  const { planner } = setup();
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]) };
+  const jpeg = { name: "photo.jpeg", data: PNG.data };
+  await assert.rejects(
+    planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/stickers", body: { name: "写真", tags: "📷", file: "img1" } }], images: { img1: jpeg } }),
+    (e: unknown) => e instanceof PlanRejected && /スタンプの画像は PNG・GIF/.test(e.message),
+  );
+  const big = { name: "big.png", data: Buffer.alloc(300 * 1024).toString("base64") };
+  await assert.rejects(
+    planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/emojis", body: { name: "big", image: "img1" } }], images: { img1: big } }),
+    (e: unknown) => e instanceof PlanRejected && /絵文字の画像は256KBまで/.test(e.message),
+  );
+  await assert.rejects(
+    planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/emojis", body: { name: "x", image: "img1" } }], images: { img1: PNG } }),
+    (e: unknown) => e instanceof PlanRejected && /本文が仕様に合いません/.test(e.message),
+  );
+  await assert.rejects(
+    planner.propose({ ...base, drafts: [{ op: "POST /guilds/{guild}/emojis", body: { name: "nope", image: "img2" } }], images: { img1: PNG } }),
+    (e: unknown) => e instanceof PlanRejected && /画像 img2 がありません。.*image に/.test(e.message),
+  );
+});
+
+test("registering needs Create Expressions; changing or deleting needs Manage Expressions", () => {
+  const guild = makeGuild();
+  const ctx = (actorId: string) => ({ guild, actorId, selfId: SELF });
+  const [create] = normalizeSteps([{ op: "POST /guilds/{guild}/emojis", body: { name: "cat", image: "img1" } }], GUILD, "p");
+  const [remove] = normalizeSteps([{ op: "DELETE /guilds/{guild}/emojis/{emoji}", path: { emoji: "700" } }], GUILD, "p");
+  assert.match(permissionProblems(create!, ctx("3")).join(), /依頼者に権限 CreateGuildExpressions/);
+  guild.roles.set(MOD_ROLE, { id: MOD_ROLE, permissions: P.CreateGuildExpressions, position: 1 });
+  assert.deepEqual(permissionProblems(create!, ctx("2")), []);
+  assert.match(permissionProblems(remove!, ctx("2")).join(), /依頼者に権限 ManageGuildExpressions/);
+  assert.deepEqual(permissionProblems(remove!, ctx("1")), []);
 });
 
 const TEX_RULE = {
