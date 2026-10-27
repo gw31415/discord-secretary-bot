@@ -404,7 +404,10 @@ export class RuleService {
     }
     const content = commandReplyText(rule.name, report);
     const files = commandFailed(report) ? [] : await toUploadable(report.images.map((i) => ({ name: i.name, data: i.data })));
-    const body = { content, allowed_mentions: { parse: [] }, ...(files.length ? { files } : {}) };
+    // respond({ type: 4, data }) adds Discord's message fields (buttons and the like) to the reply as they are.
+    const data = commandFailed(report) ? undefined : ((report.response as { data?: Record<string, unknown> } | undefined)?.data ?? undefined);
+    const { flags: _flags, allowed_mentions: _mentions, ...extra } = data ?? {};
+    const body = { content, ...extra, allowed_mentions: { parse: [] }, ...(files.length ? { files } : {}) };
     if (visibility === "auto" && (report.reply || files.length) && !commandFailed(report) && (await this.#showToAll(member.user.id, spec, event, report))) {
       await api.interactions.followUp(interaction.application_id, interaction.token, body);
       await api.interactions.deleteReply(interaction.application_id, interaction.token);

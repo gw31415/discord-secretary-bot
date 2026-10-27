@@ -62,7 +62,7 @@ return plan([
 |---|---|
 | `setState(value)` | 次の実行の `state` を決める。JSON の写しを取るので、あとでオブジェクトを変えても残らない。実行が通ったときだけ保存する |
 | `reply(text)` | コマンドの返事を足す。呼ぶたびに改行でつなぐ。`COMMAND` のルールだけ |
-| `respond(response)` | 押した人への応答。Discord のインタラクション応答 `{ type, data }` のまま。最後に呼んだものを使う。`INTERACTION_CREATE` のルールだけ([ボタンとフォーム](rules.md#ボタンとフォーム)) |
+| `respond(response)` | 押した人への応答。Discord のインタラクション応答 `{ type, data }` のまま。最後に呼んだものを使う。`INTERACTION_CREATE` のルール([ボタンとフォーム](rules.md#ボタンとフォーム))と、`COMMAND` のルール(`data` の `components` などが返事に加わる) |
 
 ルールのコードが `plan([...])`・`null`・`undefined` のほかを返すと、実行は失敗します。
 

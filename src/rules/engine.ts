@@ -98,6 +98,8 @@ export interface CommandReport {
   reply: string | null;
   /** Images the code made for the reply. */
   images: CommandImage[];
+  /** What the code passed to respond(): its `data` joins the reply (components such as buttons). */
+  response?: unknown;
   steps: number;
 }
 
@@ -513,7 +515,7 @@ export class RuleEngine {
       store.finishRuleRun(runId, { outcome, error, logs: result.logs });
       // A command run that failed only because whoever ran it has no judge model is not the rule's fault.
       this.#settle(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error);
-      return { outcome, error, reply, images, steps: 0 };
+      return { outcome, error, reply, images, steps: 0, ...(result.response !== undefined ? { response: result.response } : {}) };
     }
     let outcome: RunOutcome;
     let planId: string | null = null;
@@ -548,7 +550,7 @@ export class RuleEngine {
     store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     // A command turned down for what its runner may not do says nothing about the rule, and must not let anyone switch it off.
     this.#settle(rule, outcome === "failed" || (outcome === "rejected" && !command), error);
-    return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length };
+    return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length, ...(result.response !== undefined ? { response: result.response } : {}) };
   }
 
   /**
@@ -646,7 +648,8 @@ export class RuleEngine {
           params: rule.params ?? null,
           get: (route, query) => source.get(route, query as Record<string, string>),
           ...(command ? { reply: (text: string) => void (replied = (replied ? `${replied}\n${text}` : text).slice(0, MAX_REPLY)) } : {}),
-          ...(eventName === "INTERACTION_CREATE" ? { respond: (r: unknown) => void (response = r) } : {}),
+          // A command is an interaction too: its respond() adds to the reply.
+          ...(eventName === "INTERACTION_CREATE" || command ? { respond: (r: unknown) => void (response = r) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
           ...(decider ? { decide: decider } : {}),
           // The modules the code names are its author's, as for a rule's own wasm; they run with this run's bindings.

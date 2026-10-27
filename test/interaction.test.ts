@@ -207,3 +207,12 @@ test("a reaction rule acts as whoever reacted unless it runs as its owner", asyn
   assert.equal(w2.seen.at(-1).actor.userId, "1");
   assert.deepEqual(triggerProblems({ event: "MESSAGE_REACTION_REMOVE", runAs: "owner" }), []);
 });
+
+test("a command's respond() comes back with its report, so the reply can carry buttons", async () => {
+  const w = world();
+  const button = { type: 4, data: { components: [{ type: 1, components: [{ type: 2, style: 2, label: "登録", custom_id: "stamp:register" }] }] } };
+  w.set({ respond: button });
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { name: "stamp", description: "x" } } });
+  const report = await w.engine.runCommand(rule, { guild_id: GUILD, channel_id: "10", command: "stamp", user: { id: "3" }, options: {} }, "3");
+  assert.deepEqual(report.response, button);
+});
