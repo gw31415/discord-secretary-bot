@@ -229,6 +229,28 @@ test("a fixed visibility is used as is, without asking the judge", async () => {
   assert.equal(asked.length, 0);
 });
 
+test("a public command's failures and the replies its code marks ephemeral go only to whoever ran it", async () => {
+  const w = world();
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { ...SPEC, visibility: "public" } } });
+  w.setCode((b) => (b.reply("文字が多すぎます"), b.respond!({ type: 4, data: { flags: 64 } }), { ok: true, value: null, logs: [] }));
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "followUp", "delete"]);
+  assert.equal((w.calls[0]![1] as { flags?: number }).flags, undefined);
+  assert.equal((w.calls[1]![1] as { flags?: number }).flags, 64);
+  assert.match((w.calls[1]![1] as { content: string }).content, /文字が多すぎます/);
+
+  w.calls.length = 0;
+  w.setCode((b) => (b.reply("途中まで"), { ok: false, error: "boom", logs: [] }));
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "followUp", "delete"]);
+  assert.equal((w.calls[1]![1] as { flags?: number }).flags, 64);
+
+  w.calls.length = 0;
+  w.setCode((b) => (b.reply("できました"), { ok: true, value: null, logs: [] }));
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.deepEqual(w.calls.map((c) => c[0]), ["defer", "edit"]);
+});
+
 test("a command's code can make images for its reply and its posts", async () => {
   const w = world();
   w.setCode(async (b) => {
