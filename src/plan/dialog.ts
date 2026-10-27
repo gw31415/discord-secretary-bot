@@ -3,6 +3,7 @@ import type {
   APIActionRowComponent,
   APIButtonComponent,
   APIMediaGalleryComponent,
+  APITextDisplayComponent,
   APIMessageTopLevelComponent,
   APIModalInteractionResponseCallbackData,
   APIStringSelectComponent,
@@ -12,7 +13,7 @@ import { allowLines, allowRisk } from "../rules/allow.ts";
 import { fenceLanguage, limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
 import { VISIBILITY_CHOICES } from "../rules/command.ts";
 import type { Body } from "./catalog.ts";
-import { dialogFileName } from "./files.ts";
+import { dialogFileName, dialogImageIds } from "./files.ts";
 import { RISK_LABEL } from "./types.ts";
 import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
@@ -423,10 +424,14 @@ function detailsBody(plan: Plan): string[] {
 }
 
 /** The images the plan posts, uploaded with the dialog so the approver sees them. */
-function gallery(plan: Plan): APIMediaGalleryComponent[] {
-  const ids = Object.keys(plan.attachments ?? {});
+function gallery(plan: Plan): Array<APIMediaGalleryComponent | APITextDisplayComponent> {
+  const ids = dialogImageIds(plan);
   if (ids.length === 0) return [];
-  return [{ type: ComponentType.MediaGallery, items: ids.map((id) => ({ media: { url: `attachment://${dialogFileName(id, plan.attachments![id]!)}` }, description: plan.attachments![id]!.name })) }];
+  const rest = Object.keys(plan.attachments ?? {}).length - ids.length;
+  return [
+    { type: ComponentType.MediaGallery, items: ids.map((id) => ({ media: { url: `attachment://${dialogFileName(id, plan.attachments![id]!)}` }, description: plan.attachments![id]!.name })) },
+    ...(rest > 0 ? [{ type: ComponentType.TextDisplay as const, content: `-# ほかに画像${rest}枚(ここには最初の${ids.length}枚を表示しています)` }] : []),
+  ];
 }
 
 export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {

@@ -268,6 +268,10 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       if (!file) throw new Error(`画像 ${source} はありません。この返答で用意した画像のIDを指定してください`);
       return file.data;
     }
+    return (await attachedImage(source)).data;
+  };
+  /** An image attached to a message this channel may show, as it was posted. */
+  const attachedImage = async (source: unknown): Promise<{ data: Buffer; mimeType: string }> => {
     if (!Value.Check(ImageSourceSchema, source) || typeof source !== "object") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
     const { message_id, channel_id, index } = source as { message_id: string; channel_id?: string; index?: number };
     // Goes through the reader, so only messages that may be shown here are opened.
@@ -276,7 +280,12 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     if (!ref) throw new Error(`メッセージ ${message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
     const image = await fetchImage(ref, options.fetch);
     if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
-    return image.data;
+    return image;
+  };
+  /** Puts a message's image into the box unchanged (an animated GIF stays animated) and returns its id. */
+  const keepAttached = async (source: unknown): Promise<string> => {
+    const { data, mimeType } = await attachedImage(source);
+    return box!.addForPlan({ data, name: `image.${mimeType.split("/")[1] === "jpeg" ? "jpg" : mimeType.split("/")[1]}` });
   };
   const makeMath = async (tex: string, opts: MathOptions, name: string | undefined): Promise<string> => {
     box!.checkRoom();
@@ -515,7 +524,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   if (wasm) tools.push(runWasmTool);
   if (options.images) tools.push(viewImages);
   if (box) tools.push(renderMathTool, convertImageTool);
-  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide, options.rules?.wasm));
+  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide, options.rules?.wasm, box ? keepAttached : undefined));
   if (options.decide) tools.push(judgeTool(options.decide));
   if (options.rules) tools.push(...ruleReadTools(options.rules));
   if (options.rules?.wasm) tools.push(...wasmTools(reader, options.rules.wasm, options.fetch ?? fetch));
@@ -1000,7 +1009,21 @@ function judgeTool(decideFn: Decide): AgentTool<any> {
   });
 }
 
-function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = [], decide?: Decide, wasm?: WasmTools): AgentTool<any> {
+/** The body field of a registration that takes the new emoji's or sticker's image. */
+const EXPRESSION_IMAGE: Record<string, string> = { "POST /guilds/{guild}/emojis": "image", "POST /guilds/{guild}/stickers": "file" };
+
+/** Registrations may name a message's image directly; it goes into the reply's images and the step names its id. */
+async function withAttachedImages(drafts: StepDraft[], keep: ((source: unknown) => Promise<string>) | undefined): Promise<StepDraft[]> {
+  return Promise.all(drafts.map(async (d) => {
+    const field = EXPRESSION_IMAGE[d.op];
+    const body = d.body as Record<string, unknown> | undefined;
+    const source = field ? body?.[field] : undefined;
+    if (!keep || typeof source !== "object" || source === null) return d;
+    return { ...d, body: { ...body, [field!]: await keep(source) } };
+  }));
+}
+
+function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = [], decide?: Decide, wasm?: WasmTools, keepAttached?: (source: unknown) => Promise<string>): AgentTool<any> {
   const codeLine = coder
     ? `code_task: 今すぐ行う変更を作るコードの依頼(steps と同時には使えません)。コード用のモデルが読み取り専用のJavaScriptを書いて実行し、変更の一覧を作ります。何を読んで、どんな条件で、どの対象に何をするかを書きます。${CODER_LIMIT_NOTE}`
     : `code: 今すぐ行う変更を作る読み取り専用のJavaScript(steps と同時には使えません)。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`;
@@ -1030,7 +1053,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
         : []),
       "使える操作(これ以外と、仕様にないフィールドは拒否されます):",
       catalogSummary(),
-      "絵文字の image・スタンプの file には、画像のデータではなく用意した画像のID(\"img1\" など)を入れます。",
+      "絵文字の image・スタンプの file には、用意した画像のID(\"img1\" など)か、メッセージに添付された画像 { message_id, channel_id?, index? } を入れます(添付はそのまま使われます)。",
     ].join("\n"),
     parameters: Type.Object({
       steps: Type.Optional(Type.Array(StepDraftSchema, { maxItems: 100 })),
@@ -1089,6 +1112,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       } else {
         throw new Error(`steps か ${codeField} を渡してください`);
       }
+      drafts = await withAttachedImages(drafts, keepAttached);
       try {
         const plan = await propose(drafts, code, rules.length > 0 ? rules : undefined);
         const what = [`${plan.steps.length}件`, ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join("・");

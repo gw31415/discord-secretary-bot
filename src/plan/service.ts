@@ -906,7 +906,7 @@ export class Planner {
     if (spec.op === "POST /guilds/{guild}/stickers") {
       // A sticker is a form whose fields sit beside the file, not a JSON payload.
       const { file: _file, ...fields } = body ?? {};
-      return this.#rest.post(path, { reason, appendToFormData: true, body: fields, files: [{ ...uploads[0]!, key: "file" }] });
+      return this.#rest.post(path, { reason, appendToFormData: true, body: { ...fields, description: fields.description ?? "", tags: fields.tags ?? fields.name }, files: [{ ...uploads[0]!, key: "file" }] });
     }
     let payload: unknown = body;
     if (spec.op === "POST /channels/{channel}/messages") {

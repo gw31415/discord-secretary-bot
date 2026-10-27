@@ -30,14 +30,25 @@ export class ImageBox {
 
   /** Throws once the reply has its fill, so a tool can stop before making an image. */
   checkRoom(): void {
-    if (this.#items.size >= MAX_IMAGES_PER_REPLY) throw new Error(`画像は1回の返答で${MAX_IMAGES_PER_REPLY}枚までです`);
+    if (this.forReply().length >= MAX_IMAGES_PER_REPLY) throw new Error(`画像は1回の返答で${MAX_IMAGES_PER_REPLY}枚までです`);
   }
 
   add(file: ImageFile): string {
     this.checkRoom();
+    return this.#put(file);
+  }
+
+  /** An image only a proposed change uses (a new emoji or sticker): it never goes out with the reply, so the reply's limit does not apply. */
+  addForPlan(file: ImageFile): string {
+    const id = this.#put(file);
+    this.#taken.add(id);
+    return id;
+  }
+
+  #put(file: ImageFile): string {
     if (!mimeOf(file.name)) throw new Error("PNG・JPEG・GIF・WebP・SVG の画像だけ添付できます");
     if (file.data.length > MAX_IMAGE_BYTES) throw new Error("画像は8MBまでです");
-    if (this.#next > 99) throw new Error("この返答ではもう画像を作れません");
+    if (this.#next > 999) throw new Error("この返答ではもう画像を作れません");
     const id = `img${this.#next++}`;
     const dot = file.name.lastIndexOf(".");
     const base = file.name.slice(0, dot).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || id;
