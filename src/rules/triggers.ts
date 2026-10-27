@@ -279,7 +279,8 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
     problems.push(`きっかけの debounce_seconds は1〜${MAX_DEBOUNCE_SECONDS}の整数にしてください`);
   }
   if (events.includes("COMMAND")) {
-    if (events.length > 1) problems.push("きっかけ COMMAND はほかのきっかけと一緒にできません");
+    // A command may also take the presses on its replies' buttons and forms, so one rule holds the whole flow.
+    if (events.some((e) => e !== "COMMAND" && e !== "INTERACTION_CREATE")) problems.push("きっかけ COMMAND と一緒にできるのは INTERACTION_CREATE(返事のボタン・フォーム)だけです");
     if (debounce !== undefined) problems.push("きっかけ COMMAND には debounce_seconds を付けられません");
     problems.push(...commandProblems(trigger.command).map((p) => `きっかけ: ${p}`));
   } else if (trigger.command !== undefined) problems.push("きっかけの command は COMMAND と一緒に使います");

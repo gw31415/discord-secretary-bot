@@ -243,7 +243,7 @@ Bot由来かどうかは、Botが直前15秒に書いた対象かで決めます
 
 ## コマンド
 
-`trigger_event` を `COMMAND` だけにして `command` を付けると、ルールがそのサーバーのスラッシュコマンドになります。`COMMAND` はほかのきっかけと一緒にできず、`debounce_seconds` も付けられません。
+`trigger_event` を `COMMAND` にして `command` を付けると、ルールがそのサーバーのスラッシュコマンドになります。`COMMAND` と一緒にできるのは `INTERACTION_CREATE` だけです。返事に付けたボタン・フォームを同じルールで受けられるので、コマンドとボタンの処理を1つのルールにまとめられます(コードは `eventName` で分けます)。`debounce_seconds` は付けられません。
 
 ```json
 {

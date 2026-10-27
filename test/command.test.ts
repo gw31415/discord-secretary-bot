@@ -43,8 +43,9 @@ test("a command's shape is checked and turned into what Discord registers", () =
   assert.equal(commandJson(SPEC).default_member_permissions, undefined);
 });
 
-test("COMMAND must be the rule's only trigger and needs a command", () => {
+test("COMMAND goes alone or with INTERACTION_CREATE, and needs a command", () => {
   assert.deepEqual(triggerProblems({ event: "COMMAND", command: SPEC }), []);
+  assert.deepEqual(triggerProblems({ event: "COMMAND", events: ["INTERACTION_CREATE"], command: SPEC }), []);
   assert.match(triggerProblems({ event: "COMMAND" }).join(), /command/);
   assert.match(triggerProblems({ event: "COMMAND", events: ["MESSAGE_CREATE"], command: SPEC }).join(), /COMMAND/);
   assert.match(triggerProblems({ event: "MESSAGE_CREATE", command: SPEC }).join(), /command/);
