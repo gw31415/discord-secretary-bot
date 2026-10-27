@@ -245,9 +245,9 @@ export async function runModule(program: Program, bindings: WasmBindings, limits
   }
   if (o.later !== undefined && o.later !== null) {
     if (!bindings.later) return { ok: false, error: "later はルールの実行のときだけ使えます", logs };
-    if (!Array.isArray(o.later)) return { ok: false, error: "later は [{ \"seconds\": 秒, \"data\": 値 }, ...] の形にしてください", logs };
+    if (!Array.isArray(o.later)) return { ok: false, error: "later は秒数か cron の式の配列 [600, \"0 9 * * *\", ...] にしてください", logs };
     try {
-      for (const item of o.later as Array<{ seconds?: unknown; data?: unknown } | null>) bindings.later(Number(item?.seconds), item?.data ?? null);
+      for (const when of o.later as unknown[]) bindings.later(typeof when === "string" ? when : Number(when));
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
     }

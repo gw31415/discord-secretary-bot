@@ -53,7 +53,7 @@ test("an allow list is checked for shape and for the permissions it needs", () =
   assert.deepEqual(missingPermissions(guild, guild.members.get("3")!, [{ op: "PATCH /guilds/{guild}/members/{user}", body: { type: "object", properties: { nick: {} } } }]), ["ManageNicknames"]);
 });
 
-function world(now = { t: 1_000_000 }, threadMembers: string[] = []) {
+function world(now = { t: 1_000_000 }, threadMembers: string[] = [], deps: Partial<ConstructorParameters<typeof RuleEngine>[0]> = {}) {
   const store = new Store(":memory:", randomBytes(32));
   const cache = new GuildCache(GUILD);
   cache.guild = makeGuild();
@@ -75,6 +75,7 @@ function world(now = { t: 1_000_000 }, threadMembers: string[] = []) {
     notifyOwner: async (_u, content) => void notices.push(content),
     log: () => {},
     run: async (_code, bindings) => (seen.push(bindings), code()),
+    ...deps,
   });
   const definition: RuleDefinition = {
     name: "挨拶",
@@ -293,18 +294,19 @@ test("one rule can fire on several triggers, and its code sees which one", async
 });
 
 test("cron schedules are read in their time zone", async () => {
-  const { cronMatches, parseCron, scheduleProblems } = await import("../src/rules/schedule.ts");
+  const { parseCron, scheduleProblems } = await import("../src/rules/schedule.ts");
   // 2026-10-22T19:00Z is 04:00 on Friday the 23rd in Tokyo.
-  const at = Date.parse("2026-10-22T19:00:30Z");
-  assert.ok(cronMatches(parseCron("0 4 * * *"), at, "Asia/Tokyo"));
-  assert.ok(!cronMatches(parseCron("0 4 * * *"), at, "UTC"));
-  assert.ok(cronMatches(parseCron("*/10 * * * 5"), at, "Asia/Tokyo"));
-  assert.ok(cronMatches(parseCron("0 4 * * 7,1-4"), at, "Asia/Tokyo") === false);
-  // Day and weekday both given: either matches.
-  assert.ok(cronMatches(parseCron("0 4 1 * 5"), at, "Asia/Tokyo"));
-  assert.ok(cronMatches(parseCron("@daily"), Date.parse("2026-10-22T15:00:00Z"), "Asia/Tokyo"));
-  assert.match(scheduleProblems("61 * * * *", undefined).join(), /範囲/);
+  const before = new Date("2026-10-22T18:59:30Z");
+  const next = (cron: string, tz = "Asia/Tokyo") => parseCron(cron, tz).nextRun(before)?.toISOString();
+  assert.equal(next("0 4 * * *"), "2026-10-22T19:00:00.000Z");
+  assert.equal(next("0 4 * * *", "UTC"), "2026-10-23T04:00:00.000Z");
+  assert.equal(next("*/10 * * * 5"), "2026-10-22T19:00:00.000Z");
+  assert.equal(next("@daily"), "2026-10-23T15:00:00.000Z");
+  assert.match(scheduleProblems("61 * * * *", undefined).join(), /読めません/);
   assert.match(scheduleProblems("* * *", undefined).join(), /5つの欄/);
+  // Seconds would run it more than once a minute.
+  assert.match(scheduleProblems("* * * * * *", undefined).join(), /5つの欄/);
+  assert.match(scheduleProblems("0 4 30 2 *", undefined).join(), /当てはまる日時がありません/);
   assert.match(scheduleProblems("0 4 * * *", "Mars/Base").join(), /timezone/);
   assert.match(scheduleProblems(undefined, undefined).join(), /schedule/);
 });
@@ -317,12 +319,21 @@ test("trigger settings are checked together", async () => {
   assert.match(triggerProblems({ event: "CHANNEL_CREATE", debounceSeconds: 0 }).join(), /debounce_seconds/);
 });
 
-test("SCHEDULE rules fire once in their minute, with the scheduled time as the event", async () => {
-  const w = world({ t: Date.parse("2026-10-22T19:00:05Z") });
+test("SCHEDULE rules run from a cron job each, kept in step with the rules, with the scheduled time as the event", async () => {
+  const jobs: Array<{ cron: string; timezone: string; fn: () => void; stopped: boolean }> = [];
+  const w = world({ t: Date.parse("2026-10-22T19:00:05Z") }, [], {
+    startCron: (cron, timezone, fn) => {
+      const job = { cron, timezone, fn, stopped: false };
+      jobs.push(job);
+      return { stop: () => void (job.stopped = true) };
+    },
+  });
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "0 4 * * *" } });
-  w.admin.save(GUILD, "1", { ...w.definition, name: "別の時刻", trigger: { event: "SCHEDULE", schedule: "30 4 * * *" } });
-  w.engine.tick([GUILD]);
-  w.engine.tick([GUILD], w.now.t + 20_000); // the same minute again
+  const other = w.admin.save(GUILD, "1", { ...w.definition, name: "別の時刻", trigger: { event: "SCHEDULE", schedule: "30 4 * * *", timezone: "UTC" } });
+  w.engine.syncSchedules(GUILD);
+  w.engine.syncSchedules(GUILD); // nothing changed: the same jobs
+  assert.deepEqual(jobs.map((j) => [j.cron, j.timezone]), [["0 4 * * *", "Asia/Tokyo"], ["30 4 * * *", "UTC"]]);
+  jobs[0]!.fn();
   await w.engine.idle();
   assert.equal(w.runs.length, 1);
   assert.equal(w.runs[0].rule.id, rule.id);
@@ -332,6 +343,15 @@ test("SCHEDULE rules fire once in their minute, with the scheduled time as the e
   // The dry run makes the same kind of event without a sample.
   const { syntheticEvent } = await import("../src/rules/triggers.ts");
   assert.equal(syntheticEvent("SCHEDULE", GUILD, rule.trigger, w.now.t)!.timezone, "Asia/Tokyo");
+  // A rule switched off loses its job; a stale job that still fires does nothing.
+  w.store.setRuleEnabled(other.id, false, "test");
+  w.engine.syncSchedules(GUILD);
+  assert.equal(jobs[1]!.stopped, true);
+  jobs[1]!.fn();
+  await w.engine.idle();
+  assert.equal(w.runs.length, 1);
+  w.engine.stopSchedules();
+  assert.equal(jobs[0]!.stopped, true);
 });
 
 test("a debounced rule runs once on the whole batch, at the latest after five periods", async () => {
@@ -521,24 +541,24 @@ test("later() runs the rule again as TIMER at its time, kept only from runs that
   const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
   const rule = w.admin.save(GUILD, "1", w.definition);
   const start = w.now.t;
-  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later(600, { message: "700" }), { ok: true, value: null, logs: [] })));
+  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later(600), { ok: true, value: null, logs: [] })));
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "720"));
   await w.engine.idle();
   assert.equal(w.store.countRuleTimers(rule.id), 1);
   // Not yet.
-  w.engine.tick([GUILD], start + 300_000);
+  w.engine.runTimers([GUILD], start + 300_000);
   await w.engine.idle();
   assert.equal(w.seen.length, 1);
-  w.engine.tick([GUILD], start + 660_000);
+  w.engine.runTimers([GUILD], start + 660_000);
   await w.engine.idle();
   assert.equal(w.seen.length, 2);
   assert.equal(w.seen[1].eventName, "TIMER");
-  assert.deepEqual(w.seen[1].event.data, { message: "700" });
+  assert.equal(w.seen[1].event.due_at, new Date(start + 600_000).toISOString());
   assert.equal(w.seen[1].event.chain, 1);
   assert.equal(w.seen[1].actor.userId, "1");
   assert.equal(w.store.countRuleTimers(rule.id), 0);
   // A failed run keeps no request.
-  w.setCode(() => (w.seen.at(-1).later(600, null), { ok: false, error: "boom", logs: [] }));
+  w.setCode(() => (w.seen.at(-1).later(600), { ok: false, error: "boom", logs: [] }));
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "721"));
   await w.engine.idle();
   assert.equal(w.store.countRuleTimers(rule.id), 0);
@@ -552,14 +572,14 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
   const rule = w.admin.save(GUILD, "1", w.definition);
   // Failures in a row would switch the rule off; each check starts it again.
   const errors = () => (w.store.setRuleEnabled(rule.id, true, null), w.store.recentRuleRuns(rule.id, 1)[0]!.error ?? "");
-  for (const [seconds, data] of [[30, null], [8 * 24 * 60 * 60, null], [600, "x".repeat(3000)]] as const) {
-    w.setCode(() => (w.seen.at(-1).later(seconds, data), { ok: true, value: null, logs: [] }));
+  for (const seconds of [30, 8 * 24 * 60 * 60, Number.NaN]) {
+    w.setCode(() => (w.seen.at(-1).later(seconds), { ok: true, value: null, logs: [] }));
     w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", `73${seconds}`));
     await w.engine.idle();
     assert.match(errors(), /later/);
   }
   w.setCode(() => {
-    for (let i = 0; i < 11; i++) w.seen.at(-1).later(600, i);
+    for (let i = 0; i < 11; i++) w.seen.at(-1).later(600);
     return { ok: true, value: null, logs: [] };
   });
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "740"));
@@ -568,7 +588,7 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
   assert.equal(w.store.countRuleTimers(rule.id), 0);
 
   // Each TIMER run asks again: the chain stops at its tenth run.
-  w.setCode(() => (w.seen.at(-1).later(60, null), { ok: true, value: null, logs: [] }));
+  w.setCode(() => (w.seen.at(-1).later(60), { ok: true, value: null, logs: [] }));
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "741"));
   await w.engine.idle();
   let t = w.now.t;
@@ -576,7 +596,7 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
     t += 61_000;
     w.now.t = t;
     w.engine.sweep();
-    w.engine.tick([GUILD], t);
+    w.engine.runTimers([GUILD], t);
     await w.engine.idle();
   }
   const timers = w.seen.filter((b) => b.eventName === "TIMER");
@@ -586,9 +606,9 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
   assert.equal(w.store.countRuleTimers(rule.id), 0);
 
   // At most 100 waiting per rule.
-  w.store.addRuleTimers(rule.id, GUILD, null, Array.from({ length: 95 }, () => ({ dueAt: t + 3_600_000, data: null, chain: 1 })));
+  w.store.addRuleTimers(rule.id, GUILD, null, Array.from({ length: 95 }, () => ({ dueAt: t + 3_600_000, chain: 1 })));
   w.setCode(() => {
-    for (let i = 0; i < 6; i++) w.seen.at(-1).later(600, i);
+    for (let i = 0; i < 6; i++) w.seen.at(-1).later(600);
     return { ok: true, value: null, logs: [] };
   });
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "742"));
@@ -603,16 +623,89 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
 test("a TIMER run acts as whoever the run that asked acted as, and a stopped rule's requests are dropped", async () => {
   const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_REACTION_ADD" } });
-  w.store.addRuleTimers(rule.id, GUILD, "3", [{ dueAt: w.now.t, data: null, chain: 1 }]);
-  w.engine.tick([GUILD], w.now.t + 60_000);
+  w.store.addRuleTimers(rule.id, GUILD, "3", [{ dueAt: w.now.t, chain: 1 }]);
+  w.engine.runTimers([GUILD], w.now.t + 60_000);
   await w.engine.idle();
   assert.equal(w.seen[0].eventName, "TIMER");
   assert.equal(w.seen[0].actor.userId, "3");
   assert.equal(w.runs[0].actorId, "3");
-  w.store.addRuleTimers(rule.id, GUILD, null, [{ dueAt: w.now.t, data: null, chain: 1 }]);
+  w.store.addRuleTimers(rule.id, GUILD, null, [{ dueAt: w.now.t, chain: 1 }]);
   w.store.setRuleEnabled(rule.id, false, "test");
-  w.engine.tick([GUILD], w.now.t + 120_000);
+  w.engine.runTimers([GUILD], w.now.t + 120_000);
   await w.engine.idle();
   assert.equal(w.seen.length, 1);
   assert.equal(w.store.countRuleTimers(rule.id), 0);
+});
+
+test("later() needs no polling: one timer sleeps until the earliest request and runs it", async () => {
+  const sleeps: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  const now = { t: Date.parse("2026-10-27T10:00:05Z") };
+  const w = world(now, [], {
+    guildIds: () => [GUILD],
+    setTimer: (fn, ms) => (sleeps.push({ fn, ms, cleared: false }), sleeps.at(-1)),
+    clearTimer: (handle) => void ((handle as { cleared: boolean } | null) && ((handle as { cleared: boolean }).cleared = true)),
+  });
+  w.admin.save(GUILD, "1", w.definition);
+  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later(w.seen.length === 1 ? 600 : 120), { ok: true, value: null, logs: [] })));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "750"));
+  await w.engine.idle();
+  assert.deepEqual(sleeps.map((s) => [s.ms, s.cleared]), [[600_000, false]]);
+  // An earlier request wakes it sooner.
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "751"));
+  await w.engine.idle();
+  assert.deepEqual(sleeps.map((s) => [s.ms, s.cleared]), [[600_000, true], [120_000, false]]);
+  now.t += 120_000;
+  sleeps.at(-1)!.fn();
+  await w.engine.idle();
+  assert.equal(w.seen.filter((b) => b.eventName === "TIMER").length, 1);
+  // Then it sleeps until the other one.
+  assert.equal(sleeps.at(-1)!.ms, 480_000);
+});
+
+test("later() takes a cron expression too, and runs at its next match only, once", async () => {
+  // 03:59:30 in Tokyo.
+  const w = world({ t: Date.parse("2026-10-22T18:59:30Z") });
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later("0 4 * * *"), { ok: true, value: null, logs: [] })));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "760"));
+  await w.engine.idle();
+  assert.equal(w.store.nextRuleTimerDue([GUILD]), Date.parse("2026-10-22T19:00:00Z"));
+  w.now.t = Date.parse("2026-10-22T19:00:00Z");
+  w.engine.runTimers([GUILD]);
+  await w.engine.idle();
+  assert.equal(w.seen.filter((b) => b.eventName === "TIMER").length, 1);
+  // Once: nothing waits for the next day.
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+  const errors = () => (w.store.setRuleEnabled(rule.id, true, null), w.store.recentRuleRuns(rule.id, 1)[0]!.error ?? "");
+  for (const [cron, reason] of [["0 4 30 2 *", /当てはまる日時がありません/], ["* * * * * *", /5つの欄/], ["0 4 1 1 *", /7日より先/]] as const) {
+    w.setCode(() => (w.seen.at(-1).later(cron), { ok: true, value: null, logs: [] }));
+    w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", `76${cron.length}${cron.at(-3)}`));
+    await w.engine.idle();
+    assert.match(errors(), reason);
+  }
+});
+
+test("later() takes ISO 8601 durations and date-times, read in the rule's time zone", async () => {
+  const w = world({ t: Date.parse("2026-10-27T10:00:00Z") });
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  const due = async (when: string) => {
+    w.store.setRuleEnabled(rule.id, true, null);
+    const before = w.store.countRuleTimers(rule.id);
+    w.setCode(() => (w.seen.at(-1).later(when), { ok: true, value: null, logs: [] }));
+    w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", `77${w.seen.length}`));
+    await w.engine.idle();
+    if (w.store.countRuleTimers(rule.id) === before) return w.store.recentRuleRuns(rule.id, 1)[0]!.error;
+    const [timer] = w.store.takeDueRuleTimers(GUILD, Number.MAX_SAFE_INTEGER);
+    return new Date(timer!.dueAt).toISOString();
+  };
+  assert.equal(await due("PT10M"), "2026-10-27T10:10:00.000Z");
+  assert.equal(await due("P1DT2H"), "2026-10-28T12:00:00.000Z");
+  // No offset: Tokyo time.
+  assert.equal(await due("2026-10-28T09:00"), "2026-10-28T00:00:00.000Z");
+  assert.equal(await due("2026-10-28T09:00Z"), "2026-10-28T09:00:00.000Z");
+  assert.match((await due("PT10S")) ?? "", /1分〜7日/);
+  assert.match((await due("P8D")) ?? "", /1分〜7日/);
+  assert.match((await due("2026-10-26T09:00+09:00")) ?? "", /7日以内/);
+  assert.match((await due("2026-13-01")) ?? "", /読めません/);
+  assert.match((await due("PXM")) ?? "", /読めません/);
 });

@@ -13,7 +13,8 @@ import { PlanRejected } from "../plan/validate.ts";
 import { jsProgram, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
 import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
-import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
+import { DateTime, Duration } from "luxon";
+import { DEFAULT_TIMEZONE, parseCron, startCron } from "./schedule.ts";
 import { ACTOR_EVENTS, createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
@@ -33,7 +34,7 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // runs them without a dialog. Safety: the bot's own changes are ignored unless
 // the rule opts in, each rule is rate limited, repeated failures switch it off,
 // and anyone with Manage Server can stop every rule in the server at once.
-// SCHEDULE rules fire from tick() once a minute; rules with a debounce wait for
+// SCHEDULE rules fire from a cron job each (syncSchedules); rules with a debounce wait for
 // a quiet moment and run once on the batch of events. COMMAND rules run when
 // someone uses their slash command, as that person: their read scope, their
 // permissions (within the allow list) and their judge model, and the outcome
@@ -41,24 +42,25 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // messages' buttons and forms sent from them, and what the code passes to
 // respond() answers whoever pressed. Those and reaction rules act as whoever
 // pressed or reacted, like a command, unless the rule runs as its owner.
-// A run may ask with later(seconds, data) to run the rule again that much
+// A run may ask with later(seconds) to run the rule again that much
 // later; the request is kept in the database (so it survives restarts) and
-// comes back from tick() as a TIMER event, acting as whoever the run that asked
-// acted as.
+// comes back as a TIMER event, acting as whoever the run that asked acted as.
+// Nothing polls for them: one timer sleeps until the earliest is due.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
 const MAX_ERROR = 500;
-/** later(): how far ahead, how many per run and per rule, and how much data each may carry. */
+/** later(): how far ahead, and how many per run and per rule. What a later run is for, the code keeps in its state. */
 export const LATER_MIN_SECONDS = 60;
 export const LATER_MAX_SECONDS = 7 * 24 * 60 * 60;
 export const MAX_LATER_PER_RUN = 10;
 export const MAX_PENDING_LATER = 100;
-export const MAX_LATER_DATA_JSON = 2000;
 /** TIMER runs that ask for later() again: at most this many in a row, so a rule cannot keep itself going forever. */
 export const MAX_LATER_CHAIN = 10;
 /** A rule's later() runs that came while it was over its per-minute limit wait this much longer. */
 const LATER_RETRY_MS = 60_000;
+/** The longest the timer for later() sleeps at once (timers further off are looked at again then). */
+const LATER_MAX_SLEEP_MS = 6 * 60 * 60 * 1000;
 /** A debounced rule runs at the latest this many debounce periods after the first event. */
 const MAX_WAIT_PERIODS = 5;
 
@@ -86,6 +88,10 @@ export interface RuleEngineDeps {
   threadMember?: (threadId: string, userId: string) => Promise<boolean>;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /** Runs a cron schedule until stopped (croner; replaced in tests). */
+  startCron?: typeof startCron;
+  /** The servers the bot serves now, whose later() requests may run. */
+  guildIds?: () => Iterable<string>;
 }
 
 /** One event of a run, as the code reads it in `batch`. */
@@ -318,32 +324,90 @@ export class RuleEngine {
     return counts;
   }
 
+  /** The cron job of each SCHEDULE rule that is on, by rule id. */
+  readonly #schedules = new Map<string, { guildId: string; version: number; job: { stop(): void } }>();
+
   /**
-   * Fires SCHEDULE rules whose cron matches the minute of `now`, in the given
-   * servers. Called once a minute; a minute is never fired twice.
+   * Starts and stops the cron jobs of a server's SCHEDULE rules to match the
+   * rules that are on now. Called when the server becomes ready and whenever
+   * its rules change; nothing checks the clock in between.
    */
-  tick(guildIds: Iterable<string>, now = this.deps.now()): void {
-    const minute = Math.floor(now / 60_000) * 60_000;
-    if (minute <= this.#lastTick) return;
-    this.#lastTick = minute;
+  syncSchedules(guildId: string): void {
+    const ready = !!this.deps.caches.get(guildId)?.guild;
+    const wanted = new Map((ready ? this.deps.store.enabledRules(guildId, "SCHEDULE") : []).map((rule) => [rule.id, rule]));
+    for (const [id, entry] of this.#schedules) {
+      if (entry.guildId !== guildId || wanted.get(id)?.version === entry.version) continue;
+      entry.job.stop();
+      this.#schedules.delete(id);
+    }
+    for (const rule of wanted.values()) {
+      if (this.#schedules.has(rule.id)) continue;
+      const timezone = rule.trigger.timezone ?? DEFAULT_TIMEZONE;
+      try {
+        parseCron(rule.trigger.schedule ?? "", timezone);
+      } catch {
+        continue; // Checked at approval; a schedule that no longer parses just never fires.
+      }
+      const job = (this.deps.startCron ?? startCron)(rule.trigger.schedule!, timezone, () => this.#scheduled(rule.id, rule.version));
+      this.#schedules.set(rule.id, { guildId, version: rule.version, job });
+    }
+  }
+
+  /** A SCHEDULE rule's time came. */
+  #scheduled(ruleId: string, version: number): void {
+    const rule = this.deps.store.getRule(ruleId);
+    if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId) || !this.deps.caches.get(rule.guildId)?.guild) return;
+    this.#fire(rule, "SCHEDULE", syntheticEvent("SCHEDULE", rule.guildId, rule.trigger, this.deps.now())!);
+  }
+
+  /** Stops every cron job and the later() timer (shutdown and tests). */
+  stopSchedules(): void {
+    for (const entry of this.#schedules.values()) entry.job.stop();
+    this.#schedules.clear();
+    if (this.#sleep) (this.deps.clearTimer ?? defaultClearTimer)(this.#sleep.timer);
+    this.#sleep = null;
+  }
+
+  /** The timer for the earliest later() request, and when it is due. */
+  #sleep: { timer: unknown; at: number } | null = null;
+
+  /**
+   * Runs the later() requests that are due in these servers (a server that just
+   * became ready runs what came due while it was not), then sleeps until the next.
+   */
+  runTimers(guildIds: Iterable<string>, now = this.deps.now()): void {
     for (const guildId of guildIds) {
       if (!this.deps.caches.get(guildId)?.guild) continue;
       // Stopped rules drop what they asked for meanwhile, rather than act on it late.
       const timers = this.deps.store.takeDueRuleTimers(guildId, now);
       if (this.halted(guildId)) continue;
       for (const timer of timers) this.#fireTimer(timer, now);
-      for (const rule of this.deps.store.enabledRules(guildId, "SCHEDULE")) {
-        try {
-          if (!cronMatches(parseCron(rule.trigger.schedule ?? ""), minute, rule.trigger.timezone ?? DEFAULT_TIMEZONE)) continue;
-        } catch {
-          continue; // Checked at approval; a schedule that no longer parses just never fires.
-        }
-        this.#fire(rule, "SCHEDULE", syntheticEvent("SCHEDULE", guildId, rule.trigger, minute)!);
-      }
     }
+    this.#armTimers();
   }
 
-  #lastTick = 0;
+  /** Sleeps until the earliest later() request of the servers being served. */
+  #armTimers(): void {
+    const { setTimer = defaultSetTimer, clearTimer = defaultClearTimer } = this.deps;
+    const served = [...(this.deps.guildIds?.() ?? [])].filter((id) => this.deps.caches.get(id)?.guild);
+    const next = this.deps.store.nextRuleTimerDue(served);
+    if (next === null) {
+      if (this.#sleep) clearTimer(this.#sleep.timer);
+      this.#sleep = null;
+      return;
+    }
+    const now = this.deps.now();
+    const at = Math.min(Math.max(next, now), now + LATER_MAX_SLEEP_MS);
+    if (this.#sleep && this.#sleep.at <= at) return;
+    if (this.#sleep) clearTimer(this.#sleep.timer);
+    this.#sleep = {
+      at,
+      timer: setTimer(() => {
+        this.#sleep = null;
+        this.runTimers(this.deps.guildIds?.() ?? []);
+      }, at - now),
+    };
+  }
 
   /** A later() request's time came: the rule runs on it as whoever the run that asked acted as. */
   #fireTimer(timer: RuleTimer, now: number): void {
@@ -352,18 +416,15 @@ export class RuleEngine {
     if (!rule?.enabled) return;
     const event: Data = {
       guild_id: timer.guildId,
-      id: String(timer.id),
-      data: timer.data,
-      set_at: timer.createdAt,
       due_at: new Date(timer.dueAt).toISOString(),
       chain: timer.chain,
       ...(timer.message ? { message: { channel_id: timer.message.channelId, id: timer.message.messageId } } : {}),
     };
     if (this.#allowRun(rule) !== 0) {
       // Kept for a little later rather than lost.
-      const [id] = store.addRuleTimers(rule.id, rule.guildId, timer.actorId, [{ dueAt: now + LATER_RETRY_MS, data: timer.data, chain: timer.chain }]);
+      const [id] = store.addRuleTimers(rule.id, rule.guildId, timer.actorId, [{ dueAt: now + LATER_RETRY_MS, chain: timer.chain }]);
       if (timer.message) store.setRuleTimersMessage([id!], timer.message.channelId, timer.message.messageId);
-      return;
+      return; // runTimers sleeps until it after this.
     }
     const actor = timer.actorId && timer.actorId !== rule.ownerId ? timer.actorId : undefined;
     const reader = actor ? this.deps.makeReader({ guildId: rule.guildId, channelId: timer.message?.channelId ?? "", speakerId: actor, audience: "owner" }) : undefined;
@@ -562,8 +623,8 @@ export class RuleEngine {
     const keepState = () => {
       if (result.state) store.setRuleState(rule.id, result.state.value);
       if (result.later?.length) {
-        const at = this.deps.now();
-        timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((t) => ({ dueAt: at + t.seconds * 1000, data: t.data, chain: chain + 1 })));
+        timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((dueAt) => ({ dueAt, chain: chain + 1 })));
+        this.#armTimers();
       }
     };
     if (result.kind !== "steps") {
@@ -662,7 +723,7 @@ export class RuleEngine {
    * read scope and judge model the code gets; by default the owner's.
    */
   async evaluate(
-    rule: Pick<Rule, "guildId" | "ownerId" | "program" | "params">,
+    rule: Pick<Rule, "guildId" | "ownerId" | "program" | "params"> & Partial<Pick<Rule, "trigger">>,
     event: unknown,
     reader?: Pick<Reader, "get">,
     eventName: string | null = null,
@@ -675,7 +736,7 @@ export class RuleEngine {
     let replied: string | null = null;
     let response: unknown;
     const images: CommandImage[] = [];
-    const later: Later[] = [];
+    const later: number[] = [];
     try {
       const source = reader ?? this.ownerReader(rule.guildId, actorId);
       // Images for a command's reply or the run's posts (`files: ["img1"]`):
@@ -712,7 +773,7 @@ export class RuleEngine {
           // A command is an interaction too: its respond() adds to the reply.
           ...(eventName === "INTERACTION_CREATE" || command ? { respond: (r: unknown) => void (response = r) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
-          later: (seconds: number, data: unknown) => void later.push(checkLater(seconds, data, later.length)),
+          later: (when: number | string) => void later.push(checkLater(when, later.length, rule.trigger?.timezone ?? DEFAULT_TIMEZONE, this.deps.now())),
           ...(decider ? { decide: decider } : {}),
           // The modules the code names are its author's, as for a rule's own wasm; they run with this run's bindings.
           ...(this.deps.wasm ? { wasm: (ref: string) => this.deps.wasm!.compiled(this.deps.wasm!.resolve(rule.ownerId, this.deps.caches.get(rule.guildId)?.guild, ref).sha256) } : {}),
@@ -818,21 +879,40 @@ function defaultClearTimer(handle: unknown): void {
   if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
-/** One later() request: run again in `seconds` with `data`. */
-export interface Later {
-  seconds: number;
-  data: unknown;
-}
-
-/** later()'s arguments, checked as the code calls it; `asked` is how many the run asked for before. */
-function checkLater(seconds: number, data: unknown, asked: number): Later {
+/**
+ * When a later() request is due, run once: `when` seconds from now, an ISO 8601
+ * duration from now (PT10M) or date and time (2026-10-28T09:00+09:00), or the
+ * next match of a cron expression. Times without an offset and cron are read in
+ * the rule's time zone. `asked` is how many the run asked for before.
+ */
+function checkLater(when: number | string, asked: number, timezone: string, now: number): number {
   if (asked >= MAX_LATER_PER_RUN) throw new Error(`later() は1回の実行で${MAX_LATER_PER_RUN}回までです`);
-  if (!Number.isFinite(seconds) || seconds < LATER_MIN_SECONDS || seconds > LATER_MAX_SECONDS) {
-    throw new Error(`later() の秒数は${LATER_MIN_SECONDS}〜${LATER_MAX_SECONDS}(7日)にしてください`);
+  const max = now + LATER_MAX_SECONDS * 1000;
+  if (typeof when === "number") {
+    if (!Number.isFinite(when) || when < LATER_MIN_SECONDS || when > LATER_MAX_SECONDS) {
+      throw new Error(`later() の秒数は${LATER_MIN_SECONDS}〜${LATER_MAX_SECONDS}(7日)にしてください`);
+    }
+    return now + Math.round(when) * 1000;
   }
-  const json = JSON.stringify(data ?? null);
-  if (json.length > MAX_LATER_DATA_JSON) throw new Error(`later() の data はJSONで${MAX_LATER_DATA_JSON}文字までです`);
-  return { seconds: Math.round(seconds), data: JSON.parse(json) as unknown };
+  const text = when.trim();
+  const from = DateTime.fromMillis(now, { zone: timezone });
+  if (/^P/i.test(text)) {
+    const duration = Duration.fromISO(text);
+    if (!duration.isValid) throw new Error(`later() の期間「${text}」が読めません(ISO 8601 の PT10M・P1DT2H など)`);
+    const due = from.plus(duration).toMillis();
+    if (due < now + LATER_MIN_SECONDS * 1000 || due > max) throw new Error(`later() の期間「${text}」は1分〜7日にしてください`);
+    return due;
+  }
+  if (/^\d{4}-/.test(text)) {
+    const at = DateTime.fromISO(text, { zone: timezone });
+    if (!at.isValid) throw new Error(`later() の日時「${text}」が読めません(ISO 8601 の 2026-10-28T09:00+09:00 など)`);
+    if (at.toMillis() <= now || at.toMillis() > max) throw new Error(`later() の日時「${text}」は今から7日以内の先の日時にしてください`);
+    return at.toMillis();
+  }
+  const next = parseCron(text, timezone).nextRun(new Date(now))?.getTime();
+  if (next === undefined) throw new Error(`later() の cron「${text}」に当てはまる日時がありません`);
+  if (next > max) throw new Error(`later() の cron「${text}」の次の日時が7日より先です`);
+  return next;
 }
 
 /**
@@ -840,8 +920,8 @@ function checkLater(seconds: number, data: unknown, asked: number): Later {
  * `reply` is what a command's code passed to reply(), `response` what an INTERACTION_CREATE run's code passed to respond().
  */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: Later[] }
-  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: Later[] }
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: number[] }
+  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: number[] }
   | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; response?: undefined; images?: undefined; later?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */

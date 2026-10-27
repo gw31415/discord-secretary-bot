@@ -115,6 +115,12 @@ async function sendDm(userId: string, content: string): Promise<void> {
 // Custom slash commands follow the rules; changes close together register once.
 const commandSyncs = new Map<string, ReturnType<typeof setTimeout>>();
 function syncCommands(guildId: string): void {
+  // SCHEDULE rules' cron jobs follow the rules at once.
+  try {
+    engine.syncSchedules(guildId);
+  } catch (e) {
+    log(`${guildId}: 時刻のルールの登録に失敗`, e);
+  }
   clearTimeout(commandSyncs.get(guildId));
   commandSyncs.set(
     guildId,
@@ -130,6 +136,7 @@ function syncCommands(guildId: string): void {
 const engine = new RuleEngine({
   store,
   caches,
+  guildIds: () => caches.ids(),
   planner,
   selfId: () => selfId,
   now: () => Date.now(),
@@ -272,11 +279,19 @@ client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
   } catch (e) {
     log(`${data.name}: BOT_READY のルールの振り分けに失敗`, e);
   }
+  // The SCHEDULE rules' cron jobs, and later() requests that came due while the bot was away.
+  try {
+    engine.syncSchedules(data.id);
+    engine.runTimers([data.id]);
+  } catch (e) {
+    log(`${data.name}: 予約したルールの実行に失敗`, e);
+  }
 });
 
 client.on(GatewayDispatchEvents.GuildDelete, ({ data }) => {
   // An outage also sends GUILD_DELETE (with unavailable), followed by a fresh GUILD_CREATE.
   caches.delete(data.id);
+  engine.syncSchedules(data.id);
   if (!data.unavailable) log(`サーバー ${data.id} から退出しました`);
 });
 
@@ -365,19 +380,6 @@ function guildOf(channel: object): string | undefined {
   return "guild_id" in channel ? (channel.guild_id as string | undefined) : undefined;
 }
 
-// SCHEDULE rules: checked at the start of every minute.
-let scheduler: ReturnType<typeof setTimeout> | undefined;
-function scheduleTick(): void {
-  scheduler = setTimeout(() => {
-    try {
-      engine.tick(caches.ids());
-    } catch (e) {
-      log("時刻のルールの振り分けに失敗", e);
-    }
-    scheduleTick();
-  }, 60_000 - (Date.now() % 60_000) + 50);
-}
-scheduleTick();
 
 const sweeper = setInterval(() => {
   conversations.sweep();
@@ -390,7 +392,7 @@ const sweeper = setInterval(() => {
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
-  clearTimeout(scheduler);
+  engine.stopSchedules();
   presence.stop();
   await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);
   await gateway.destroy();
