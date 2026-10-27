@@ -524,7 +524,8 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   if (wasm) tools.push(runWasmTool);
   if (options.images) tools.push(viewImages);
   if (box) tools.push(renderMathTool, convertImageTool);
-  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide, options.rules?.wasm, box ? keepAttached : undefined));
+  const planDrawing: PlanDrawing | undefined = box ? { bindings: drawingBindings, trial: trialBindings, discard: (ids) => box.discard(ids), keepAttached } : undefined;
+  if (options.propose) tools.push(proposePlan(reader, options.propose, !!options.rules, coder, coderTools, options.decide, options.rules?.wasm, planDrawing));
   if (options.decide) tools.push(judgeTool(options.decide));
   if (options.rules) tools.push(...ruleReadTools(options.rules));
   if (options.rules?.wasm) tools.push(...wasmTools(reader, options.rules.wasm, options.fetch ?? fetch));
@@ -1023,7 +1024,16 @@ async function withAttachedImages(drafts: StepDraft[], keep: ((source: unknown) 
   }));
 }
 
-function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = [], decide?: Decide, wasm?: WasmTools, keepAttached?: (source: unknown) => Promise<string>): AgentTool<any> {
+/** How plan code makes images into the reply's box, so its steps can name them (new emojis, stickers, posts). */
+interface PlanDrawing {
+  bindings: (made: string[]) => SandboxBindings;
+  /** For the coder's trial runs, which keep nothing. */
+  trial: SandboxBindings;
+  discard: (ids: string[]) => void;
+  keepAttached: (source: unknown) => Promise<string>;
+}
+
+function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder?: Coder, coderTools: AgentTool<any>[] = [], decide?: Decide, wasm?: WasmTools, drawing?: PlanDrawing): AgentTool<any> {
   const codeLine = coder
     ? `code_task: 今すぐ行う変更を作るコードの依頼(steps と同時には使えません)。コード用のモデルが読み取り専用のJavaScriptを書いて実行し、変更の一覧を作ります。何を読んで、どんな条件で、どの対象に何をするかを書きます。${CODER_LIMIT_NOTE}`
     : `code: 今すぐ行う変更を作る読み取り専用のJavaScript(steps と同時には使えません)。承認ダイアログにはこのコードと、コードだけを読んだ別のAIによる説明が出るので、読みやすく書きます。run_code と同じ discord.get が使え、call(op, { id?, path, body }) で作ったステップを return plan([...]) で返します。${withRules ? "ルールも作るときは return plan([...], [rule({...}), ...]) です。" : ""}`;
@@ -1073,10 +1083,16 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       const ruleInputs = coder ? await codeRules(coder, (params.rules ?? []) as CodedRuleInput[], sandboxBindings, coderTools) : ((params.rules ?? []) as RuleInput[]);
       let rules: RuleProposal[] = ruleInputs.map(toProposal);
 
-      // Runs plan code; the error comes back as text so the coder can fix it.
       let planned: { drafts: StepDraft[]; rules: RuleProposal[] } | undefined;
+      // Runs plan code; the error comes back as text so the coder can fix it. Images a failed run made are dropped.
       const runPlan = async (code: string): Promise<string | null> => {
-        const result = await runSandboxed(code, sandboxBindings, SANDBOX_LIMITS);
+        const made: string[] = [];
+        const problem = await checkPlan(code, made);
+        if (problem) drawing?.discard(made);
+        return problem;
+      };
+      const checkPlan = async (code: string, made: string[]): Promise<string | null> => {
+        const result = await runSandboxed(code, drawing ? drawing.bindings(made) : sandboxBindings, SANDBOX_LIMITS);
         if (!result.ok) {
           // A common mix-up: the rule's code (which reads `event`) passed as the plan's code.
           const hint = /\bevent\b/.test(code) ? `\nこのコードは今すぐ行う変更を作るコードで、event はありません(null)。イベントごとに動くコードは rules[].${codeField} に書いてください。` : "";
@@ -1097,7 +1113,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       let drafts: StepDraft[];
       let code = params.code;
       if (coder && params.code_task) {
-        code = (await writeCode(coder, "plan", params.code_task, { check: runPlan, run: (c) => runSandboxed(c, sandboxBindings, SANDBOX_LIMITS), tools: coderTools })).code;
+        code = (await writeCode(coder, "plan", params.code_task, { check: runPlan, run: (c) => runSandboxed(c, drawing?.trial ?? sandboxBindings, SANDBOX_LIMITS), tools: coderTools, ...(drawing ? { canvas: true } : {}) })).code;
       } else if (code) {
         const problem = await runPlan(code);
         if (problem) throw new Error(problem);
@@ -1112,7 +1128,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
       } else {
         throw new Error(`steps か ${codeField} を渡してください`);
       }
-      drafts = await withAttachedImages(drafts, keepAttached);
+      drafts = await withAttachedImages(drafts, drawing?.keepAttached);
       try {
         const plan = await propose(drafts, code, rules.length > 0 ? rules : undefined);
         const what = [`${plan.steps.length}件`, ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join("・");

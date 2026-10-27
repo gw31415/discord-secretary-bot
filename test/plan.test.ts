@@ -43,6 +43,28 @@ test("drafts are checked against the operation table and body schemas", () => {
   assert.equal(planRisk(steps), "write");
 });
 
+test("an op with its ids written into the path names the same operation", () => {
+  const [patch, del, react, mine] = normalizeSteps(
+    [
+      { op: `PATCH /guilds/${GUILD}/emojis/700`, body: { name: "new_cat" } },
+      { op: "DELETE /guilds/{guild}/stickers/800" },
+      { op: `DELETE /channels/10/messages/500/reactions/${encodeURIComponent("👍")}/3` },
+      { op: "PUT /channels/10/messages/500/reactions/👍/@me" },
+    ],
+    GUILD,
+    "p",
+  );
+  assert.equal(patch!.op, "PATCH /guilds/{guild}/emojis/{emoji}");
+  assert.deepEqual(patch!.pathParams, { guild: GUILD, emoji: "700" });
+  assert.deepEqual(del!.pathParams, { guild: GUILD, sticker: "800" });
+  assert.equal(react!.op, "DELETE /channels/{channel}/messages/{message}/reactions/{emoji}/{user}");
+  assert.deepEqual(react!.pathParams, { channel: "10", message: "500", emoji: "👍", user: "3" });
+  // The literal @me wins over {user}.
+  assert.equal(mine!.op, "PUT /channels/{channel}/messages/{message}/reactions/{emoji}/@me");
+  rejects(() => normalizeSteps([{ op: "PATCH /guilds/{guild}/emojis/700", path: { emoji: "701" }, body: { name: "x_y" } }], GUILD, "p"), /食い違って/);
+  rejects(() => normalizeSteps([{ op: "PATCH /guilds/555/emojis/700", body: { name: "x_y" } }], GUILD, "p"), /別のサーバー/);
+});
+
 test("a field can raise the risk (role permissions are destructive)", () => {
   const steps = normalizeSteps([{ op: "PATCH /guilds/{guild}/roles/{role}", path: { role: MOD_ROLE }, body: { permissions: "0" } }], GUILD, "p");
   assert.equal(planRisk(steps), "destructive");
@@ -1016,6 +1038,21 @@ test("many stickers can be registered at once from a message's images, past the 
   const dialog = replies.find((r) => r.kind === "createMessage")!.body;
   assert.equal(dialog.files.length, 10);
   assert.ok(JSON.stringify(dialog.components).includes("ほかに画像2枚"));
+});
+
+test("plan code can draw the images its steps register; a failed run leaves none", async () => {
+  const { readTools } = await import("../src/agent/tools.ts");
+  const { ImageBox } = await import("../src/agent/attachments.ts");
+  const fakeReader = { guild: { id: GUILD }, scope: { speakerId: "1", channelId: "10" }, get: async () => [] } as never;
+  const box = new ImageBox();
+  const proposed: Array<Array<{ body: { image: string } }>> = [];
+  const tool = readTools(fakeReader, { images: false, attachments: box, propose: async (drafts) => (proposed.push(drafts as never), ({ id: "p", steps: [], risk: "write" }) as never) })
+    .find((t) => t.name === "propose_plan")!;
+  const draw = (name: string) => `(() => { const c = createCanvas(8, 8); c.getContext("2d").fillRect(0, 0, 8, 8); return attachImage(c, "${name}"); })()`;
+  await assert.rejects(tool.execute("t", { code: `${draw("lost")}; throw new Error("x")` }), /x/);
+  await tool.execute("t", { code: `return plan(["a", "b"].map((n) => call("POST /guilds/{guild}/emojis", { body: { name: "cat_" + n, image: ${draw("cat")} } })))` });
+  assert.deepEqual(proposed[0]!.map((d) => d.body.image), ["img2", "img3"]);
+  assert.deepEqual(Object.keys(box.all()), ["img2", "img3"]);
 });
 
 test("registering needs Create Expressions; changing or deleting needs Manage Expressions", () => {

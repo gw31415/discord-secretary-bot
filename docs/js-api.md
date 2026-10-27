@@ -105,7 +105,7 @@ return plan(JSON.parse(r.stdout).steps);
 
 ### 画像
 
-会話の `run_code` とルールのコードで使えます。変更案のコードでは使えません。どの関数も画像のID(`"img1"` など)を返します。作れる枚数は、会話では1回の返答で合わせて100枚まで(返事に付くのは10枚まで)、ルールでは1回の実行で4枚までです。
+会話の `run_code`、変更案のコード、ルールのコードで使えます。変更案のコードで作った画像は、ステップ(投稿の `files`、絵文字の `image`、スタンプの `file`)にIDで入れられます。どの関数も画像のID(`"img1"` など)を返します。作れる枚数は、会話では1回の返答で合わせて100枚まで(返事に付くのは10枚まで)、ルールでは1回の実行で4枚までです。
 
 | 関数 | 働き |
 |---|---|
@@ -178,7 +178,7 @@ const id = attachImage(c, "count");
 | `/guilds/{guild}` | サーバー |
 | `/guilds/{guild}/roles` | ロール |
 | `/guilds/{guild}/members`、`/members/search`、`/members/{user}` | メンバー |
-| `/guilds/{guild}/emojis`、`/stickers` | 絵文字・スタンプ |
+| `/guilds/{guild}/emojis`、`/stickers`(`/{id}` で1件) | 絵文字・スタンプ |
 | `/guilds/{guild}/scheduled-events` | イベント(読める範囲のチャンネルのものと、場所がチャンネルでないもの) |
 | `/guilds/{guild}/channels` | 読める範囲のチャンネル |
 | `/guilds/{guild}/voice-states` | ボイスチャンネルにいる人 `[{ user_id, channel_id }]` |

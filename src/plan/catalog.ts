@@ -630,6 +630,47 @@ const ops: OpSpec[] = [
 
 export const CATALOG: ReadonlyMap<string, OpSpec> = new Map(ops.map((o) => [o.op, o]));
 
+/**
+ * The operation an op names, and the path parameters written into it. Models
+ * often fill the ids into the path ("PATCH /guilds/1/emojis/2"); that names
+ * the same operation as its template, so it is read as one. Where two
+ * templates fit, the one with more literal segments wins (".../@me" over ".../{user}").
+ */
+export function resolveOp(op: string): { spec: OpSpec; path: Params } | null {
+  const exact = CATALOG.get(op);
+  if (exact) return { spec: exact, path: {} };
+  const [method, concrete, ...rest] = op.trim().split(/\s+/);
+  if (!method || !concrete || rest.length > 0) return null;
+  const segments = concrete.replace(/\/+$/, "").split("/");
+  let best: { spec: OpSpec; path: Params; literals: number } | null = null;
+  for (const spec of ops) {
+    const [m, template] = spec.op.split(" ") as [string, string];
+    if (m !== method.toUpperCase()) continue;
+    const parts = template.split("/");
+    if (parts.length !== segments.length) continue;
+    const path: Params = {};
+    let literals = 0;
+    const fits = parts.every((part, i) => {
+      const value = segments[i]!;
+      const name = /^\{(\w+)\}$/.exec(part)?.[1];
+      if (!name) return part === value && ++literals > 0;
+      // A placeholder left as is ("{guild}") is filled in later as usual.
+      if (value !== part) path[name] = safeDecode(value);
+      return value.length > 0;
+    });
+    if (fits && (!best || literals > best.literals)) best = { spec, path, literals };
+  }
+  return best && { spec: best.spec, path: best.path };
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 /** Path parameter names of an operation id, in order. */
 export function pathParamNames(op: string): string[] {
   return [...op.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!);
