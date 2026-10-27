@@ -195,6 +195,14 @@ export const TRIGGERS: Record<string, TriggerSpec> = {
     channel: (d) => d.channel_id ?? d.channel?.id,
     actorId: (d) => d.member?.user?.id ?? d.user?.id,
   },
+  TIMER: {
+    label: "later() で予約した時刻になったとき",
+    intent: 0,
+    synthetic: true,
+    payload:
+      "guild_id, id(予約の番号), data(later に渡した値), set_at・due_at(予約した時刻・予定の時刻。ISO), chain(予約から動いた実行が何回続いたか。最初は1。10回目の TIMER の実行はもう later できません), message { channel_id, id }(COMMAND の実行で予約したときだけ: その返事のメッセージ。返事が実行した人だけに見えるときはありません)。きっかけには指定しません。どのルールでもコードで later(秒, data) を呼ぶと、その時刻にこのイベントでもう一度動きます",
+    channel: (d) => d.message?.channel_id,
+  },
   VOICE_STATE_UPDATE: {
     label: "ボイスチャンネルに入った・出た・移ったとき",
     intent: GatewayIntentBits.GuildVoiceStates,
@@ -230,7 +238,7 @@ export function voiceMuteKey(userId: string): string {
   return `voicemute:${userId}`;
 }
 
-/** Events a person causes on purpose; their rules act as that person unless the rule runs as its owner (run_as). */
+/** Events a person causes on purpose; their rules act as that person unless the rule runs as its owner (run_as). COMMAND too, handled by runCommand. */
 export const ACTOR_EVENTS: ReadonlySet<string> = new Set(["INTERACTION_CREATE", "MESSAGE_REACTION_ADD", "MESSAGE_REACTION_REMOVE"]);
 
 export function isTrigger(name: string): boolean {
@@ -262,6 +270,7 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
   const problems: string[] = [];
   const events = triggerEvents(trigger);
   for (const event of events) if (!isTrigger(event)) problems.push(`きっかけ ${event} には対応していません`);
+  if (events.includes("TIMER")) problems.push("きっかけ TIMER は指定しません。コードで later(秒, data) を呼ぶと、その時刻にルールが TIMER で動きます");
   if (events.length > MAX_TRIGGER_EVENTS) problems.push(`きっかけは${MAX_TRIGGER_EVENTS}種類までです`);
   if (events.includes("SCHEDULE")) problems.push(...scheduleProblems(trigger.schedule, trigger.timezone));
   else if (trigger.schedule !== undefined || trigger.timezone !== undefined) problems.push("きっかけの schedule は SCHEDULE と一緒に使います");
@@ -275,7 +284,7 @@ export function triggerProblems(trigger: RuleTrigger): string[] {
     problems.push(...commandProblems(trigger.command).map((p) => `きっかけ: ${p}`));
   } else if (trigger.command !== undefined) problems.push("きっかけの command は COMMAND と一緒に使います");
   if (trigger.runAs !== undefined) {
-    if (!events.some((e) => ACTOR_EVENTS.has(e))) problems.push("きっかけの run_as は INTERACTION_CREATE・MESSAGE_REACTION_ADD・MESSAGE_REACTION_REMOVE と一緒に使います");
+    if (!events.some((e) => ACTOR_EVENTS.has(e) || e === "COMMAND")) problems.push("きっかけの run_as は COMMAND・INTERACTION_CREATE・MESSAGE_REACTION_ADD・MESSAGE_REACTION_REMOVE と一緒に使います");
     else if (trigger.runAs !== "presser" && trigger.runAs !== "owner") problems.push("きっかけの run_as は \"presser\" か \"owner\" です");
   }
   if (events.includes("INTERACTION_CREATE") && debounce !== undefined) problems.push("きっかけ INTERACTION_CREATE には debounce_seconds を付けられません");

@@ -390,3 +390,26 @@ test("a runner without a judge model still runs the parts that need none; judge(
   await w.service.handleCustomCommand(interaction({ text: "x" }));
   assert.match((w.calls.at(-1)![1] as { content: string }).content, /ok/);
 });
+
+test("a public command's later() gets its reply's message, and run_as owner runs the command as the owner", async () => {
+  const w = world();
+  const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { ...SPEC, visibility: "public" }, runAs: "owner" }, allow: [] });
+  ((w.api as any).interactions).editReply = async (_a: string, _t: string, body: unknown) => (w.calls.push(["edit", body]), { id: "880", channel_id: "10" });
+  const seen: any[] = [];
+  w.setCode((b) => {
+    seen.push(b);
+    if (b.eventName === "TIMER") return { ok: true, value: { steps: [{ op: "PATCH /channels/{channel}/messages/{message}", path: { channel: b.event.message.channel_id, message: b.event.message.id }, body: { components: [] } }] }, logs: [] };
+    b.later(600, { kind: "unbutton" });
+    b.reply("できました");
+    return { ok: true, value: null, logs: [] };
+  });
+  await w.service.handleCustomCommand(interaction({ text: "x" }));
+  assert.equal(seen[0].actor.userId, "1", "run_as owner");
+  assert.equal(w.store.countRuleTimers(rule.id), 1);
+  w.engine.tick([GUILD], 1_000_000 + 660_000);
+  await w.engine.idle();
+  assert.equal(seen[1].eventName, "TIMER");
+  assert.deepEqual(seen[1].event.message, { channel_id: "10", id: "880" });
+  assert.equal(w.runs.at(-1).actorId, "1");
+  assert.deepEqual(w.runs.at(-1).drafts[0].path, { channel: "10", message: "880" });
+});

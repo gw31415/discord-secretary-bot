@@ -210,7 +210,7 @@ export function wasmInput(bindings: SandboxBindings): string {
 
 /**
  * Runs a rule's program once. The output is one JSON document on stdout,
- * { steps?, state?, reply?, response? }, the same for JS and uploaded modules.
+ * { steps?, state?, reply?, response?, later? }, the same for JS and uploaded modules.
  */
 export async function runModule(program: Program, bindings: WasmBindings, limits: SandboxLimits): Promise<SandboxResult> {
   const input = new TextEncoder().encode(wasmInput(bindings));
@@ -234,7 +234,7 @@ export async function runModule(program: Program, bindings: WasmBindings, limits
   }
   if (out === null) return { ok: true, value: null, logs };
   if (typeof out !== "object" || Array.isArray(out)) return { ok: false, error: "標準出力は { \"steps\": [...] } の形のJSONにしてください", logs };
-  const o = out as { steps?: unknown; state?: unknown; reply?: unknown; response?: unknown };
+  const o = out as { steps?: unknown; state?: unknown; reply?: unknown; response?: unknown; later?: unknown };
   if (o.reply !== undefined && o.reply !== null) {
     if (!bindings.reply) return { ok: false, error: "reply はコマンドの実行のときだけ使えます", logs };
     bindings.reply(String(o.reply));
@@ -242,6 +242,15 @@ export async function runModule(program: Program, bindings: WasmBindings, limits
   if (o.response !== undefined && o.response !== null) {
     if (!bindings.respond) return { ok: false, error: "respond は INTERACTION_CREATE の実行のときだけ使えます", logs };
     bindings.respond(o.response);
+  }
+  if (o.later !== undefined && o.later !== null) {
+    if (!bindings.later) return { ok: false, error: "later はルールの実行のときだけ使えます", logs };
+    if (!Array.isArray(o.later)) return { ok: false, error: "later は [{ \"seconds\": 秒, \"data\": 値 }, ...] の形にしてください", logs };
+    try {
+      for (const item of o.later as Array<{ seconds?: unknown; data?: unknown } | null>) bindings.later(Number(item?.seconds), item?.data ?? null);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
+    }
   }
   return {
     ok: true,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Store } from "../db.ts";
+import type { RuleTimer, Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { toChannel } from "../discord/cache.ts";
 import { canView, needsThreadMembership } from "../discord/permissions.ts";
@@ -41,10 +41,24 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // messages' buttons and forms sent from them, and what the code passes to
 // respond() answers whoever pressed. Those and reaction rules act as whoever
 // pressed or reacted, like a command, unless the rule runs as its owner.
+// A run may ask with later(seconds, data) to run the rule again that much
+// later; the request is kept in the database (so it survives restarts) and
+// comes back from tick() as a TIMER event, acting as whoever the run that asked
+// acted as.
 
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
 const MAX_ERROR = 500;
+/** later(): how far ahead, how many per run and per rule, and how much data each may carry. */
+export const LATER_MIN_SECONDS = 60;
+export const LATER_MAX_SECONDS = 7 * 24 * 60 * 60;
+export const MAX_LATER_PER_RUN = 10;
+export const MAX_PENDING_LATER = 100;
+export const MAX_LATER_DATA_JSON = 2000;
+/** TIMER runs that ask for later() again: at most this many in a row, so a rule cannot keep itself going forever. */
+export const MAX_LATER_CHAIN = 10;
+/** A rule's later() runs that came while it was over its per-minute limit wait this much longer. */
+const LATER_RETRY_MS = 60_000;
 /** A debounced rule runs at the latest this many debounce periods after the first event. */
 const MAX_WAIT_PERIODS = 5;
 
@@ -101,6 +115,8 @@ export interface CommandReport {
   /** What the code passed to respond(): its `data` joins the reply (components such as buttons). */
   response?: unknown;
   steps: number;
+  /** The run's later() requests, kept; the reply's message is added to them once it is sent. */
+  timers?: number[];
 }
 
 /** An image a command's code drew, rendered or converted for its reply. */
@@ -311,7 +327,11 @@ export class RuleEngine {
     if (minute <= this.#lastTick) return;
     this.#lastTick = minute;
     for (const guildId of guildIds) {
-      if (this.halted(guildId) || !this.deps.caches.get(guildId)?.guild) continue;
+      if (!this.deps.caches.get(guildId)?.guild) continue;
+      // Stopped rules drop what they asked for meanwhile, rather than act on it late.
+      const timers = this.deps.store.takeDueRuleTimers(guildId, now);
+      if (this.halted(guildId)) continue;
+      for (const timer of timers) this.#fireTimer(timer, now);
       for (const rule of this.deps.store.enabledRules(guildId, "SCHEDULE")) {
         try {
           if (!cronMatches(parseCron(rule.trigger.schedule ?? ""), minute, rule.trigger.timezone ?? DEFAULT_TIMEZONE)) continue;
@@ -324,6 +344,31 @@ export class RuleEngine {
   }
 
   #lastTick = 0;
+
+  /** A later() request's time came: the rule runs on it as whoever the run that asked acted as. */
+  #fireTimer(timer: RuleTimer, now: number): void {
+    const { store } = this.deps;
+    const rule = store.getRule(timer.ruleId);
+    if (!rule?.enabled) return;
+    const event: Data = {
+      guild_id: timer.guildId,
+      id: String(timer.id),
+      data: timer.data,
+      set_at: timer.createdAt,
+      due_at: new Date(timer.dueAt).toISOString(),
+      chain: timer.chain,
+      ...(timer.message ? { message: { channel_id: timer.message.channelId, id: timer.message.messageId } } : {}),
+    };
+    if (this.#allowRun(rule) !== 0) {
+      // Kept for a little later rather than lost.
+      const [id] = store.addRuleTimers(rule.id, rule.guildId, timer.actorId, [{ dueAt: now + LATER_RETRY_MS, data: timer.data, chain: timer.chain }]);
+      if (timer.message) store.setRuleTimersMessage([id!], timer.message.channelId, timer.message.messageId);
+      return;
+    }
+    const actor = timer.actorId && timer.actorId !== rule.ownerId ? timer.actorId : undefined;
+    const reader = actor ? this.deps.makeReader({ guildId: rule.guildId, channelId: timer.message?.channelId ?? "", speakerId: actor, audience: "owner" }) : undefined;
+    this.#enqueue(serialKey(rule, event), () => this.#run(rule.id, rule.version, `TIMER:${timer.id}`, [{ eventName: "TIMER", event }], reader, actor));
+  }
 
   /**
    * Whom a run on this event acts as: undefined for the owner, null when it
@@ -496,7 +541,15 @@ export class RuleEngine {
       return { outcome: "rejected", error, reply: null, images: [], steps: 0 };
     }
     const last = batch.at(-1)!;
-    const result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND", actor);
+    let result = await this.evaluate(rule, last.event, reader, last.eventName, batch, store.getRuleState(rule.id), last.eventName === "COMMAND", actor);
+    if (result.later?.length && store.countRuleTimers(rule.id) + result.later.length > MAX_PENDING_LATER) {
+      result = { kind: "error", error: `later() で待っている予約がルールごとの上限(${MAX_PENDING_LATER}件)を超えます`, logs: result.logs };
+    }
+    // A TIMER run that asks again continues the chain; a chain ends after MAX_LATER_CHAIN runs.
+    const chain = last.eventName === "TIMER" ? Number(last.event.chain) || 1 : 0;
+    if (result.later?.length && chain >= MAX_LATER_CHAIN) {
+      result = { kind: "error", error: `later() の予約から動いた実行が続けて予約できるのは${MAX_LATER_CHAIN}回までです(無限に続かないように)`, logs: result.logs };
+    }
     const reply = result.reply ?? null;
     const images = result.images ?? [];
     // A form must be the interaction's first answer, so it goes before the changes; other answers wait for them.
@@ -505,8 +558,13 @@ export class RuleEngine {
     let answerError: string | null = null;
     if (response !== undefined && (isModalResponse(response) || result.kind === "none")) answerError = await responder!.send(response);
     // Kept only when the run went through, so a failed run is retried from the same state.
+    let timers: number[] = [];
     const keepState = () => {
       if (result.state) store.setRuleState(rule.id, result.state.value);
+      if (result.later?.length) {
+        const at = this.deps.now();
+        timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((t) => ({ dueAt: at + t.seconds * 1000, data: t.data, chain: chain + 1 })));
+      }
     };
     if (result.kind !== "steps") {
       if (result.kind === "none") keepState();
@@ -515,7 +573,7 @@ export class RuleEngine {
       store.finishRuleRun(runId, { outcome, error, logs: result.logs });
       // A command run that failed only because whoever ran it has no judge model is not the rule's fault.
       this.#settle(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error);
-      return { outcome, error, reply, images, steps: 0, ...(result.response !== undefined ? { response: result.response } : {}) };
+      return { outcome, error, reply, images, steps: 0, ...(result.response !== undefined ? { response: result.response } : {}), ...(timers.length ? { timers } : {}) };
     }
     let outcome: RunOutcome;
     let planId: string | null = null;
@@ -550,7 +608,7 @@ export class RuleEngine {
     store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     // A command turned down for what its runner may not do says nothing about the rule, and must not let anyone switch it off.
     this.#settle(rule, outcome === "failed" || (outcome === "rejected" && !command), error);
-    return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length, ...(result.response !== undefined ? { response: result.response } : {}) };
+    return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length, ...(result.response !== undefined ? { response: result.response } : {}), ...(timers.length ? { timers } : {}) };
   }
 
   /**
@@ -558,7 +616,8 @@ export class RuleEngine {
    * other in the server and acts as that person: what the code reads is limited
    * to what everyone in the channel (and they) may see, since the reply goes
    * back there; its steps are checked against the allow list and their
-   * permissions; judge() and rank() use their judge model.
+   * permissions; judge() and rank() use their judge model. A rule that runs as
+   * its owner uses the owner's permissions and model instead, with the same reads.
    */
   async runCommand(rule: Rule, event: Data, userId: string): Promise<CommandReport> {
     const skipped = (error: string): CommandReport => ({ outcome: "skipped", error, reply: null, images: [], steps: 0 });
@@ -568,11 +627,12 @@ export class RuleEngine {
     const channelId = typeof event.channel_id === "string" ? event.channel_id : "";
     if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event, userId)) return skipped("このチャンネルを見られる人として確認できないため、ここでは動きません");
     if (this.#allowRun(rule) !== 0) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
-    const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: userId, audience: "channel" });
+    const actor = rule.trigger.runAs === "owner" ? rule.ownerId : userId;
+    const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: actor, audience: "channel" });
     return new Promise((resolve) => {
       this.#enqueue(serialKey(rule, event), async () => {
         try {
-          resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader, userId)) ?? skipped("このコマンドのルールは止まっています"));
+          resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader, actor)) ?? skipped("このコマンドのルールは止まっています"));
         } catch (e) {
           resolve(skipped(e instanceof Error ? e.message : String(e)));
           throw e;
@@ -615,6 +675,7 @@ export class RuleEngine {
     let replied: string | null = null;
     let response: unknown;
     const images: CommandImage[] = [];
+    const later: Later[] = [];
     try {
       const source = reader ?? this.ownerReader(rule.guildId, actorId);
       // Images for a command's reply or the run's posts (`files: ["img1"]`):
@@ -651,6 +712,7 @@ export class RuleEngine {
           // A command is an interaction too: its respond() adds to the reply.
           ...(eventName === "INTERACTION_CREATE" || command ? { respond: (r: unknown) => void (response = r) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
+          later: (seconds: number, data: unknown) => void later.push(checkLater(seconds, data, later.length)),
           ...(decider ? { decide: decider } : {}),
           // The modules the code names are its author's, as for a rule's own wasm; they run with this run's bindings.
           ...(this.deps.wasm ? { wasm: (ref: string) => this.deps.wasm!.compiled(this.deps.wasm!.resolve(rule.ownerId, this.deps.caches.get(rule.guildId)?.guild, ref).sha256) } : {}),
@@ -682,7 +744,13 @@ export class RuleEngine {
     if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {
       return { kind: "error", error: `setState の値はJSONで${MAX_STATE_JSON}文字までです`, logs: result.logs };
     }
-    const saved = { ...(result.state ? { state: result.state } : {}), ...(replied !== null ? { reply: replied } : {}), ...(response !== undefined ? { response } : {}), ...(images.length ? { images } : {}) };
+    const saved = {
+      ...(result.state ? { state: result.state } : {}),
+      ...(replied !== null ? { reply: replied } : {}),
+      ...(response !== undefined ? { response } : {}),
+      ...(images.length ? { images } : {}),
+      ...(later.length ? { later } : {}),
+    };
     const value = result.value as { steps?: unknown } | null | undefined;
     if (value === undefined || value === null) return { kind: "none", logs: result.logs, ...saved };
     if (!Array.isArray(value.steps)) return { kind: "error", error: "コードは plan([...]) を return してください", logs: result.logs };
@@ -750,14 +818,31 @@ function defaultClearTimer(handle: unknown): void {
   if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
+/** One later() request: run again in `seconds` with `data`. */
+export interface Later {
+  seconds: number;
+  data: unknown;
+}
+
+/** later()'s arguments, checked as the code calls it; `asked` is how many the run asked for before. */
+function checkLater(seconds: number, data: unknown, asked: number): Later {
+  if (asked >= MAX_LATER_PER_RUN) throw new Error(`later() は1回の実行で${MAX_LATER_PER_RUN}回までです`);
+  if (!Number.isFinite(seconds) || seconds < LATER_MIN_SECONDS || seconds > LATER_MAX_SECONDS) {
+    throw new Error(`later() の秒数は${LATER_MIN_SECONDS}〜${LATER_MAX_SECONDS}(7日)にしてください`);
+  }
+  const json = JSON.stringify(data ?? null);
+  if (json.length > MAX_LATER_DATA_JSON) throw new Error(`later() の data はJSONで${MAX_LATER_DATA_JSON}文字までです`);
+  return { seconds: Math.round(seconds), data: JSON.parse(json) as unknown };
+}
+
 /**
- * `state` is set when the code called setState: what to keep if the run goes through. `reply` is what a command's
- * code passed to reply(), `response` what an INTERACTION_CREATE run's code passed to respond().
+ * `state` is set when the code called setState: what to keep if the run goes through, as are the `later` requests.
+ * `reply` is what a command's code passed to reply(), `response` what an INTERACTION_CREATE run's code passed to respond().
  */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[] }
-  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[] }
-  | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; response?: undefined; images?: undefined };
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: Later[] }
+  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: Later[] }
+  | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; response?: undefined; images?: undefined; later?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {
