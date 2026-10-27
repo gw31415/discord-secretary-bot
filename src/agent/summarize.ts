@@ -71,7 +71,7 @@ const SOURCE_PROMPT = (language: string) =>
   ].join("\n");
 
 const RULE_NOTE = (trigger: string) =>
-  `このコードはイベントルールで、${trigger} が起きるたびに動きます。event は発火したイベントのペイロード、eventName はどのきっかけで動いたか、params はルールと一緒に登録された値(チャンネルのIDなど)、state は前回の実行が setState で残した値です。later(秒, data) は、その秒数のあとにこのルールを eventName "TIMER"(event.data に data)でもう一度動かす予約です。どんなイベントのときに何を変更するか(何もしないのはどんなときか)を書いてください。`;
+  `このコードはイベントルールで、${trigger} が起きるたびに動きます。event は発火したイベントのペイロード、eventName はどのきっかけで動いたか、params はルールと一緒に登録された値(チャンネルのIDなど)、state は前回の実行が setState で残した値です。later(秒) は、その秒数のあとにこのルールを eventName "TIMER" でもう一度動かす予約です。どんなイベントのときに何を変更するか(何もしないのはどんなときか)を書いてください。`;
 
 export async function summarizeCode(input: SummarizeInput): Promise<string | null> {
   const base = input.language ? SOURCE_PROMPT(input.language) : SYSTEM_PROMPT;

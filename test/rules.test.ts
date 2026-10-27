@@ -521,7 +521,7 @@ test("later() runs the rule again as TIMER at its time, kept only from runs that
   const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
   const rule = w.admin.save(GUILD, "1", w.definition);
   const start = w.now.t;
-  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later(600, { message: "700" }), { ok: true, value: null, logs: [] })));
+  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later(600), { ok: true, value: null, logs: [] })));
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "720"));
   await w.engine.idle();
   assert.equal(w.store.countRuleTimers(rule.id), 1);
@@ -533,12 +533,12 @@ test("later() runs the rule again as TIMER at its time, kept only from runs that
   await w.engine.idle();
   assert.equal(w.seen.length, 2);
   assert.equal(w.seen[1].eventName, "TIMER");
-  assert.deepEqual(w.seen[1].event.data, { message: "700" });
+  assert.equal(w.seen[1].event.due_at, new Date(start + 600_000).toISOString());
   assert.equal(w.seen[1].event.chain, 1);
   assert.equal(w.seen[1].actor.userId, "1");
   assert.equal(w.store.countRuleTimers(rule.id), 0);
   // A failed run keeps no request.
-  w.setCode(() => (w.seen.at(-1).later(600, null), { ok: false, error: "boom", logs: [] }));
+  w.setCode(() => (w.seen.at(-1).later(600), { ok: false, error: "boom", logs: [] }));
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "721"));
   await w.engine.idle();
   assert.equal(w.store.countRuleTimers(rule.id), 0);
@@ -552,14 +552,14 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
   const rule = w.admin.save(GUILD, "1", w.definition);
   // Failures in a row would switch the rule off; each check starts it again.
   const errors = () => (w.store.setRuleEnabled(rule.id, true, null), w.store.recentRuleRuns(rule.id, 1)[0]!.error ?? "");
-  for (const [seconds, data] of [[30, null], [8 * 24 * 60 * 60, null], [600, "x".repeat(3000)]] as const) {
-    w.setCode(() => (w.seen.at(-1).later(seconds, data), { ok: true, value: null, logs: [] }));
+  for (const seconds of [30, 8 * 24 * 60 * 60, Number.NaN]) {
+    w.setCode(() => (w.seen.at(-1).later(seconds), { ok: true, value: null, logs: [] }));
     w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", `73${seconds}`));
     await w.engine.idle();
     assert.match(errors(), /later/);
   }
   w.setCode(() => {
-    for (let i = 0; i < 11; i++) w.seen.at(-1).later(600, i);
+    for (let i = 0; i < 11; i++) w.seen.at(-1).later(600);
     return { ok: true, value: null, logs: [] };
   });
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "740"));
@@ -568,7 +568,7 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
   assert.equal(w.store.countRuleTimers(rule.id), 0);
 
   // Each TIMER run asks again: the chain stops at its tenth run.
-  w.setCode(() => (w.seen.at(-1).later(60, null), { ok: true, value: null, logs: [] }));
+  w.setCode(() => (w.seen.at(-1).later(60), { ok: true, value: null, logs: [] }));
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "741"));
   await w.engine.idle();
   let t = w.now.t;
@@ -586,9 +586,9 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
   assert.equal(w.store.countRuleTimers(rule.id), 0);
 
   // At most 100 waiting per rule.
-  w.store.addRuleTimers(rule.id, GUILD, null, Array.from({ length: 95 }, () => ({ dueAt: t + 3_600_000, data: null, chain: 1 })));
+  w.store.addRuleTimers(rule.id, GUILD, null, Array.from({ length: 95 }, () => ({ dueAt: t + 3_600_000, chain: 1 })));
   w.setCode(() => {
-    for (let i = 0; i < 6; i++) w.seen.at(-1).later(600, i);
+    for (let i = 0; i < 6; i++) w.seen.at(-1).later(600);
     return { ok: true, value: null, logs: [] };
   });
   w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "742"));
@@ -603,13 +603,13 @@ test("later() has limits, so a rule cannot keep itself going forever", async () 
 test("a TIMER run acts as whoever the run that asked acted as, and a stopped rule's requests are dropped", async () => {
   const w = world({ t: Date.parse("2026-10-27T10:00:05Z") });
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_REACTION_ADD" } });
-  w.store.addRuleTimers(rule.id, GUILD, "3", [{ dueAt: w.now.t, data: null, chain: 1 }]);
+  w.store.addRuleTimers(rule.id, GUILD, "3", [{ dueAt: w.now.t, chain: 1 }]);
   w.engine.tick([GUILD], w.now.t + 60_000);
   await w.engine.idle();
   assert.equal(w.seen[0].eventName, "TIMER");
   assert.equal(w.seen[0].actor.userId, "3");
   assert.equal(w.runs[0].actorId, "3");
-  w.store.addRuleTimers(rule.id, GUILD, null, [{ dueAt: w.now.t, data: null, chain: 1 }]);
+  w.store.addRuleTimers(rule.id, GUILD, null, [{ dueAt: w.now.t, chain: 1 }]);
   w.store.setRuleEnabled(rule.id, false, "test");
   w.engine.tick([GUILD], w.now.t + 120_000);
   await w.engine.idle();

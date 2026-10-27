@@ -41,7 +41,7 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // messages' buttons and forms sent from them, and what the code passes to
 // respond() answers whoever pressed. Those and reaction rules act as whoever
 // pressed or reacted, like a command, unless the rule runs as its owner.
-// A run may ask with later(seconds, data) to run the rule again that much
+// A run may ask with later(seconds) to run the rule again that much
 // later; the request is kept in the database (so it survives restarts) and
 // comes back from tick() as a TIMER event, acting as whoever the run that asked
 // acted as.
@@ -49,12 +49,11 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 /** How long after the bot changes something an event about it counts as the bot's own. */
 export const RECENT_WRITE_MS = 15_000;
 const MAX_ERROR = 500;
-/** later(): how far ahead, how many per run and per rule, and how much data each may carry. */
+/** later(): how far ahead, and how many per run and per rule. What a later run is for, the code keeps in its state. */
 export const LATER_MIN_SECONDS = 60;
 export const LATER_MAX_SECONDS = 7 * 24 * 60 * 60;
 export const MAX_LATER_PER_RUN = 10;
 export const MAX_PENDING_LATER = 100;
-export const MAX_LATER_DATA_JSON = 2000;
 /** TIMER runs that ask for later() again: at most this many in a row, so a rule cannot keep itself going forever. */
 export const MAX_LATER_CHAIN = 10;
 /** A rule's later() runs that came while it was over its per-minute limit wait this much longer. */
@@ -352,16 +351,13 @@ export class RuleEngine {
     if (!rule?.enabled) return;
     const event: Data = {
       guild_id: timer.guildId,
-      id: String(timer.id),
-      data: timer.data,
-      set_at: timer.createdAt,
       due_at: new Date(timer.dueAt).toISOString(),
       chain: timer.chain,
       ...(timer.message ? { message: { channel_id: timer.message.channelId, id: timer.message.messageId } } : {}),
     };
     if (this.#allowRun(rule) !== 0) {
       // Kept for a little later rather than lost.
-      const [id] = store.addRuleTimers(rule.id, rule.guildId, timer.actorId, [{ dueAt: now + LATER_RETRY_MS, data: timer.data, chain: timer.chain }]);
+      const [id] = store.addRuleTimers(rule.id, rule.guildId, timer.actorId, [{ dueAt: now + LATER_RETRY_MS, chain: timer.chain }]);
       if (timer.message) store.setRuleTimersMessage([id!], timer.message.channelId, timer.message.messageId);
       return;
     }
@@ -563,7 +559,7 @@ export class RuleEngine {
       if (result.state) store.setRuleState(rule.id, result.state.value);
       if (result.later?.length) {
         const at = this.deps.now();
-        timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((t) => ({ dueAt: at + t.seconds * 1000, data: t.data, chain: chain + 1 })));
+        timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((seconds) => ({ dueAt: at + seconds * 1000, chain: chain + 1 })));
       }
     };
     if (result.kind !== "steps") {
@@ -675,7 +671,7 @@ export class RuleEngine {
     let replied: string | null = null;
     let response: unknown;
     const images: CommandImage[] = [];
-    const later: Later[] = [];
+    const later: number[] = [];
     try {
       const source = reader ?? this.ownerReader(rule.guildId, actorId);
       // Images for a command's reply or the run's posts (`files: ["img1"]`):
@@ -712,7 +708,7 @@ export class RuleEngine {
           // A command is an interaction too: its respond() adds to the reply.
           ...(eventName === "INTERACTION_CREATE" || command ? { respond: (r: unknown) => void (response = r) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
-          later: (seconds: number, data: unknown) => void later.push(checkLater(seconds, data, later.length)),
+          later: (seconds: number) => void later.push(checkLater(seconds, later.length)),
           ...(decider ? { decide: decider } : {}),
           // The modules the code names are its author's, as for a rule's own wasm; they run with this run's bindings.
           ...(this.deps.wasm ? { wasm: (ref: string) => this.deps.wasm!.compiled(this.deps.wasm!.resolve(rule.ownerId, this.deps.caches.get(rule.guildId)?.guild, ref).sha256) } : {}),
@@ -818,21 +814,13 @@ function defaultClearTimer(handle: unknown): void {
   if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
-/** One later() request: run again in `seconds` with `data`. */
-export interface Later {
-  seconds: number;
-  data: unknown;
-}
-
-/** later()'s arguments, checked as the code calls it; `asked` is how many the run asked for before. */
-function checkLater(seconds: number, data: unknown, asked: number): Later {
+/** later()'s seconds, checked as the code calls it; `asked` is how many the run asked for before. */
+function checkLater(seconds: number, asked: number): number {
   if (asked >= MAX_LATER_PER_RUN) throw new Error(`later() は1回の実行で${MAX_LATER_PER_RUN}回までです`);
   if (!Number.isFinite(seconds) || seconds < LATER_MIN_SECONDS || seconds > LATER_MAX_SECONDS) {
     throw new Error(`later() の秒数は${LATER_MIN_SECONDS}〜${LATER_MAX_SECONDS}(7日)にしてください`);
   }
-  const json = JSON.stringify(data ?? null);
-  if (json.length > MAX_LATER_DATA_JSON) throw new Error(`later() の data はJSONで${MAX_LATER_DATA_JSON}文字までです`);
-  return { seconds: Math.round(seconds), data: JSON.parse(json) as unknown };
+  return Math.round(seconds);
 }
 
 /**
@@ -840,8 +828,8 @@ function checkLater(seconds: number, data: unknown, asked: number): Later {
  * `reply` is what a command's code passed to reply(), `response` what an INTERACTION_CREATE run's code passed to respond().
  */
 export type Evaluation =
-  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: Later[] }
-  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: Later[] }
+  | { kind: "steps"; drafts: StepDraft[]; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: number[] }
+  | { kind: "none"; logs: string[]; state?: { value: unknown }; reply?: string; response?: unknown; images?: CommandImage[]; later?: number[] }
   | { kind: "error"; error: string; logs: string[]; state?: undefined; reply?: string; response?: undefined; images?: undefined; later?: undefined };
 
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */

@@ -246,7 +246,6 @@ const RULE_TIMERS = `
     guild_id TEXT NOT NULL,
     actor_id TEXT,
     due_at INTEGER NOT NULL,
-    data_json TEXT NOT NULL,
     chain INTEGER NOT NULL,
     channel_id TEXT,
     message_id TEXT,
@@ -264,7 +263,6 @@ export interface RuleTimer {
   /** Whom the run that asked acted as; null for the rule's owner. */
   actorId: string | null;
   dueAt: number;
-  data: unknown;
   /** How many later() requests in a row led here, this one included: 1 unless a TIMER run asked for it. */
   chain: number;
   /** For a command's run, the message its reply became. */
@@ -735,10 +733,10 @@ export class Store {
   // --- Rule timers (later()) ------------------------------------------------
 
   /** Keeps a run's later() requests; `actorId` null means the rule's owner. Returns their ids. */
-  addRuleTimers(ruleId: string, guildId: string, actorId: string | null, timers: { dueAt: number; data: unknown; chain: number }[]): number[] {
-    const insert = this.db.prepare("INSERT INTO rule_timers (rule_id, guild_id, actor_id, due_at, data_json, chain, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  addRuleTimers(ruleId: string, guildId: string, actorId: string | null, timers: { dueAt: number; chain: number }[]): number[] {
+    const insert = this.db.prepare("INSERT INTO rule_timers (rule_id, guild_id, actor_id, due_at, chain, created_at) VALUES (?, ?, ?, ?, ?, ?)");
     const at = new Date().toISOString();
-    return this.db.transaction(() => timers.map((t) => Number(insert.run(ruleId, guildId, actorId, t.dueAt, JSON.stringify(t.data ?? null), t.chain, at).lastInsertRowid)))();
+    return this.db.transaction(() => timers.map((t) => Number(insert.run(ruleId, guildId, actorId, t.dueAt, t.chain, at).lastInsertRowid)))();
   }
 
   /** The message a command's reply became, for the TIMER runs its run asked for. */
@@ -756,7 +754,7 @@ export class Store {
     return this.db.transaction(() => {
       const rows = this.db
         .prepare("SELECT * FROM rule_timers WHERE guild_id = ? AND due_at <= ? ORDER BY due_at, id LIMIT ?")
-        .all(guildId, now, limit) as Array<{ id: number; rule_id: string; guild_id: string; actor_id: string | null; due_at: number; data_json: string; chain: number; channel_id: string | null; message_id: string | null; created_at: string }>;
+        .all(guildId, now, limit) as Array<{ id: number; rule_id: string; guild_id: string; actor_id: string | null; due_at: number; chain: number; channel_id: string | null; message_id: string | null; created_at: string }>;
       const remove = this.db.prepare("DELETE FROM rule_timers WHERE id = ?");
       for (const row of rows) remove.run(row.id);
       return rows.map((r) => ({
@@ -765,7 +763,6 @@ export class Store {
         guildId: r.guild_id,
         actorId: r.actor_id,
         dueAt: r.due_at,
-        data: JSON.parse(r.data_json) as unknown,
         chain: r.chain,
         message: r.channel_id && r.message_id ? { channelId: r.channel_id, messageId: r.message_id } : null,
         createdAt: r.created_at,

@@ -37,10 +37,10 @@ export interface SandboxBindings {
   /** Enables respond(response) for an INTERACTION_CREATE run: the interaction response, as Discord takes it, goes to whoever pressed. */
   respond?: (response: unknown) => void;
   /**
-   * Enables later(seconds, data) for a rule's run: runs the rule again that much later, as a TIMER
-   * event carrying `data`. Throws when the request is out of bounds.
+   * Enables later(seconds) for a rule's run: runs the rule again that much later, as a TIMER
+   * event. Throws when the request is out of bounds.
    */
-  later?: (seconds: number, data: unknown) => void;
+  later?: (seconds: number) => void;
   /** Enables judge()/rank() with the person's judge model (or language model). */
   decide?: Decide;
   /** Enables runWasm(): a kept module the person may run (their own by name, or one from someone in the server by sha256). */
@@ -103,7 +103,7 @@ JSON.stringify({ value: (function () {\n${code}\n})() })`;
  * A rule's program. It writes what every rule's module writes on stdout,
  * { steps?, state?, reply?, response?, later? }: steps from `return plan([...])`, state from
  * setState (a JSON copy, so later changes to the object are not kept), reply
- * from reply(text), response from respond(response), later from each later(seconds, data).
+ * from reply(text), response from respond(response), later from each later(seconds).
  */
 export function ruleProgram(code: string): string {
   return `${COMMON}
@@ -111,7 +111,7 @@ function plan(steps) { return { steps: steps || [] }; }
 var __state; function setState(v) { __state = { value: v === undefined ? null : JSON.parse(JSON.stringify(v)) }; }
 var __reply = null; function reply(text) { __reply = (__reply === null ? "" : __reply + "\\n") + String(text); }
 var __response; function respond(r) { __response = { value: r === undefined ? null : JSON.parse(JSON.stringify(r)) }; }
-var __later = []; function later(seconds, data) { __later.push({ seconds: Number(seconds), data: data === undefined ? null : JSON.parse(JSON.stringify(data)) }); }
+var __later = []; function later(seconds) { __later.push(Number(seconds)); }
 var __r = (function () {\n${code}\n})();
 if (__r !== undefined && __r !== null && (typeof __r !== "object" || Array.isArray(__r) || !Array.isArray(__r.steps))) throw new TypeError("コードは plan([...]) を return してください");
 var __out = {};

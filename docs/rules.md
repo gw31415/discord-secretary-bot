@@ -63,7 +63,7 @@ Botが変更案に書く項目です。会話で頼めばBotが決めますが�
 | `BOT_READY` | Botが起動・再接続してサーバーの情報を受け取った | guild_id |
 | `COMMAND` | ルールのスラッシュコマンドが実行された | guild_id, channel_id, command, user { id, username, global_name }, member { roles, nick }, options |
 | `INTERACTION_CREATE` | Botのメッセージのボタン・セレクトが押された、フォームが送信された | Discord のインタラクションのまま(`token` を除く): id, type(3 ボタン・セレクト、5 フォーム送信), guild_id, channel_id, member, message, data { custom_id, component_type, values, components } |
-| `TIMER` | コードが `later()` で予約した時刻になった([あとで動かす](#あとで動かすlater))。きっかけには書かない | guild_id, id, data, set_at, due_at, chain, message |
+| `TIMER` | コードが `later()` で予約した時刻になった([あとで動かす](#あとで動かすlater))。きっかけには書かない | guild_id, due_at, chain, message |
 
 `BOT_READY` は、Botが止まっていた間の変化をまとめて反映するのに使います。`VOICE_STATE_UPDATE` の `before_channel_id` はBotが足した項目です。
 
@@ -206,9 +206,10 @@ Bot由来かどうかは、Botが直前15秒に書いた対象かで決めます
 
 ## あとで動かす(later)
 
-コードが `later(秒, data)` を呼ぶと、その秒数のあとに同じルールがもう一度動きます(Wasm は出力の `later`、[Wasm](wasm.md#出力))。「返事のボタンを10分後に外す」「申請を24時間後に締め切る」のように使います。
+コードが `later(秒)` を呼ぶと、その秒数のあとに同じルールがもう一度動きます(Wasm は出力の `later`、[Wasm](wasm.md#出力))。「返事のボタンを10分後に外す」「申請を24時間後に締め切る」のように使います。
 
-- そのときの `eventName` は `"TIMER"`、`event` は `{ guild_id, id(予約の番号), data(later に渡した値), set_at(予約した時刻), due_at(予定の時刻), chain, message? }` です。きっかけに `TIMER` は書きません。どのきっかけのルールでも使えるので、コードは `eventName` を見て分けます。
+- そのときの `eventName` は `"TIMER"`、`event` は `{ guild_id, due_at(予定の時刻), chain, message? }` です。きっかけに `TIMER` は書きません。どのきっかけのルールでも使えるので、コードは `eventName` を見て分けます。
+- 何のために起きたか(どのメッセージのボタンを外すか、どの申請を締め切るかなど)は、予約するときにコードが自分で [state](#state) に書いておきます。起きたら state を見て、時刻が来たものを処理し、済んだものを消します。
 - `COMMAND` の実行で予約し、返事が全員に見えるときは、`event.message` `{ channel_id, id }` がその返事のメッセージです。本人だけに見える返事は Discord の API で書き換えられないので入りません。
 - 予約した実行と同じ人として動きます。コマンドは実行した人、ボタン・リアクションは押した人・付けた人、時刻やほかのイベントと `run_as: "owner"` のルールは作成者です。予約したあと、ほかの人の権限で動くことはありません。
 - 予約を保存するのは、実行が通ったとき(変更なし・実行済み)だけです。予約はデータベースに残るので、Botが再起動しても消えません。
@@ -223,7 +224,6 @@ Bot由来かどうかは、Botが直前15秒に書いた対象かで決めます
 | 秒数 | 60〜604,800(7日) |
 | 1回の実行で予約できる数 | 10件 |
 | ルールごとの待っている予約 | 100件 |
-| `data` | JSON で2,000文字 |
 | 予約から動いた実行が、続けてまた予約できる回数 | 10回。`event.chain` は続いた回数(最初は1)で、`chain` が10の実行で `later()` を呼ぶとその回は失敗します |
 
 決まった間隔でずっと繰り返す処理は、`later()` ではなく [SCHEDULE](#時刻schedule) で書きます。

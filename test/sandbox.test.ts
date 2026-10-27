@@ -85,10 +85,10 @@ test("an interaction rule's code answers with respond(); other runs cannot", asy
 test("a rule's later() calls reach the host in order, and a module's later output does too", async () => {
   const { runRuleCode } = await import("../src/sandbox.ts");
   const asked: unknown[] = [];
-  const bindings = { guildId: "1", actor: { kind: "user" as const, userId: "2" }, get: async () => null, later: (seconds: number, data: unknown) => void asked.push([seconds, data]) };
-  const ok = await runRuleCode("later(600, { a: 1 }); later('120'); return null;", bindings);
+  const bindings = { guildId: "1", actor: { kind: "user" as const, userId: "2" }, get: async () => null, later: (seconds: number) => void asked.push(seconds) };
+  const ok = await runRuleCode("later(600); later('120'); return null;", bindings);
   assert.equal(ok.ok, true);
-  assert.deepEqual(asked, [[600, { a: 1 }], [120, null]]);
+  assert.deepEqual(asked, [600, 120]);
   const refused = await runRuleCode("later(1); return null;", { ...bindings, later: () => { throw new Error("later() の秒数は60〜"); } });
   assert.equal(refused.ok, false);
   assert.match(refused.error ?? "", /秒数/);

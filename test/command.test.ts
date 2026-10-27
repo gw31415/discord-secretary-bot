@@ -399,7 +399,7 @@ test("a public command's later() gets its reply's message, and run_as owner runs
   w.setCode((b) => {
     seen.push(b);
     if (b.eventName === "TIMER") return { ok: true, value: { steps: [{ op: "PATCH /channels/{channel}/messages/{message}", path: { channel: b.event.message.channel_id, message: b.event.message.id }, body: { components: [] } }] }, logs: [] };
-    b.later(600, { kind: "unbutton" });
+    b.later(600);
     b.reply("できました");
     return { ok: true, value: null, logs: [] };
   });
