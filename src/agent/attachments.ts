@@ -1,5 +1,5 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { MAX_IMAGES_PER_REPLY } from "../plan/types.ts";
+import { MAX_IMAGES_PER_BOX, MAX_IMAGES_PER_REPLY } from "../plan/types.ts";
 import type { Attachment } from "../plan/types.ts";
 
 // The place where tools put images for the bot to post. A tool that makes or
@@ -28,9 +28,13 @@ export class ImageBox {
   #taken = new Set<string>();
   #next = 1;
 
-  /** Throws once the reply has its fill, so a tool can stop before making an image. */
+  /**
+   * Throws once the reply has made as many images as it may, so a tool can stop
+   * before making one. Images a change uses (new emojis, stickers) count here
+   * but not toward what the reply itself carries.
+   */
   checkRoom(): void {
-    if (this.forReply().length >= MAX_IMAGES_PER_REPLY) throw new Error(`画像は1回の返答で${MAX_IMAGES_PER_REPLY}枚までです`);
+    if (this.#items.size >= MAX_IMAGES_PER_BOX) throw new Error(`画像は1回の返答で${MAX_IMAGES_PER_BOX}枚までです`);
   }
 
   add(file: ImageFile): string {
@@ -38,8 +42,9 @@ export class ImageBox {
     return this.#put(file);
   }
 
-  /** An image only a proposed change uses (a new emoji or sticker): it never goes out with the reply, so the reply's limit does not apply. */
+  /** An image only a proposed change uses (a new emoji or sticker): it never goes out with the reply. */
   addForPlan(file: ImageFile): string {
+    this.checkRoom();
     const id = this.#put(file);
     this.#taken.add(id);
     return id;
@@ -48,7 +53,6 @@ export class ImageBox {
   #put(file: ImageFile): string {
     if (!mimeOf(file.name)) throw new Error("PNG・JPEG・GIF・WebP・SVG の画像だけ添付できます");
     if (file.data.length > MAX_IMAGE_BYTES) throw new Error("画像は8MBまでです");
-    if (this.#next > 999) throw new Error("この返答ではもう画像を作れません");
     const id = `img${this.#next++}`;
     const dot = file.name.lastIndexOf(".");
     const base = file.name.slice(0, dot).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || id;
@@ -79,9 +83,9 @@ export class ImageBox {
     for (const id of ids) this.#taken.add(id);
   }
 
-  /** Images still to go out with the reply. */
+  /** Images still to go out with the reply: the first ones a message can carry. */
   forReply(): Attachment[] {
-    return [...this.#items].filter(([id]) => !this.#taken.has(id)).map(([, a]) => a);
+    return [...this.#items].filter(([id]) => !this.#taken.has(id)).map(([, a]) => a).slice(0, MAX_IMAGES_PER_REPLY);
   }
 }
 
@@ -91,7 +95,7 @@ export function attachedResult(box: ImageBox, file: ImageFile, seesImages: boole
   const name = box.all()[id]!.name;
   return {
     content: [
-      { type: "text", text: `画像 ${id}(${name})を用意しました。返答に添付されます。propose_plan の投稿に付けるときは body の files に "${id}" を入れます。` },
+      { type: "text", text: `画像 ${id}(${name})を用意しました。変更案に使わなければ返答に添付されます。propose_plan では投稿の body.files、絵文字の image、スタンプの file に "${id}" を入れます。` },
       // An SVG is only shown once converted; tools that hand one over say so in their own words.
       ...(seesImages && mimeOf(name) !== "image/svg+xml" ? [{ type: "image" as const, data: file.data.toString("base64"), mimeType: mimeOf(name)! }] : []),
     ],

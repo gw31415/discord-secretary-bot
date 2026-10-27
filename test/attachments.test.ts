@@ -12,9 +12,20 @@ test("the box numbers images, cleans their names and refuses what Discord cannot
   assert.throws(() => box.add({ data: PNG, name: "page.bmp" }), /PNG・JPEG・GIF・WebP・SVG/);
   box.add({ data: PNG, name: "c.jpg" });
   box.add({ data: PNG, name: "d.gif" });
-  assert.throws(() => box.add({ data: PNG, name: "e.png" }), /4枚まで/);
   box.take(["img1", "img3"]);
   assert.deepEqual(box.forReply().map((a) => a.name), ["1-img2.png", "d.gif"]);
+});
+
+test("a reply may make many images for a change, and carries at most ten itself", () => {
+  const box = new ImageBox();
+  // Well past the ten a message carries: images for new emojis or stickers are not the reply's.
+  for (let i = 0; i < 30; i++) box.add({ data: PNG, name: `s${i}.png` });
+  box.take(Array.from({ length: 25 }, (_, i) => `img${i + 1}`));
+  assert.deepEqual(box.forReply().map((a) => a.name), ["s25.png", "s26.png", "s27.png", "s28.png", "s29.png"]);
+  for (let i = 30; i < 40; i++) box.add({ data: PNG, name: `s${i}.png` });
+  assert.equal(box.forReply().length, 10);
+  for (let i = 40; i < 100; i++) box.addForPlan({ data: PNG, name: `s${i}.png` });
+  assert.throws(() => box.add({ data: PNG, name: "x.png" }), /100枚まで/);
 });
 
 test("an image tool's result names the id, and shows the image only to a model that can see", () => {
