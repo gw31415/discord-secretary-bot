@@ -411,6 +411,7 @@ test("a public command's later() gets its reply's message, and run_as owner runs
   assert.equal(seen[1].eventName, "TIMER");
   assert.deepEqual(seen[1].event.message, { channel_id: "10", id: "880" });
   assert.equal(w.runs.at(-1).actorId, "1");
+  assert.deepEqual([w.readers.at(-1).speakerId, w.readers.at(-1).audience, w.readers.at(-1).channelId], ["1", "channel", "10"]);
   assert.deepEqual(w.runs.at(-1).drafts[0].path, { channel: "10", message: "880" });
   assert.deepEqual(w.runs.at(-1).rule.ownReply, { channelId: "10", messageId: "880" });
 });
@@ -433,6 +434,8 @@ test("a public command's later() edits its reply as whoever ran it, so their jud
   w.engine.runTimers([GUILD], 1_000_000 + 660_000);
   await w.engine.idle();
   assert.equal(seen[1].actor.userId, "3");
+  // The reply is read from its channel, as the command was (a private thread is not readable otherwise).
+  assert.deepEqual([w.readers.at(-1).speakerId, w.readers.at(-1).audience, w.readers.at(-1).channelId], ["3", "channel", "10"]);
   assert.equal(w.runs.at(-1).actorId, "3");
   assert.deepEqual(w.runs.at(-1).rule.ownReply, { channelId: "10", messageId: "880" });
 });
