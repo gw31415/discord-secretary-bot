@@ -294,18 +294,19 @@ test("one rule can fire on several triggers, and its code sees which one", async
 });
 
 test("cron schedules are read in their time zone", async () => {
-  const { cronMatches, parseCron, scheduleProblems } = await import("../src/rules/schedule.ts");
+  const { parseCron, scheduleProblems } = await import("../src/rules/schedule.ts");
   // 2026-10-22T19:00Z is 04:00 on Friday the 23rd in Tokyo.
-  const at = Date.parse("2026-10-22T19:00:30Z");
-  assert.ok(cronMatches(parseCron("0 4 * * *"), at, "Asia/Tokyo"));
-  assert.ok(!cronMatches(parseCron("0 4 * * *"), at, "UTC"));
-  assert.ok(cronMatches(parseCron("*/10 * * * 5"), at, "Asia/Tokyo"));
-  assert.ok(cronMatches(parseCron("0 4 * * 7,1-4"), at, "Asia/Tokyo") === false);
-  // Day and weekday both given: either matches.
-  assert.ok(cronMatches(parseCron("0 4 1 * 5"), at, "Asia/Tokyo"));
-  assert.ok(cronMatches(parseCron("@daily"), Date.parse("2026-10-22T15:00:00Z"), "Asia/Tokyo"));
-  assert.match(scheduleProblems("61 * * * *", undefined).join(), /範囲/);
+  const before = new Date("2026-10-22T18:59:30Z");
+  const next = (cron: string, tz = "Asia/Tokyo") => parseCron(cron, tz).nextRun(before)?.toISOString();
+  assert.equal(next("0 4 * * *"), "2026-10-22T19:00:00.000Z");
+  assert.equal(next("0 4 * * *", "UTC"), "2026-10-23T04:00:00.000Z");
+  assert.equal(next("*/10 * * * 5"), "2026-10-22T19:00:00.000Z");
+  assert.equal(next("@daily"), "2026-10-23T15:00:00.000Z");
+  assert.match(scheduleProblems("61 * * * *", undefined).join(), /読めません/);
   assert.match(scheduleProblems("* * *", undefined).join(), /5つの欄/);
+  // Seconds would run it more than once a minute.
+  assert.match(scheduleProblems("* * * * * *", undefined).join(), /5つの欄/);
+  assert.match(scheduleProblems("0 4 30 2 *", undefined).join(), /当てはまる日時がありません/);
   assert.match(scheduleProblems("0 4 * * *", "Mars/Base").join(), /timezone/);
   assert.match(scheduleProblems(undefined, undefined).join(), /schedule/);
 });
@@ -318,12 +319,21 @@ test("trigger settings are checked together", async () => {
   assert.match(triggerProblems({ event: "CHANNEL_CREATE", debounceSeconds: 0 }).join(), /debounce_seconds/);
 });
 
-test("SCHEDULE rules fire once in their minute, with the scheduled time as the event", async () => {
-  const w = world({ t: Date.parse("2026-10-22T19:00:05Z") });
+test("SCHEDULE rules run from a cron job each, kept in step with the rules, with the scheduled time as the event", async () => {
+  const jobs: Array<{ cron: string; timezone: string; fn: () => void; stopped: boolean }> = [];
+  const w = world({ t: Date.parse("2026-10-22T19:00:05Z") }, [], {
+    startCron: (cron, timezone, fn) => {
+      const job = { cron, timezone, fn, stopped: false };
+      jobs.push(job);
+      return { stop: () => void (job.stopped = true) };
+    },
+  });
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "0 4 * * *" } });
-  w.admin.save(GUILD, "1", { ...w.definition, name: "別の時刻", trigger: { event: "SCHEDULE", schedule: "30 4 * * *" } });
-  w.engine.tick([GUILD]);
-  w.engine.tick([GUILD], w.now.t + 20_000); // the same minute again
+  const other = w.admin.save(GUILD, "1", { ...w.definition, name: "別の時刻", trigger: { event: "SCHEDULE", schedule: "30 4 * * *", timezone: "UTC" } });
+  w.engine.syncSchedules(GUILD);
+  w.engine.syncSchedules(GUILD); // nothing changed: the same jobs
+  assert.deepEqual(jobs.map((j) => [j.cron, j.timezone]), [["0 4 * * *", "Asia/Tokyo"], ["30 4 * * *", "UTC"]]);
+  jobs[0]!.fn();
   await w.engine.idle();
   assert.equal(w.runs.length, 1);
   assert.equal(w.runs[0].rule.id, rule.id);
@@ -333,6 +343,15 @@ test("SCHEDULE rules fire once in their minute, with the scheduled time as the e
   // The dry run makes the same kind of event without a sample.
   const { syntheticEvent } = await import("../src/rules/triggers.ts");
   assert.equal(syntheticEvent("SCHEDULE", GUILD, rule.trigger, w.now.t)!.timezone, "Asia/Tokyo");
+  // A rule switched off loses its job; a stale job that still fires does nothing.
+  w.store.setRuleEnabled(other.id, false, "test");
+  w.engine.syncSchedules(GUILD);
+  assert.equal(jobs[1]!.stopped, true);
+  jobs[1]!.fn();
+  await w.engine.idle();
+  assert.equal(w.runs.length, 1);
+  w.engine.stopSchedules();
+  assert.equal(jobs[0]!.stopped, true);
 });
 
 test("a debounced rule runs once on the whole batch, at the latest after five periods", async () => {
@@ -641,4 +660,27 @@ test("later() needs no polling: one timer sleeps until the earliest request and 
   assert.equal(w.seen.filter((b) => b.eventName === "TIMER").length, 1);
   // Then it sleeps until the other one.
   assert.equal(sleeps.at(-1)!.ms, 480_000);
+});
+
+test("later() takes a cron expression too, and runs at its next match only, once", async () => {
+  // 03:59:30 in Tokyo.
+  const w = world({ t: Date.parse("2026-10-22T18:59:30Z") });
+  const rule = w.admin.save(GUILD, "1", w.definition);
+  w.setCode(() => (w.seen.at(-1).eventName === "TIMER" ? { ok: true, value: null, logs: [] } : (w.seen.at(-1).later("0 4 * * *"), { ok: true, value: null, logs: [] })));
+  w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", "760"));
+  await w.engine.idle();
+  assert.equal(w.store.nextRuleTimerDue([GUILD]), Date.parse("2026-10-22T19:00:00Z"));
+  w.now.t = Date.parse("2026-10-22T19:00:00Z");
+  w.engine.runTimers([GUILD]);
+  await w.engine.idle();
+  assert.equal(w.seen.filter((b) => b.eventName === "TIMER").length, 1);
+  // Once: nothing waits for the next day.
+  assert.equal(w.store.countRuleTimers(rule.id), 0);
+  const errors = () => (w.store.setRuleEnabled(rule.id, true, null), w.store.recentRuleRuns(rule.id, 1)[0]!.error ?? "");
+  for (const [cron, reason] of [["0 4 30 2 *", /当てはまる日時がありません/], ["* * * * * *", /5つの欄/], ["0 4 1 1 *", /7日より先/]] as const) {
+    w.setCode(() => (w.seen.at(-1).later(cron), { ok: true, value: null, logs: [] }));
+    w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", `76${cron.length}${cron.at(-3)}`));
+    await w.engine.idle();
+    assert.match(errors(), reason);
+  }
 });

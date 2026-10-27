@@ -13,7 +13,7 @@ import { PlanRejected } from "../plan/validate.ts";
 import { jsProgram, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
 import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
-import { cronMatches, DEFAULT_TIMEZONE, parseCron } from "./schedule.ts";
+import { DEFAULT_TIMEZONE, parseCron, startCron } from "./schedule.ts";
 import { ACTOR_EVENTS, createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
@@ -33,7 +33,7 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // runs them without a dialog. Safety: the bot's own changes are ignored unless
 // the rule opts in, each rule is rate limited, repeated failures switch it off,
 // and anyone with Manage Server can stop every rule in the server at once.
-// SCHEDULE rules fire from tick() once a minute; rules with a debounce wait for
+// SCHEDULE rules fire from a cron job each (syncSchedules); rules with a debounce wait for
 // a quiet moment and run once on the batch of events. COMMAND rules run when
 // someone uses their slash command, as that person: their read scope, their
 // permissions (within the allow list) and their judge model, and the outcome
@@ -87,6 +87,8 @@ export interface RuleEngineDeps {
   threadMember?: (threadId: string, userId: string) => Promise<boolean>;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /** Runs a cron schedule until stopped (croner; replaced in tests). */
+  startCron?: typeof startCron;
   /** The servers the bot serves now, whose later() requests may run. */
   guildIds?: () => Iterable<string>;
 }
@@ -321,28 +323,50 @@ export class RuleEngine {
     return counts;
   }
 
+  /** The cron job of each SCHEDULE rule that is on, by rule id. */
+  readonly #schedules = new Map<string, { guildId: string; version: number; job: { stop(): void } }>();
+
   /**
-   * Fires SCHEDULE rules whose cron matches the minute of `now`, in the given
-   * servers. Called once a minute; a minute is never fired twice.
+   * Starts and stops the cron jobs of a server's SCHEDULE rules to match the
+   * rules that are on now. Called when the server becomes ready and whenever
+   * its rules change; nothing checks the clock in between.
    */
-  tick(guildIds: Iterable<string>, now = this.deps.now()): void {
-    const minute = Math.floor(now / 60_000) * 60_000;
-    if (minute <= this.#lastTick) return;
-    this.#lastTick = minute;
-    for (const guildId of guildIds) {
-      if (this.halted(guildId) || !this.deps.caches.get(guildId)?.guild) continue;
-      for (const rule of this.deps.store.enabledRules(guildId, "SCHEDULE")) {
-        try {
-          if (!cronMatches(parseCron(rule.trigger.schedule ?? ""), minute, rule.trigger.timezone ?? DEFAULT_TIMEZONE)) continue;
-        } catch {
-          continue; // Checked at approval; a schedule that no longer parses just never fires.
-        }
-        this.#fire(rule, "SCHEDULE", syntheticEvent("SCHEDULE", guildId, rule.trigger, minute)!);
+  syncSchedules(guildId: string): void {
+    const ready = !!this.deps.caches.get(guildId)?.guild;
+    const wanted = new Map((ready ? this.deps.store.enabledRules(guildId, "SCHEDULE") : []).map((rule) => [rule.id, rule]));
+    for (const [id, entry] of this.#schedules) {
+      if (entry.guildId !== guildId || wanted.get(id)?.version === entry.version) continue;
+      entry.job.stop();
+      this.#schedules.delete(id);
+    }
+    for (const rule of wanted.values()) {
+      if (this.#schedules.has(rule.id)) continue;
+      const timezone = rule.trigger.timezone ?? DEFAULT_TIMEZONE;
+      try {
+        parseCron(rule.trigger.schedule ?? "", timezone);
+      } catch {
+        continue; // Checked at approval; a schedule that no longer parses just never fires.
       }
+      const job = (this.deps.startCron ?? startCron)(rule.trigger.schedule!, timezone, () => this.#scheduled(rule.id, rule.version));
+      this.#schedules.set(rule.id, { guildId, version: rule.version, job });
     }
   }
 
-  #lastTick = 0;
+  /** A SCHEDULE rule's time came. */
+  #scheduled(ruleId: string, version: number): void {
+    const rule = this.deps.store.getRule(ruleId);
+    if (!rule?.enabled || rule.version !== version || this.halted(rule.guildId) || !this.deps.caches.get(rule.guildId)?.guild) return;
+    this.#fire(rule, "SCHEDULE", syntheticEvent("SCHEDULE", rule.guildId, rule.trigger, this.deps.now())!);
+  }
+
+  /** Stops every cron job and the later() timer (shutdown and tests). */
+  stopSchedules(): void {
+    for (const entry of this.#schedules.values()) entry.job.stop();
+    this.#schedules.clear();
+    if (this.#sleep) (this.deps.clearTimer ?? defaultClearTimer)(this.#sleep.timer);
+    this.#sleep = null;
+  }
+
   /** The timer for the earliest later() request, and when it is due. */
   #sleep: { timer: unknown; at: number } | null = null;
 
@@ -598,8 +622,7 @@ export class RuleEngine {
     const keepState = () => {
       if (result.state) store.setRuleState(rule.id, result.state.value);
       if (result.later?.length) {
-        const at = this.deps.now();
-        timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((seconds) => ({ dueAt: at + seconds * 1000, chain: chain + 1 })));
+        timers = store.addRuleTimers(rule.id, rule.guildId, actor === rule.ownerId ? null : actor, result.later.map((dueAt) => ({ dueAt, chain: chain + 1 })));
         this.#armTimers();
       }
     };
@@ -699,7 +722,7 @@ export class RuleEngine {
    * read scope and judge model the code gets; by default the owner's.
    */
   async evaluate(
-    rule: Pick<Rule, "guildId" | "ownerId" | "program" | "params">,
+    rule: Pick<Rule, "guildId" | "ownerId" | "program" | "params"> & Partial<Pick<Rule, "trigger">>,
     event: unknown,
     reader?: Pick<Reader, "get">,
     eventName: string | null = null,
@@ -749,7 +772,7 @@ export class RuleEngine {
           // A command is an interaction too: its respond() adds to the reply.
           ...(eventName === "INTERACTION_CREATE" || command ? { respond: (r: unknown) => void (response = r) } : {}),
           attach: (png: Buffer, name: string) => keep(png, `${name || "image"}.png`),
-          later: (seconds: number) => void later.push(checkLater(seconds, later.length)),
+          later: (when: number | string) => void later.push(checkLater(when, later.length, rule.trigger?.timezone ?? DEFAULT_TIMEZONE, this.deps.now())),
           ...(decider ? { decide: decider } : {}),
           // The modules the code names are its author's, as for a rule's own wasm; they run with this run's bindings.
           ...(this.deps.wasm ? { wasm: (ref: string) => this.deps.wasm!.compiled(this.deps.wasm!.resolve(rule.ownerId, this.deps.caches.get(rule.guildId)?.guild, ref).sha256) } : {}),
@@ -855,13 +878,22 @@ function defaultClearTimer(handle: unknown): void {
   if (handle) clearTimeout(handle as ReturnType<typeof setTimeout>);
 }
 
-/** later()'s seconds, checked as the code calls it; `asked` is how many the run asked for before. */
-function checkLater(seconds: number, asked: number): number {
+/**
+ * When a later() request is due: `when` seconds from now, or the next time a cron
+ * expression (read in the rule's time zone) matches, once. `asked` is how many the run asked for before.
+ */
+function checkLater(when: number | string, asked: number, timezone: string, now: number): number {
   if (asked >= MAX_LATER_PER_RUN) throw new Error(`later() は1回の実行で${MAX_LATER_PER_RUN}回までです`);
-  if (!Number.isFinite(seconds) || seconds < LATER_MIN_SECONDS || seconds > LATER_MAX_SECONDS) {
+  if (typeof when === "string") {
+    const next = parseCron(when, timezone).nextRun(new Date(now))?.getTime();
+    if (next === undefined) throw new Error(`later() の cron「${when}」に当てはまる日時がありません`);
+    if (next - now > LATER_MAX_SECONDS * 1000) throw new Error(`later() の cron「${when}」の次の日時が7日より先です`);
+    return next;
+  }
+  if (!Number.isFinite(when) || when < LATER_MIN_SECONDS || when > LATER_MAX_SECONDS) {
     throw new Error(`later() の秒数は${LATER_MIN_SECONDS}〜${LATER_MAX_SECONDS}(7日)にしてください`);
   }
-  return Math.round(seconds);
+  return now + Math.round(when) * 1000;
 }
 
 /**

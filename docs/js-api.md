@@ -62,7 +62,7 @@ return plan([
 |---|---|
 | `setState(value)` | 次の実行の `state` を決める。JSON の写しを取るので、あとでオブジェクトを変えても残らない。実行が通ったときだけ保存する |
 | `reply(text)` | コマンドの返事を足す。呼ぶたびに改行でつなぐ。`COMMAND` のルールだけ |
-| `later(seconds)` | `seconds` 秒(60〜604,800)のあとに、このルールを `eventName` `"TIMER"` でもう一度動かす。何のための予約かは `setState` で覚えておく。実行が通ったときだけ保存する。上限は [あとで動かす](rules.md#あとで動かすlater) |
+| `later(when)` | `when` が数なら秒数(60〜604,800)のあと、cron の式(文字列)なら次に当てはまる日時に、1回だけこのルールを `eventName` `"TIMER"` でもう一度動かす。何のための予約かは `setState` で覚えておく。実行が通ったときだけ保存する。上限は [あとで動かす](rules.md#あとで動かすlater) |
 | `respond(response)` | 押した人への応答。Discord のインタラクション応答 `{ type, data }` のまま。最後に呼んだものを使う。`INTERACTION_CREATE` のルール([ボタンとフォーム](rules.md#ボタンとフォーム))と、`COMMAND` のルール(`data` の `components` などが返事に加わる。`data.flags` に `64` で返事を実行した人だけに) |
 
 ルールのコードが `plan([...])`・`null`・`undefined` のほかを返すと、実行は失敗します。
