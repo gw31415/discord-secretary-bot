@@ -576,7 +576,7 @@ test("a plan made from code opens on its explanation and the changes; the code a
   const shown = replies.at(-1)!;
   assert.equal(shown.kind, "updateMessage");
   assert.match(dialogText(shown.body), /```js\nconst ids/);
-  assert.deepEqual(dialogButtons(shown.body), ["概要", "コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
+  assert.deepEqual(dialogButtons(shown.body), ["ファイルで", "概要", "コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
   await planner.handleInteraction(click(plan, "details", "2"));
   assert.match(dialogText(replies.at(-1)!.body), /```json\n\[\{"id":"s1"/);
   await planner.handleInteraction(click(plan, "cancel", "1"));
@@ -864,6 +864,17 @@ test("a new version of a rule lists what changes from the one it replaces", asyn
   assert.match(diffed, /コードの変更\(v1 から/);
   assert.match(diffed, /```diff\n[\s\S]*\n\+ \/\/ v2\n```/);
   assert.match(dialogText(renderDialog(plan, { status: "pending_approval", view: "code" })), /コードは変わりません/);
+
+  // A diff too long for the dialog is cut, and the whole comes as files.
+  const long = Array.from({ length: 400 }, (_, i) => `log(${i});`).join("\n");
+  const big = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, program: { kind: "js" as const, code: `${code}\n${long}` } }] });
+  const cut = renderDialog(big, { status: "pending_approval", view: "code" });
+  assert.match(dialogText(cut), /…\(続きは「ファイルで」\)/);
+  assert.ok(dialogButtons(cut).includes("ファイルで"));
+  await t.planner.handleInteraction(click(big, "files", "2"));
+  const files = t.replies.at(-1)!.body.files as Array<{ name: string; data: Buffer }>;
+  assert.deepEqual(files.map((f) => f.name), ["rule-r1.diff", "rule-r1-v1.js", "rule-r1.js"]);
+  assert.match(files[0]!.data.toString(), /\+ log\(399\);$/);
 
   // Without the bullets, what each version does is shown instead.
   service.deps.describeChanges = async () => null;

@@ -13,7 +13,7 @@ import { canView, needsThreadMembership, shareableChannels } from "../discord/pe
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
-import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
+import { codeFiles, confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
 import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
 import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
@@ -549,6 +549,10 @@ export class Planner {
         files: [{ name: `plan-${plan.id}.json`, data: Buffer.from(json) }],
         flags: MessageFlags.Ephemeral,
       });
+      return true;
+    }
+    if (parsed.action === "files") {
+      await api.interactions.reply(interaction.id, interaction.token, { content: `変更 \`${plan.id}\` のコードです`, files: codeFiles(plan), flags: MessageFlags.Ephemeral });
       return true;
     }
     if (parsed.action === "code" || parsed.action === "result" || parsed.action === "details") {

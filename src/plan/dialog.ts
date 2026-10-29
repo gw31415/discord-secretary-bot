@@ -38,8 +38,9 @@ export type PlanAction =
   | "code"
   | "result"
   | "details"
-  | "visibility";
-const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result", "details", "visibility"]);
+  | "visibility"
+  | "files";
+const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result", "details", "visibility", "files"]);
 
 /** `rule` names which of the plan's rules a control is for ("visibility.r1"). */
 export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">, rule?: string): string {
@@ -306,7 +307,7 @@ function fenced(lang: string, body: string): string {
 function codeBody(plan: Plan, room: number): string[] {
   const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string; lang?: string; diff?: boolean }> = [
     ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
-    ...(plan.rules ?? []).map((r) => (r.replaces?.before?.code !== undefined && (r.program.kind === "js" || r.program.module.source) ? ruleDiffPart(r) : {
+    ...(plan.rules ?? []).map((r) => (diffable(r) ? ruleDiffPart(r) : {
       title: r.program.kind === "wasm" ? `ルール「${r.name}」が動かすWasm${r.program.module.source ? `(${r.program.module.source.language} からBotがコンパイル)` : ""}` : `ルール「${r.name}」のコードの説明`,
       code: r.program.kind === "js" ? r.program.code : r.program.module.source ? r.program.module.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n") : "",
       ...(r.program.kind === "wasm" && !r.program.module.source ? { wasm: `sha256 ${r.program.module.sha256}${r.program.module.producers.length ? `\nビルド: ${r.program.module.producers.join("、")}` : ""}` } : {}),
@@ -320,14 +321,40 @@ function codeBody(plan: Plan, room: number): string[] {
     if (diff && !code) return [`**${title}**\nコードは変わりません。`];
     const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
     const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
-    const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;
+    const cut = code.lastIndexOf("\n", limit);
+    const shown = code.length > limit ? `${code.slice(0, cut > 0 ? cut : limit)}\n${diff ? "…" : "// …"}(続きは「ファイルで」)` : code;
     return [`**${title}**\n${explained}`, fenced(diff ? "diff" : (lang ?? "js"), shown)];
   });
 }
 
+function programCode(r: PlanRuleDraft): string {
+  return r.program.kind === "js" ? r.program.code : r.program.module.source ? r.program.module.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n") : "";
+}
+
+function diffable(r: PlanRuleDraft): boolean {
+  return r.replaces?.before?.code !== undefined && (r.program.kind === "js" || !!r.program.module.source);
+}
+
+/** The code section in full, as files: the plan's code, each rule's code, and for a new version its diff and the old code. */
+export function codeFiles(plan: Plan): Array<{ name: string; data: Buffer }> {
+  const file = (name: string, text: string) => ({ name, data: Buffer.from(text) });
+  const ext = (r: PlanRuleDraft) => (r.program.kind === "js" ? "js" : "txt");
+  return [
+    ...(plan.source ? [file("plan.js", plan.source.code)] : []),
+    ...(plan.rules ?? []).flatMap((r) => {
+      const code = programCode(r);
+      if (!code) return [];
+      const base = `rule-${r.key}`;
+      if (!diffable(r)) return [file(`${base}.${ext(r)}`, code)];
+      const diff = lineDiff(r.replaces!.before!.code!, code, 3);
+      return [...(diff ? [file(`${base}.diff`, diff)] : []), file(`${base}-v${r.replaces!.version}.${ext(r)}`, r.replaces!.before!.code!), file(`${base}.${ext(r)}`, code)];
+    }),
+  ].slice(0, 10); // a message carries ten files at most
+}
+
 /** A new version of a rule: what changed in its code, as a diff against the version it replaces. */
 function ruleDiffPart(r: PlanRuleDraft): { title: string; code: string; summary: string | null; diff: true } {
-  const after = r.program.kind === "js" ? r.program.code : r.program.module.source ? r.program.module.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n") : "";
+  const after = programCode(r);
   const changes = r.replaces!.changes;
   return {
     title: `ルール「${r.name}」のコードの変更(v${r.replaces!.version} から。+ は足した行、- は消した行)`,
@@ -465,7 +492,11 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
         ...gallery(plan),
         ...(plan.rules ?? []).flatMap((r) => [text(ruleSummary(r)), ...visibilityRow(plan, state, r)]),
       ]
-    : [text([header(plan), ...(view === "code" ? codeBody(plan, room - header(plan).length) : detailsBody(plan))].join("\n"))];
+    : [
+        text([header(plan), ...(view === "code" ? codeBody(plan, room - header(plan).length) : detailsBody(plan))].join("\n")),
+        // The code's own button sits with it: the whole code, the old version and the diff as files.
+        ...(view === "code" && codeFiles(plan).length > 0 ? row([button(customId("files", plan), "ファイルで", ButtonStyle.Secondary)]) : []),
+      ];
   return {
     components: [
       {
