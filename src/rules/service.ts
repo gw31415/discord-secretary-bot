@@ -56,6 +56,8 @@ export interface RuleServiceDeps {
   /** Explains rule code from the code alone, paid for by the owner. */
   /** `language` is set for sources compiled to Wasm; JavaScript otherwise. */
   summarize?: (code: string, ownerId: string, trigger: string, language?: string) => Promise<string | null>;
+  /** What changes between two versions of a rule's code, as bullets written from the code alone, paid for by the owner. */
+  describeChanges?: (before: string, after: string, ownerId: string, trigger: string, language?: string) => Promise<string[] | null>;
   /** How likely a command's reply is meant for everyone (0 to 1), by that person's judge model (the owner's at approval, the runner's when run); null without one. */
   /** Uploaded Wasm modules a rule may run instead of code. */
   wasm?: Pick<WasmRegistry, "resolve" | "source">;
@@ -228,6 +230,7 @@ export class RuleService {
       }
       for (const id of hiddenPins) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
       let replaces: PlanRuleDraft["replaces"];
+      let previous: RuleProgram | undefined;
       if (r.replaces) {
         const rule = this.deps.store.getRule(r.replaces);
         // Someone else's rule reads the same as a missing one, so its id tells nothing.
@@ -239,8 +242,9 @@ export class RuleService {
             id: rule.id,
             name: rule.name,
             version: rule.version,
-            ...(shown ? { before: { summary: rule.summary, trigger: rule.trigger, allow: rule.allow, ...(rule.params ? { params: rule.params } : {}) } } : {}),
+            ...(shown ? { before: { summary: rule.summary, trigger: rule.trigger, allow: rule.allow, ...(rule.params ? { params: rule.params } : {}), limits: rule.limits } } : {}),
           };
+          if (shown) previous = rule.program;
         }
       }
       if (own.length > 0) {
@@ -265,6 +269,8 @@ export class RuleService {
         }
       }
       if (!dry || problems.length > 0) continue;
+      const changes = replaces && previous ? await this.#changes(previous, program, input.ownerId, triggerEvents(r.trigger).join("・")) : undefined;
+      if (replaces && changes) replaces = { ...replaces, changes };
       drafts.push({
         key: `r${i + 1}`,
         name: r.name.slice(0, 60),
@@ -336,6 +342,27 @@ export class RuleService {
       limits: draft.limits ?? DEFAULT_LIMITS,
     };
     return this.deps.admin.save(guildId, ownerId, definition, draft.replaces?.id).id;
+  }
+
+  /** A program's code as the explainer reads it: JavaScript, or a compiled module's sources. Null for a module without sources. */
+  #codeOf(program: RuleProgram): { code: string; language?: string } | null {
+    if (program.kind === "js") return { code: program.code };
+    const source = this.deps.wasm?.source(program.sha256);
+    return source ? { code: source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n"), language: source.language } : null;
+  }
+
+  /** The code's changes between versions: none when it is the same, undefined when they cannot be told. */
+  async #changes(before: RuleProgram, after: RuleProgram, ownerId: string, trigger: string): Promise<string[] | undefined> {
+    if (before.kind === after.kind && (before.kind === "js" ? before.code === (after as typeof before).code : before.sha256 === (after as typeof before).sha256)) return [];
+    const old = this.#codeOf(before);
+    const fresh = this.#codeOf(after);
+    if (!old || !fresh || !this.deps.describeChanges || (old.language ?? "") !== (fresh.language ?? "")) return undefined;
+    try {
+      return (await this.deps.describeChanges(old.code, fresh.code, ownerId, trigger, fresh.language)) ?? undefined;
+    } catch (e) {
+      this.deps.log("ルールの変更点の説明に失敗", e);
+      return undefined;
+    }
   }
 
   async #summarize(code: string, ownerId: string, trigger: string, language?: string): Promise<string | null> {

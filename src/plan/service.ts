@@ -13,8 +13,8 @@ import { canView, needsThreadMembership, shareableChannels } from "../discord/pe
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
-import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
-import type { DialogState, DialogView } from "./dialog.ts";
+import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, renderView, reviseModal } from "./dialog.ts";
+import type { DialogState } from "./dialog.ts";
 import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
 import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
 import { mimeOf } from "../agent/attachments.ts";
@@ -185,8 +185,8 @@ function ruleInputOf(r: PlanRuleDraft): RuleInput {
 
 export class Planner {
   readonly deps: PlannerDeps;
-  /** How each dialog is shown now, so a refresh keeps it. Lost on restart, which only resets the view. */
-  readonly #shown = new Map<string, { view?: DialogView; closed?: boolean }>();
+  /** Dialogs someone chose to leave, so a refresh keeps their buttons off. Lost on restart. */
+  readonly #shown = new Map<string, { closed?: boolean }>();
 
   constructor(deps: PlannerDeps) {
     this.deps = deps;
@@ -194,7 +194,7 @@ export class Planner {
 
   #render(plan: Plan, state: DialogState): ReturnType<typeof renderDialog> {
     const shown = this.#shown.get(plan.id);
-    return renderDialog(plan, { ...state, view: state.view ?? shown?.view, actions: state.actions ?? !shown?.closed });
+    return renderDialog(plan, { ...state, actions: state.actions ?? !shown?.closed });
   }
 
   get #rest() {
@@ -551,9 +551,13 @@ export class Planner {
       });
       return true;
     }
-    if (parsed.action === "code" || parsed.action === "result" || parsed.action === "details") {
-      // Anyone who sees the dialog may switch what it shows.
-      this.#shown.set(plan.id, { ...this.#shown.get(plan.id), view: parsed.action });
+    if (parsed.action === "code" || parsed.action === "details") {
+      // Anyone who sees the dialog may read its code and details, shown only to them.
+      await api.interactions.reply(interaction.id, interaction.token, { ...renderView(plan, parsed.action), allowed_mentions: { parse: [] } });
+      return true;
+    }
+    if (parsed.action === "result") {
+      // Dialogs from before the code and details moved out had a 「概要」 button; it redraws the summary.
       const steps = row.status === "pending_approval" ? undefined : store.getSteps(plan.id);
       await api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, { status: row.status, steps, reason: row.reason }));
       return true;

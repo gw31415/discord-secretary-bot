@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import type { API } from "@discordjs/core";
 import { DiscordAPIError } from "@discordjs/rest";
-import { InteractionType, ComponentType, PermissionFlagsBits as P } from "discord-api-types/v10";
+import { InteractionType, ComponentType, MessageFlags, PermissionFlagsBits as P } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
@@ -506,7 +506,7 @@ test("出し直す re-validates an expired plan and takes over the same dialog",
   await planner.handleInteraction(click(plan, "redo", "1"));
   const edited = replies.at(-1)!;
   assert.equal(edited.kind, "editMessage");
-  assert.match(dialogText(edited.body), /依頼者が「実行」を押すと実行します/);
+  assert.match(dialogText(edited.body), /期限 <t:\d+:R>/);
   assert.equal(replies.filter((r) => r.kind === "createMessage").length, 1);
   const newId = /`([0-9a-f]{12})`/.exec(dialogText(edited.body))![1]!;
   const fresh = store.getPlan(newId)!;
@@ -556,7 +556,7 @@ test("the same change to many targets is shown as one line", async () => {
   assert.doesNotMatch(text, /^2\./m);
 });
 
-test("a plan made from code opens on its explanation and the changes; the code and exact calls are pages away", async () => {
+test("a plan made from code shows its explanation and the changes; the code and exact calls go only to whoever asks", async () => {
   const { planner, store, replies, summarized } = setup();
   const code = 'const ids = ["3"];\nreturn plan(ids.map((u) => call("PUT /guilds/{guild}/members/{user}/roles/{role}", { path: { user: u, role: "' + MOD_ROLE + '" } })));';
   const plan = await planner.propose({
@@ -569,15 +569,19 @@ test("a plan made from code opens on its explanation and the changes; the code a
   const opened = replies.at(-1)!.body;
   assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*ロール付与/);
   assert.doesNotMatch(dialogText(opened), /```/);
-  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "概要", "コード", "詳細", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "コード", "詳細", "JSONを見る"]);
 
-  // Anyone may switch the view; it stays switched when the dialog is redrawn.
+  // Anyone may read the code and details; they are answered to them alone and the dialog stays as it is.
   await planner.handleInteraction(click(plan, "code", "2"));
-  assert.match(dialogText(replies.at(-1)!.body), /```js\nconst ids/);
+  const shown = replies.at(-1)!;
+  assert.equal(shown.kind, "reply");
+  assert.ok(shown.body.flags & MessageFlags.Ephemeral);
+  assert.match(dialogText(shown.body), /```js\nconst ids/);
   await planner.handleInteraction(click(plan, "details", "2"));
+  assert.equal(replies.at(-1)!.kind, "reply");
   assert.match(dialogText(replies.at(-1)!.body), /```json\n\[\{"id":"s1"/);
   await planner.handleInteraction(click(plan, "cancel", "1"));
-  assert.match(dialogText(replies.at(-1)!.body), /```json/);
+  assert.doesNotMatch(dialogText(replies.at(-1)!.body), /```/);
   assert.equal(store.getPlan(plan.id)!.status, "cancelled");
 });
 
@@ -749,7 +753,7 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.match(text, /登録するルール/);
   assert.match(text, /通話部屋を作る/);
   assert.doesNotMatch(text, /lobby:/);
-  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "概要", "コード", "詳細", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "コード", "詳細", "JSONを見る"]);
   await t.planner.handleInteraction(click(plan, "details", "1"));
   const details = dialogText(t.replies.at(-1)!.body);
   assert.match(details, /lobby: \(s1 で作るもののid\)/);
@@ -828,9 +832,11 @@ test("rules are checked at proposal: refs must point to the plan's steps, and a 
   assert.equal(t.calls.length, 0);
 });
 
-test("a new version of a rule shows what it did before and what it will do", async () => {
+test("a new version of a rule lists what changes from the one it replaces", async () => {
   const t = setup();
-  withRules(t);
+  const { service } = withRules(t);
+  const described: Array<[string, string]> = [];
+  service.deps.describeChanges = async (before, after) => (described.push([before, after]), ["空いた部屋を5分待ってから消します"]);
   const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "x" };
   const first = await t.planner.propose({ ...base, drafts: [], rules: [CLEANUP_RULE] });
   await t.planner.handleInteraction(click(first, "run", "1"));
@@ -838,11 +844,26 @@ test("a new version of a rule shows what it did before and what it will do", asy
   const old = t.store.listRules(GUILD)[0]!;
   t.store.db.prepare("UPDATE rules SET rule_json = json_set(rule_json, '$.summary', ?) WHERE id = ?").run("前の説明です。", old.id);
 
+  // The same code: only the settings that changed are listed, and no model is asked.
   const plan = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, trigger: { event: "VOICE_STATE_UPDATE" } }] });
   const text = dialogText(renderDialog(plan, { status: "pending_approval" }));
-  assert.match(text, /変更前: 前の説明です。/);
-  assert.match(text, /変更後: 説明です。/);
-  assert.match(text, /変わる設定: きっかけ/);
+  assert.match(text, /v1 からの変更/);
+  assert.match(text, /\n- きっかけ: .* → /);
+  assert.doesNotMatch(text, /```|変更前|説明です。/);
+  assert.equal(described.length, 0);
+
+  // New code: the changes written from both versions' code, as bullets.
+  const code = CLEANUP_RULE.program.code;
+  const changed = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, program: { kind: "js" as const, code: `${code}\n// v2` } }] });
+  const bullets = dialogText(renderDialog(changed, { status: "pending_approval" }));
+  assert.match(bullets, /\n- 空いた部屋を5分待ってから消します/);
+  assert.doesNotMatch(bullets, /きっかけ: .* → /);
+  assert.deepEqual(described, [[code, `${code}\n// v2`]]);
+
+  // Without the bullets, what each version does is shown instead.
+  service.deps.describeChanges = async () => null;
+  const plain = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, program: { kind: "js" as const, code: `${code}\n// v3` } }] });
+  assert.match(dialogText(renderDialog(plain, { status: "pending_approval" })), /変更前: 前の説明です。\n変更後: 説明です。/);
 });
 
 test("propose_plan refuses steps and code together, and points out rule code passed as plan code", async () => {
