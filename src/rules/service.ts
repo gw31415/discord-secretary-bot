@@ -242,7 +242,9 @@ export class RuleService {
             id: rule.id,
             name: rule.name,
             version: rule.version,
-            ...(shown ? { before: { summary: rule.summary, trigger: rule.trigger, allow: rule.allow, ...(rule.params ? { params: rule.params } : {}), limits: rule.limits } } : {}),
+            ...(shown
+              ? { before: { summary: rule.summary, trigger: rule.trigger, allow: rule.allow, ...(rule.params ? { params: rule.params } : {}), limits: rule.limits, ...this.#beforeCode(rule.program) } }
+              : {}),
           };
           if (shown) previous = rule.program;
         }
@@ -349,6 +351,12 @@ export class RuleService {
     if (program.kind === "js") return { code: program.code };
     const source = this.deps.wasm?.source(program.sha256);
     return source ? { code: source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n"), language: source.language } : null;
+  }
+
+  /** The replaced version's code, for the dialog's diff. */
+  #beforeCode(program: RuleProgram): { code?: string } {
+    const code = this.#codeOf(program)?.code;
+    return code !== undefined ? { code } : {};
   }
 
   /** The code's changes between versions: none when it is the same, undefined when they cannot be told. */

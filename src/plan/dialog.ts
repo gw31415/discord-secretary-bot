@@ -14,6 +14,7 @@ import { fenceLanguage, limitsLabel, paramsText, triggerLabel } from "../rules/p
 import { VISIBILITY_CHOICES } from "../rules/command.ts";
 import { DEFAULT_LIMITS } from "../rules/types.ts";
 import type { Body } from "./catalog.ts";
+import { lineDiff } from "./diff.ts";
 import { dialogFileName, dialogImageIds } from "./files.ts";
 import { RISK_LABEL } from "./types.ts";
 import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
@@ -194,14 +195,16 @@ export function needsTypedConfirm(plan: Plan): boolean {
 }
 
 /**
- * The dialog itself only ever shows the summary (what changes, what each rule does).
- * "code" (the code with its explanation) and "details" (the exact calls and each
- * rule's allow, params and limits) are answered only to whoever pressed for them.
+ * The section the dialog shows. "result": the summary every dialog opens on (what
+ * changes, what each rule does); "code": the code with its explanation;
+ * "details": the exact calls and each rule's allow, params and limits.
  */
-export type DialogView = "code" | "details";
+export type DialogView = "result" | "code" | "details";
 
 export interface DialogState {
   status: PlanStatus;
+  /** Which section is shown; every dialog opens on the summary. */
+  view?: DialogView;
   steps?: StepRow[];
   reason?: string | null;
   /** Show the buttons for the current status (false once someone chose to leave it). */
@@ -271,18 +274,28 @@ function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
   return out;
 }
 
-const VIEW_LABEL: Record<DialogView, string> = { code: "コード", details: "詳細" };
+const VIEW_LABEL: Record<DialogView, string> = { result: "概要", code: "コード", details: "詳細" };
 
-/** What can be shown on request: code only when it was made from code or registers rules, details only when there is more to show. */
-export function views(plan: Plan): DialogView[] {
-  const out: DialogView[] = [];
+/** The sections this plan has: code only when it was made from code or registers rules, details only when there is more to show. */
+function views(plan: Plan): DialogView[] {
+  const out: DialogView[] = ["result"];
   if (plan.source || plan.rules?.length) out.push("code");
   if (plan.rules?.length || (plan.source && plan.steps.length > 0)) out.push("details");
   return out;
 }
 
-function navButtons(plan: Plan): APIButtonComponent[] {
-  return [...views(plan).map((v) => button(customId(v, plan), VIEW_LABEL[v], ButtonStyle.Secondary)), button(customId("json", plan), "JSONを見る", ButtonStyle.Secondary)];
+function viewOf(plan: Plan, state: DialogState): DialogView {
+  const view = state.view ?? "result";
+  return views(plan).includes(view) ? view : "result";
+}
+
+function navButtons(plan: Plan, current: DialogView): APIButtonComponent[] {
+  const pages = views(plan);
+  const out: APIButtonComponent[] = pages.length > 1
+    ? pages.map((v) => ({ ...button(customId(v, plan), VIEW_LABEL[v], v === current ? ButtonStyle.Primary : ButtonStyle.Secondary), disabled: v === current }))
+    : [];
+  out.push(button(customId("json", plan), "JSONを見る", ButtonStyle.Secondary));
+  return out;
 }
 
 /** Keeps a code block from being closed by its own content. */
@@ -291,9 +304,9 @@ function fenced(lang: string, body: string): string {
 }
 
 function codeBody(plan: Plan, room: number): string[] {
-  const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string; lang?: string }> = [
+  const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string; lang?: string; diff?: boolean }> = [
     ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
-    ...(plan.rules ?? []).map((r) => ({
+    ...(plan.rules ?? []).map((r) => (r.replaces?.before?.code !== undefined && (r.program.kind === "js" || r.program.module.source) ? ruleDiffPart(r) : {
       title: r.program.kind === "wasm" ? `ルール「${r.name}」が動かすWasm${r.program.module.source ? `(${r.program.module.source.language} からBotがコンパイル)` : ""}` : `ルール「${r.name}」のコードの説明`,
       code: r.program.kind === "js" ? r.program.code : r.program.module.source ? r.program.module.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n") : "",
       ...(r.program.kind === "wasm" && !r.program.module.source ? { wasm: `sha256 ${r.program.module.sha256}${r.program.module.producers.length ? `\nビルド: ${r.program.module.producers.join("、")}` : ""}` } : {}),
@@ -302,13 +315,26 @@ function codeBody(plan: Plan, room: number): string[] {
     })),
   ];
   const share = Math.floor(room / Math.max(1, parts.length));
-  return parts.flatMap(({ title, code, summary, wasm, lang }) => {
+  return parts.flatMap(({ title, code, summary, wasm, lang, diff }) => {
     if (wasm) return [`**${title}**\n${summary ?? ""}`, fenced("", wasm)];
+    if (diff && !code) return [`**${title}**\nコードは変わりません。`];
     const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
     const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
     const shown = code.length > limit ? `${code.slice(0, limit)}\n// …(続きは「JSONを見る」)` : code;
-    return [`**${title}**\n${explained}`, fenced(lang ?? "js", shown)];
+    return [`**${title}**\n${explained}`, fenced(diff ? "diff" : (lang ?? "js"), shown)];
   });
+}
+
+/** A new version of a rule: what changed in its code, as a diff against the version it replaces. */
+function ruleDiffPart(r: PlanRuleDraft): { title: string; code: string; summary: string | null; diff: true } {
+  const after = r.program.kind === "js" ? r.program.code : r.program.module.source ? r.program.module.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n") : "";
+  const changes = r.replaces!.changes;
+  return {
+    title: `ルール「${r.name}」のコードの変更(v${r.replaces!.version} から。+ は足した行、- は消した行)`,
+    code: lineDiff(r.replaces!.before!.code!, after),
+    summary: changes?.length ? changes.map((c) => `- ${c}`).join("\n") : r.summary,
+    diff: true,
+  };
 }
 
 /** The code block language for a compiler language id. */
@@ -417,20 +443,10 @@ function header(plan: Plan): string {
   return `### 変更の確認\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts}`;
 }
 
-/** The code or the details, answered only to whoever pressed for them. */
-export function renderView(plan: Plan, view: DialogView): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
-  const body = view === "code" ? codeBody(plan, MAX_TEXT - 100) : detailsBody(plan);
-  const title = view === "code" ? "### コード" : "### 詳細";
-  return {
-    components: [{ type: ComponentType.Container, components: [{ type: ComponentType.TextDisplay, content: [title, ...body].join("\n").slice(0, MAX_TEXT) }] }],
-    flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
-  };
-}
-
 /**
- * Laid out from the parts to the whole: the plan's changes, each rule with the
- * pick that belongs to it, the pages that show the plan, and last, under a
- * divider, the dialog's own status and the buttons that act on it.
+ * Laid out from the parts to the whole: the shown section (on the summary, each
+ * rule with the pick that belongs to it), the buttons that switch sections, and
+ * last, under a divider, the dialog's own status and the buttons that act on it.
  */
 export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
   let room = MAX_TEXT;
@@ -442,16 +458,22 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
   const row = (components: APIButtonComponent[]): APIActionRowComponent<APIButtonComponent>[] => (components.length > 0 ? [{ type: ComponentType.ActionRow, components }] : []);
   const status = statusLine(plan, state);
   room -= status.length;
+  const view = viewOf(plan, state);
+  const section = view === "result"
+    ? [
+        text([header(plan), ...resultBody(plan, state)].join("\n")),
+        ...gallery(plan),
+        ...(plan.rules ?? []).flatMap((r) => [text(ruleSummary(r)), ...visibilityRow(plan, state, r)]),
+      ]
+    : [text([header(plan), ...(view === "code" ? codeBody(plan, room - header(plan).length) : detailsBody(plan))].join("\n"))];
   return {
     components: [
       {
         type: ComponentType.Container,
         accent_color: color(plan, state.status),
         components: [
-          text([header(plan), ...resultBody(plan, state)].join("\n")),
-          ...gallery(plan),
-          ...(plan.rules ?? []).flatMap((r) => [text(ruleSummary(r)), ...visibilityRow(plan, state, r)]),
-          ...row(navButtons(plan)),
+          ...section,
+          ...row(navButtons(plan, view)),
           { type: ComponentType.Separator },
           { type: ComponentType.TextDisplay, content: status },
           ...row(buttons(plan, state)),

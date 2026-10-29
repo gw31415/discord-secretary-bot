@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import type { API } from "@discordjs/core";
 import { DiscordAPIError } from "@discordjs/rest";
-import { InteractionType, ComponentType, MessageFlags, PermissionFlagsBits as P } from "discord-api-types/v10";
+import { InteractionType, ComponentType, PermissionFlagsBits as P } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import { Store } from "../src/db.ts";
 import { GuildCache } from "../src/discord/cache.ts";
@@ -556,7 +556,7 @@ test("the same change to many targets is shown as one line", async () => {
   assert.doesNotMatch(text, /^2\./m);
 });
 
-test("a plan made from code shows its explanation and the changes; the code and exact calls go only to whoever asks", async () => {
+test("a plan made from code opens on its explanation and the changes; the code and exact calls are sections away", async () => {
   const { planner, store, replies, summarized } = setup();
   const code = 'const ids = ["3"];\nreturn plan(ids.map((u) => call("PUT /guilds/{guild}/members/{user}/roles/{role}", { path: { user: u, role: "' + MOD_ROLE + '" } })));';
   const plan = await planner.propose({
@@ -569,19 +569,18 @@ test("a plan made from code shows its explanation and the changes; the code and 
   const opened = replies.at(-1)!.body;
   assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*ロール付与/);
   assert.doesNotMatch(dialogText(opened), /```/);
-  assert.deepEqual(dialogButtons(opened), ["コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
+  assert.deepEqual(dialogButtons(opened), ["概要", "コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
 
-  // Anyone may read the code and details; they are answered to them alone and the dialog stays as it is.
+  // Anyone may switch the section, in place; it stays switched when the dialog is redrawn.
   await planner.handleInteraction(click(plan, "code", "2"));
   const shown = replies.at(-1)!;
-  assert.equal(shown.kind, "reply");
-  assert.ok(shown.body.flags & MessageFlags.Ephemeral);
+  assert.equal(shown.kind, "updateMessage");
   assert.match(dialogText(shown.body), /```js\nconst ids/);
+  assert.deepEqual(dialogButtons(shown.body), ["概要", "コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
   await planner.handleInteraction(click(plan, "details", "2"));
-  assert.equal(replies.at(-1)!.kind, "reply");
   assert.match(dialogText(replies.at(-1)!.body), /```json\n\[\{"id":"s1"/);
   await planner.handleInteraction(click(plan, "cancel", "1"));
-  assert.doesNotMatch(dialogText(replies.at(-1)!.body), /```/);
+  assert.match(dialogText(replies.at(-1)!.body), /```json/);
   assert.equal(store.getPlan(plan.id)!.status, "cancelled");
 });
 
@@ -753,7 +752,7 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.match(text, /登録するルール/);
   assert.match(text, /通話部屋を作る/);
   assert.doesNotMatch(text, /lobby:/);
-  assert.deepEqual(dialogButtons(dialog), ["コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
+  assert.deepEqual(dialogButtons(dialog), ["概要", "コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
   await t.planner.handleInteraction(click(plan, "details", "1"));
   const details = dialogText(t.replies.at(-1)!.body);
   assert.match(details, /lobby: \(s1 で作るもののid\)/);
@@ -859,6 +858,12 @@ test("a new version of a rule lists what changes from the one it replaces", asyn
   assert.match(bullets, /\n- 空いた部屋を5分待ってから消します/);
   assert.doesNotMatch(bullets, /きっかけ: .* → /);
   assert.deepEqual(described, [[code, `${code}\n// v2`]]);
+
+  // The code section shows the code as a diff against the replaced version.
+  const diffed = dialogText(renderDialog(changed, { status: "pending_approval", view: "code" }));
+  assert.match(diffed, /コードの変更\(v1 から/);
+  assert.match(diffed, /```diff\n[\s\S]*\n\+ \/\/ v2\n```/);
+  assert.match(dialogText(renderDialog(plan, { status: "pending_approval", view: "code" })), /コードは変わりません/);
 
   // Without the bullets, what each version does is shown instead.
   service.deps.describeChanges = async () => null;
@@ -1287,4 +1292,11 @@ test("overwrites of one channel go in one PATCH; changes to one resource are mer
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["PATCH /channels/10", "PATCH /channels/11", `PATCH /guilds/${GUILD}/members/11`]);
   assert.deepEqual(calls[0]!.options!.body, { permission_overwrites: [{ id: MOD_ROLE, type: 0, allow: "1024", deny: "0" }, { id: GUILD, type: 0, allow: "0", deny: "1024" }] });
   assert.deepEqual(calls[1]!.options!.body, { name: "b", topic: "x" });
+});
+
+test("lineDiff marks added and removed lines with a little context", async () => {
+  const { lineDiff } = await import("../src/plan/diff.ts");
+  assert.equal(lineDiff("a\nb", "a\nb"), "");
+  assert.equal(lineDiff("1\n2\n3\n4\n5\n6\n7", "1\n2\n3\nX\n5\n6\n7", 1), "  3\n- 4\n+ X\n  5\n…");
+  assert.equal(lineDiff("a", "a\nb"), "  a\n+ b");
 });
