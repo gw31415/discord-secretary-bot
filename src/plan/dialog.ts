@@ -411,8 +411,8 @@ function changeLines(r: PlanRuleDraft): string[] {
   if (!before) return ["前の版の内容はこの場所では表示できません", r.summary ?? "説明を作れませんでした。「コード」で確かめてください。"];
   const settings = [
     !same(before.trigger, r.trigger) ? `きっかけ: ${triggerLabel(before.trigger)} → ${triggerLabel(r.trigger)}` : null,
-    !same(before.allow, r.allow) ? "許す操作が変わります(「詳細」で確かめられます)" : null,
-    !same(before.params ?? null, r.params ?? null) ? "params が変わります" : null,
+    !same(before.allow, r.allow) ? "ルールにできる変更の範囲が変わります(「詳細」で確かめられます)" : null,
+    !same(before.params ?? null, r.params ?? null) ? "ルールが使う値(チャンネルなど)が変わります" : null,
     before.limits && !same(before.limits, r.limits ?? DEFAULT_LIMITS) ? `上限: ${limitsLabel(r.limits ?? DEFAULT_LIMITS)}` : null,
   ].filter((c): c is string => c !== null);
   const changes = r.replaces!.changes;
