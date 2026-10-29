@@ -231,6 +231,8 @@ export class RuleService {
       for (const id of hiddenPins) own.push(`チャンネル ${id} はこの場所では扱えません。そのチャンネルを見られる人だけがいる場所で頼んでください`);
       let replaces: PlanRuleDraft["replaces"];
       let previous: RuleProgram | undefined;
+      /** Who saw the replaced command's replies: a new version keeps it unless the request says otherwise. */
+      let kept: CommandVisibility | undefined;
       if (r.replaces) {
         const rule = this.deps.store.getRule(r.replaces);
         // Someone else's rule reads the same as a missing one, so its id tells nothing.
@@ -247,6 +249,7 @@ export class RuleService {
               : {}),
           };
           if (shown) previous = rule.program;
+          if (rule.trigger.command) kept = rule.trigger.command.visibility ?? "auto";
         }
       }
       if (own.length > 0) {
@@ -276,7 +279,7 @@ export class RuleService {
       drafts.push({
         key: `r${i + 1}`,
         name: r.name.slice(0, 60),
-        trigger: await this.#withVisibility(input.ownerId, r, dry),
+        trigger: await this.#withVisibility(input.ownerId, kept && r.trigger.command && !r.trigger.command.visibility ? { ...r, trigger: { ...r.trigger, command: { ...r.trigger.command, visibility: kept } } } : r, dry),
         allow: r.allow,
         program: wasm ? { kind: "wasm", module: wasm } : { kind: "js", code: code ?? "" },
         ...(r.params ? { params: r.params } : {}),

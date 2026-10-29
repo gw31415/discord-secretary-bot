@@ -1147,6 +1147,25 @@ const TEX_RULE = {
   program: { kind: "js" as const, code: "reply('ok'); return null;" },
 };
 
+test("a new version of a command keeps who sees its replies unless the request says otherwise", async () => {
+  const t = setup();
+  let asked = 0;
+  withRules(t, async () => (asked++, 0.9));
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "/tex を作って", drafts: [] };
+  const own = { ...TEX_RULE, trigger: { ...TEX_RULE.trigger, command: { ...TEX_RULE.trigger.command, visibility: "private" as const } } };
+  const first = await t.planner.propose({ ...base, rules: [own] });
+  await t.planner.handleInteraction(click(first, "run", "1"));
+  await settle(() => t.store.getPlan(first.id)!.status === "succeeded");
+  const old = t.store.listRules(GUILD)[0]!;
+
+  const next = await t.planner.propose({ ...base, rules: [{ ...TEX_RULE, replaces: old.id, program: { kind: "js" as const, code: "reply('v2'); return null;" } }] });
+  assert.equal(next.rules![0]!.trigger.command!.visibility, "private");
+  assert.equal(asked, 0);
+  // Said in the request, it changes.
+  const told = { ...TEX_RULE, replaces: old.id, trigger: { ...TEX_RULE.trigger, command: { ...TEX_RULE.trigger.command, visibility: "public" as const } } };
+  assert.equal((await t.planner.propose({ ...base, rules: [told] })).rules![0]!.trigger.command!.visibility, "public");
+});
+
 test("a command's dialog starts on the judge's pick for who sees replies, and the requester can change it", async () => {
   const t = setup();
   let score: number | null = 0.5;
