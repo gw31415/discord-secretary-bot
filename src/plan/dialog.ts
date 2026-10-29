@@ -433,18 +433,16 @@ function ruleSummary(r: PlanRuleDraft): string {
   ].join("\n");
 }
 
-/** Each rule's full definition, drawn only from it. */
-function ruleDetails(plan: Plan): string[] {
-  if (!plan.rules?.length) return [];
+/** A rule's full definition, drawn only from it. */
+function ruleDetail(plan: Plan, r: PlanRuleDraft): string {
   const lookup = (id: string) => label(plan, id);
-  return plan.rules.map((r) =>
-    [
-      `**${r.name}**`,
-      ...(r.limits ? [limitsLabel(r.limits)] : []),
-      `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n") || "なし(返事だけします)"}`,
-      ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),
-    ].join("\n"),
-  );
+  return [
+    `**${r.name}**`,
+    ...(r.limits ? [limitsLabel(r.limits)] : []),
+    `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n") || "なし(返事だけします)"}`,
+    ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),
+    ...(r.trigger.command ? ["返事を見せる相手:"] : []),
+  ].join("\n");
 }
 
 function resultBody(plan: Plan, state: DialogState): string[] {
@@ -463,7 +461,7 @@ function detailsBody(plan: Plan): string[] {
     const json = JSON.stringify(plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) })));
     out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fenced("json", json) : "長いため「ファイルで受け取る」で確かめてください"}`);
   }
-  return [...out, ...ruleDetails(plan)];
+  return out;
 }
 
 /** The images the plan posts, uploaded with the dialog so the approver sees them. */
@@ -502,9 +500,15 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
     ? [
         text([header(plan), ...resultBody(plan, state)].join("\n")),
         ...gallery(plan),
-        ...(plan.rules ?? []).flatMap((r) => [text(ruleSummary(r)), ...visibilityRow(plan, state, r)]),
+        ...(plan.rules ?? []).map((r) => text(ruleSummary(r))),
       ]
-    : [text([header(plan), ...(view === "code" ? codeBody(plan, room - header(plan).length) : detailsBody(plan))].join("\n"))];
+    : view === "code"
+      ? [text([header(plan), ...codeBody(plan, room - header(plan).length)].join("\n"))]
+      : [
+          text([header(plan), ...detailsBody(plan)].join("\n")),
+          // Who sees a command's replies starts on the judge model's pick (the summary says which); it is changed here.
+          ...(plan.rules ?? []).flatMap((r) => [text(ruleDetail(plan, r)), ...visibilityRow(plan, state, r)]),
+        ];
   return {
     components: [
       {

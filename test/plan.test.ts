@@ -1152,11 +1152,15 @@ test("a command's dialog starts on the judge's pick for who sees replies, and th
   let score: number | null = 0.5;
   withRules(t, async () => score);
   const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "/tex を作って", drafts: [] };
-  const selectOf = (body: any) => body.components[0].components.find((c: any) => c.type === ComponentType.ActionRow && c.components[0].type === ComponentType.StringSelect)?.components[0];
+  const selectOf = (body: any) => body.components[0].components.find((c: any) => c.type === ComponentType.ActionRow && c.components[0].custom_id?.startsWith("plan:visibility"))?.components[0];
   const chosen = (body: any) => selectOf(body)?.options.find((o: any) => o.default)?.value;
 
   const plan = await t.planner.propose({ ...base, rules: [TEX_RULE] });
   assert.equal(plan.rules![0]!.trigger.command!.visibility, "auto");
+  // The summary says who sees the replies; it is picked in 詳細.
+  assert.equal(selectOf(t.replies.at(-1)!.body), undefined);
+  assert.match(dialogText(t.replies.at(-1)!.body), /判定用のモデルが決めます/);
+  await t.planner.handleInteraction(click(plan, "details", "1"));
   assert.equal(chosen(t.replies.at(-1)!.body), "auto");
   score = 0.9;
   assert.equal((await t.planner.propose({ ...base, rules: [TEX_RULE] })).rules![0]!.trigger.command!.visibility, "public");
