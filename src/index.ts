@@ -6,7 +6,7 @@ import { judgeAddressed, publicReplyScore } from "./agent/judge.ts";
 import { decideFor } from "./agent/decide.ts";
 import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
-import { summarizeCode } from "./agent/summarize.ts";
+import { describeChanges, summarizeCode } from "./agent/summarize.ts";
 import { loadConfig } from "./config.ts";
 import { Conversations, MAX_MESSAGES_PER_REPLY } from "./conversation.ts";
 import type { GuildMessage, ReactionAdd } from "./conversation.ts";
@@ -166,6 +166,13 @@ const rules = new RuleService({
     const apiKey = ref && store.getApiKey(ownerId, ref.provider);
     if (!model || !apiKey) return null;
     return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger }, ...(language ? { language } : {}) });
+  },
+  describeChanges: async (before, after, ownerId, trigger, language) => {
+    const ref = store.getSettings(ownerId).response;
+    const model = ref && findChatModel(ref.provider, ref.model);
+    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
+    if (!model || !apiKey) return null;
+    return describeChanges({ model, apiKey, before, after, trigger, ...(language ? { language } : {}) });
   },
   visibilityScore: async ({ userId, command, options, reply, images, steps }) => {
     const ref = judgeRef(store.getSettings(userId));

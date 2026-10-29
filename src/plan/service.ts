@@ -13,7 +13,7 @@ import { canView, needsThreadMembership, shareableChannels } from "../discord/pe
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
-import { confirmModal, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
+import { codeFiles, confirmModal, FILES_CHOICE, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
 import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
 import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
@@ -185,7 +185,7 @@ function ruleInputOf(r: PlanRuleDraft): RuleInput {
 
 export class Planner {
   readonly deps: PlannerDeps;
-  /** How each dialog is shown now, so a refresh keeps it. Lost on restart, which only resets the view. */
+  /** How each dialog is shown now, so a refresh keeps it. Lost on restart, which only resets the section. */
   readonly #shown = new Map<string, { view?: DialogView; closed?: boolean }>();
 
   constructor(deps: PlannerDeps) {
@@ -542,20 +542,35 @@ export class Planner {
     }
     const { plan } = row;
 
-    if (parsed.action === "json") {
-      const json = JSON.stringify({ plan, status: row.status, reason: row.reason, steps: store.getSteps(plan.id) }, null, 2);
-      await api.interactions.reply(interaction.id, interaction.token, {
-        content: `変更 \`${plan.id}\` の全内容です`,
-        files: [{ name: `plan-${plan.id}.json`, data: Buffer.from(json) }],
-        flags: MessageFlags.Ephemeral,
-      });
+    // The plan as JSON and its code as files, shown only to whoever asked.
+    const files = () => [
+      { name: `plan-${plan.id}.json`, data: Buffer.from(JSON.stringify({ plan, status: row.status, reason: row.reason, steps: store.getSteps(plan.id) }, null, 2)) },
+      ...codeFiles(plan),
+    ];
+    const redraw = (view: DialogView | undefined) => {
+      // Anyone who sees the dialog may switch its section.
+      if (view) this.#shown.set(plan.id, { ...this.#shown.get(plan.id), view });
+      const steps = row.status === "pending_approval" ? undefined : store.getSteps(plan.id);
+      return api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, { status: row.status, steps, reason: row.reason }));
+    };
+    if (parsed.action === "view") {
+      const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+      if (value === FILES_CHOICE) {
+        // Redrawn first so the menu goes back to the section shown.
+        await redraw(undefined);
+        await api.interactions.followUp(interaction.application_id, interaction.token, { content: `変更 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
+        return true;
+      }
+      await redraw(value === "code" || value === "details" ? value : "result");
+      return true;
+    }
+    // Buttons on dialogs drawn before the menu.
+    if (parsed.action === "json" || parsed.action === "files") {
+      await api.interactions.reply(interaction.id, interaction.token, { content: `変更 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
       return true;
     }
     if (parsed.action === "code" || parsed.action === "result" || parsed.action === "details") {
-      // Anyone who sees the dialog may switch what it shows.
-      this.#shown.set(plan.id, { ...this.#shown.get(plan.id), view: parsed.action });
-      const steps = row.status === "pending_approval" ? undefined : store.getSteps(plan.id);
-      await api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, { status: row.status, steps, reason: row.reason }));
+      await redraw(parsed.action);
       return true;
     }
     if (userId !== plan.actor.userId) {

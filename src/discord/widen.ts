@@ -58,14 +58,14 @@ export class WidenPrompts {
     return this.#ask({
       ...input,
       content: [
-        `🔓 <@${input.speakerId}> さん、この返答のために、あなたが見られる範囲まで読み取りを広げてよいですか?`,
+        `🔓 <@${input.speakerId}> さん、あなたが見られる範囲まで読み取りを広げてよいですか?`,
         `理由: ${input.reason.slice(0, 300)}`,
-        "-# 許可すると、このチャンネルの全員は見られない内容が返答に入ることがあります。この返答のあいだだけ有効です。",
+        "-# この返答のあいだだけです。全員は見られない内容が返答に入ることがあります。",
       ].join("\n"),
       yes: "許可する",
       no: "許可しない",
-      answered: (allowed, speakerId) => (allowed ? `🔓 <@${speakerId}> さんの許可で、この返答はその人が見られる範囲まで読み取ります。` : "🔒 読み取りは広げずに答えます。"),
-      expired: "🔒 読み取りを広げる許可は、返事がなかったので取り下げました。",
+      answered: (allowed, speakerId) => (allowed ? `🔓 <@${speakerId}> さんが見られる範囲まで読み取ります。` : "🔒 読み取りは広げずに答えます。"),
+      expired: "🔒 返事がなかったので、読み取りは広げません。",
     });
   }
 

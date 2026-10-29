@@ -643,7 +643,7 @@ function ruleTask(r: CodedRuleInput & { code_task: string }): string {
     ...(r.debounce_seconds ? [`まとめて実行: 最後のイベントから${r.debounce_seconds}秒待って1回だけ動きます。その間のイベントは batch(古い順の [{ eventName, event }])で全部読め、event は最後のものです`] : []),
     `params: ${JSON.stringify(r.params ?? null)}`,
     `許す操作: ${JSON.stringify(r.allow)}`,
-    ...(r.replaces_rule ? [`直すルール: ${r.replaces_rule}(list_rules・rule_runs で今のコードと実行履歴を見られます)`] : []),
+    ...(r.replaces_rule ? [`直すルール: ${r.replaces_rule}(list_rules・rule_runs で今のコードと実行履歴を見られます)。依頼で言われていない返事の形(文面の書き方・画像・ボタン)は前の版のまま変えないでください。`] : []),
     ...(r.sample_event !== undefined ? [`イベントの例: ${JSON.stringify(r.sample_event).slice(0, 2000)}`] : []),
   ].join("\n");
 }
@@ -742,7 +742,7 @@ const RULES_DESCRIPTION = [
   "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
   "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
   "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
-  "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。",
+  "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。直すときは、依頼で言われない限り返事の形(文面の書き方・画像・ボタン・command の visibility)を前の版から変えません。visibility は付けなければ前の版のままになります。",
   "  wasm: コードの代わりに、アップロードされたWasmモジュール(Botがソースからコンパイルして登録したものを含む)を動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。Wasmは会話で登録できます(/settings の「Wasm」からも登録できます)。一度動かすだけなら登録せずに run_wasm で動かします。話し手が .wasm を添付して使い道を話したら、何をするモジュールか・どう使いたいか(どのきっかけで動かすか、コマンドにするか、何を変更するか)を相談し、決まったら register_wasm で登録してからルール案を出します。登録しただけで済ませたいと言われたら登録だけします。JavaScript 以外の言語(Rust・Go・C・MoonBit・Zig・Nim など)で書きたいと頼まれたら、compile_wasm でコンパイルし、register_wasm(compiled と name)で登録してからその名前を wasm に入れます。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
   "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 10 } を加えます。",
   "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。リアクションのルール(MESSAGE_REACTION_ADD・MESSAGE_REACTION_REMOVE)は、既定では付けた人・外した人として動きます(変更は allow の範囲でその人が持つ権限の分だけ、読み取りもその人の範囲、judge・rank はその人の判定モデル)。その人にない権限が要るとき(例: リアクションでロールを付ける)だけ run_as: \"owner\" を付けて作成者として動かします。COMMAND も同じで、既定は実行した人として動き、run_as: \"owner\" で作成者として動きます。",

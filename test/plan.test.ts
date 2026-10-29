@@ -232,6 +232,21 @@ function setup(now = { t: Date.parse("2026-10-21T00:00:00Z") }) {
   return { ...discord, store, planner, now, summarized, cache };
 }
 
+/** Picks a section (or 「ファイルで受け取る」) from the dialog's menu. */
+function pick(plan: Plan, value: string, userId: string): APIInteraction {
+  return {
+    id: "i", token: "t", application_id: "app", type: InteractionType.MessageComponent, member: { user: { id: userId } },
+    data: { custom_id: `plan:view:${plan.id}:${plan.hash.slice(0, 8)}`, component_type: ComponentType.StringSelect, values: [value] },
+  } as unknown as APIInteraction;
+}
+
+/** The dialog's menu options, the shown one marked with *. */
+function menu(body: { components: unknown[] }): string[] {
+  const container = body.components[0] as { components: Array<{ type: number; components?: Array<{ custom_id?: string; options?: Array<{ label: string; default?: boolean }> }> }> };
+  const select = container.components.flatMap((c) => c.components ?? []).find((c) => c.custom_id?.startsWith("plan:view:"));
+  return (select?.options ?? []).map((o) => `${o.label}${o.default ? "*" : ""}`);
+}
+
 function click(plan: Plan, action: string, userId: string, extra: Partial<APIInteraction> = {}): APIInteraction {
   return {
     id: "i",
@@ -281,7 +296,7 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
   assert.equal(dialog.message_reference.message_id, "400");
   assert.deepEqual(dialog.allowed_mentions, { parse: [] });
   assert.match(dialogText(dialog), /チャンネル作成.*#new/);
-  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し"]);
 
   // Someone else cannot approve.
   await planner.handleInteraction(click(plan, "run", "3"));
@@ -298,7 +313,7 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
   assert.equal(post.enforce_nonce, true);
   assert.deepEqual(post.allowed_mentions, { parse: ["users"] });
   assert.match(dialogText(replies.at(-1)!.body), /✅ 実行しました/);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["JSONを見る"]);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), []);
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "done"]);
 });
 
@@ -384,7 +399,7 @@ test("a failed step stops the plan; restore proposes the inverse of what was don
   await settle(() => store.getPlan(plan.id)!.status === "failed");
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "failed", "pending"]);
   assert.match(dialogText(replies.at(-1)!.body), /途中で失敗しました\(1\/3件完了\)/);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["再開", "復元", "そのまま", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["再開", "復元", "そのまま"]);
 
   const { drafts, skipped } = planner.restoreDrafts(store.getPlan(plan.id)!);
   assert.deepEqual(drafts, [{ op: "DELETE /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } }]);
@@ -419,7 +434,7 @@ test("unanswered dialogs expire after five minutes", async () => {
   await planner.sweep();
   assert.equal(store.getPlan(plan.id)!.status, "cancelled");
   assert.match(dialogText(replies.at(-1)!.body), /期限切れ/);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["出し直す", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["出し直す"]);
   // A late click does nothing.
   await planner.handleInteraction(click(plan, "run", "1"));
   assert.match(replies.at(-1)!.body.content, /もう承認待ちではありません/);
@@ -506,7 +521,7 @@ test("出し直す re-validates an expired plan and takes over the same dialog",
   await planner.handleInteraction(click(plan, "redo", "1"));
   const edited = replies.at(-1)!;
   assert.equal(edited.kind, "editMessage");
-  assert.match(dialogText(edited.body), /依頼者が「実行」を押すと実行します/);
+  assert.match(dialogText(edited.body), /期限 <t:\d+:R>/);
   assert.equal(replies.filter((r) => r.kind === "createMessage").length, 1);
   const newId = /`([0-9a-f]{12})`/.exec(dialogText(edited.body))![1]!;
   const fresh = store.getPlan(newId)!;
@@ -556,7 +571,7 @@ test("the same change to many targets is shown as one line", async () => {
   assert.doesNotMatch(text, /^2\./m);
 });
 
-test("a plan made from code opens on its explanation and the changes; the code and exact calls are pages away", async () => {
+test("a plan made from code opens on its explanation and the changes; the code and exact calls are sections away", async () => {
   const { planner, store, replies, summarized } = setup();
   const code = 'const ids = ["3"];\nreturn plan(ids.map((u) => call("PUT /guilds/{guild}/members/{user}/roles/{role}", { path: { user: u, role: "' + MOD_ROLE + '" } })));';
   const plan = await planner.propose({
@@ -569,12 +584,23 @@ test("a plan made from code opens on its explanation and the changes; the code a
   const opened = replies.at(-1)!.body;
   assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*ロール付与/);
   assert.doesNotMatch(dialogText(opened), /```/);
-  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "概要", "コード", "詳細", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し"]);
 
-  // Anyone may switch the view; it stays switched when the dialog is redrawn.
-  await planner.handleInteraction(click(plan, "code", "2"));
-  assert.match(dialogText(replies.at(-1)!.body), /```js\nconst ids/);
-  await planner.handleInteraction(click(plan, "details", "2"));
+  assert.deepEqual(menu(opened), ["概要*", "コード", "詳細", "ファイルで受け取る"]);
+
+  // Anyone may switch the section, in place; it stays switched when the dialog is redrawn.
+  await planner.handleInteraction(pick(plan, "code", "2"));
+  const shown = replies.at(-1)!;
+  assert.equal(shown.kind, "updateMessage");
+  assert.match(dialogText(shown.body), /```js\nconst ids/);
+  assert.doesNotMatch(dialogText(shown.body), /全員に @Mod/); // only the code
+  assert.deepEqual(menu(shown.body), ["概要", "コード*", "詳細", "ファイルで受け取る"]);
+  // Files go only to whoever asked; the dialog stays on its section.
+  await planner.handleInteraction(pick(plan, "files", "2"));
+  assert.deepEqual(replies.slice(-2).map((r) => r.kind), ["updateMessage", "followUp"]);
+  assert.deepEqual(menu(replies.at(-2)!.body), ["概要", "コード*", "詳細", "ファイルで受け取る"]);
+  assert.deepEqual(replies.at(-1)!.body.files.map((f: { name: string }) => f.name), [`plan-${plan.id}.json`, "plan.js"]);
+  await planner.handleInteraction(pick(plan, "details", "2"));
   assert.match(dialogText(replies.at(-1)!.body), /```json\n\[\{"id":"s1"/);
   await planner.handleInteraction(click(plan, "cancel", "1"));
   assert.match(dialogText(replies.at(-1)!.body), /```json/);
@@ -588,7 +614,7 @@ test("a plan made from steps has no code view", async () => {
     drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x" } }],
   });
   assert.equal(summarized.length, 0);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["実行", "修正", "取り消し", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["実行", "修正", "取り消し"]);
 });
 
 // --- Plans made by event rules -------------------------------------------------
@@ -749,8 +775,8 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.match(text, /登録するルール/);
   assert.match(text, /通話部屋を作る/);
   assert.doesNotMatch(text, /lobby:/);
-  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "概要", "コード", "詳細", "JSONを見る"]);
-  await t.planner.handleInteraction(click(plan, "details", "1"));
+  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し"]);
+  await t.planner.handleInteraction(pick(plan, "details", "1"));
   const details = dialogText(t.replies.at(-1)!.body);
   assert.match(details, /lobby: \(s1 で作るもののid\)/);
   assert.match(details, /対象の条件: .*📞/);
@@ -828,9 +854,11 @@ test("rules are checked at proposal: refs must point to the plan's steps, and a 
   assert.equal(t.calls.length, 0);
 });
 
-test("a new version of a rule shows what it did before and what it will do", async () => {
+test("a new version of a rule lists what changes from the one it replaces", async () => {
   const t = setup();
-  withRules(t);
+  const { service } = withRules(t);
+  const described: Array<[string, string]> = [];
+  service.deps.describeChanges = async (before, after) => (described.push([before, after]), ["空いた部屋を5分待ってから消します"]);
   const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "x" };
   const first = await t.planner.propose({ ...base, drafts: [], rules: [CLEANUP_RULE] });
   await t.planner.handleInteraction(click(first, "run", "1"));
@@ -838,11 +866,43 @@ test("a new version of a rule shows what it did before and what it will do", asy
   const old = t.store.listRules(GUILD)[0]!;
   t.store.db.prepare("UPDATE rules SET rule_json = json_set(rule_json, '$.summary', ?) WHERE id = ?").run("前の説明です。", old.id);
 
+  // The same code: only the settings that changed are listed, and no model is asked.
   const plan = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, trigger: { event: "VOICE_STATE_UPDATE" } }] });
   const text = dialogText(renderDialog(plan, { status: "pending_approval" }));
-  assert.match(text, /変更前: 前の説明です。/);
-  assert.match(text, /変更後: 説明です。/);
-  assert.match(text, /変わる設定: きっかけ/);
+  assert.match(text, /v1 からの変更/);
+  assert.match(text, /\n- きっかけ: .* → /);
+  assert.doesNotMatch(text, /```|変更前|説明です。/);
+  assert.equal(described.length, 0);
+
+  // New code: the changes written from both versions' code, as bullets.
+  const code = CLEANUP_RULE.program.code;
+  const changed = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, program: { kind: "js" as const, code: `${code}\n// v2` } }] });
+  const bullets = dialogText(renderDialog(changed, { status: "pending_approval" }));
+  assert.match(bullets, /\n- 空いた部屋を5分待ってから消します/);
+  assert.doesNotMatch(bullets, /きっかけ: .* → /);
+  assert.deepEqual(described, [[code, `${code}\n// v2`]]);
+
+  // The code section shows the code as a diff against the replaced version.
+  const diffed = dialogText(renderDialog(changed, { status: "pending_approval", view: "code" }));
+  assert.match(diffed, /v1 からの差分/);
+  assert.doesNotMatch(diffed, /空いた部屋を5分待って/);
+  assert.match(diffed, /```diff\n[\s\S]*\n\+ \/\/ v2\n```/);
+  assert.match(dialogText(renderDialog(plan, { status: "pending_approval", view: "code" })), /コードは変わりません/);
+
+  // A diff too long for the dialog is cut, and the whole comes as files.
+  const long = Array.from({ length: 400 }, (_, i) => `log(${i});`).join("\n");
+  const big = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, program: { kind: "js" as const, code: `${code}\n${long}` } }] });
+  const cut = renderDialog(big, { status: "pending_approval", view: "code" });
+  assert.match(dialogText(cut), /…\(続きは「ファイルで受け取る」\)/);
+  await t.planner.handleInteraction(pick(big, "files", "2"));
+  const files = t.replies.at(-1)!.body.files as Array<{ name: string; data: Buffer }>;
+  assert.deepEqual(files.map((f) => f.name), [`plan-${big.id}.json`, "rule-r1.diff", "rule-r1-v1.js", "rule-r1.js"]);
+  assert.match(files[1]!.data.toString(), /\+ log\(399\);$/);
+
+  // Without the bullets, what each version does is shown instead.
+  service.deps.describeChanges = async () => null;
+  const plain = await t.planner.propose({ ...base, drafts: [], rules: [{ ...CLEANUP_RULE, replaces: old.id, program: { kind: "js" as const, code: `${code}\n// v3` } }] });
+  assert.match(dialogText(renderDialog(plain, { status: "pending_approval" })), /変更前: 前の説明です。\n変更後: 説明です。/);
 });
 
 test("propose_plan refuses steps and code together, and points out rule code passed as plan code", async () => {
@@ -1089,16 +1149,39 @@ const TEX_RULE = {
   program: { kind: "js" as const, code: "reply('ok'); return null;" },
 };
 
+test("a new version of a command keeps who sees its replies unless the request says otherwise", async () => {
+  const t = setup();
+  let asked = 0;
+  withRules(t, async () => (asked++, 0.9));
+  const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "/tex を作って", drafts: [] };
+  const own = { ...TEX_RULE, trigger: { ...TEX_RULE.trigger, command: { ...TEX_RULE.trigger.command, visibility: "private" as const } } };
+  const first = await t.planner.propose({ ...base, rules: [own] });
+  await t.planner.handleInteraction(click(first, "run", "1"));
+  await settle(() => t.store.getPlan(first.id)!.status === "succeeded");
+  const old = t.store.listRules(GUILD)[0]!;
+
+  const next = await t.planner.propose({ ...base, rules: [{ ...TEX_RULE, replaces: old.id, program: { kind: "js" as const, code: "reply('v2'); return null;" } }] });
+  assert.equal(next.rules![0]!.trigger.command!.visibility, "private");
+  assert.equal(asked, 0);
+  // Said in the request, it changes.
+  const told = { ...TEX_RULE, replaces: old.id, trigger: { ...TEX_RULE.trigger, command: { ...TEX_RULE.trigger.command, visibility: "public" as const } } };
+  assert.equal((await t.planner.propose({ ...base, rules: [told] })).rules![0]!.trigger.command!.visibility, "public");
+});
+
 test("a command's dialog starts on the judge's pick for who sees replies, and the requester can change it", async () => {
   const t = setup();
   let score: number | null = 0.5;
   withRules(t, async () => score);
   const base = { guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]), reader, request: "/tex を作って", drafts: [] };
-  const selectOf = (body: any) => body.components[0].components.find((c: any) => c.type === ComponentType.ActionRow && c.components[0].type === ComponentType.StringSelect)?.components[0];
+  const selectOf = (body: any) => body.components[0].components.find((c: any) => c.type === ComponentType.ActionRow && c.components[0].custom_id?.startsWith("plan:visibility"))?.components[0];
   const chosen = (body: any) => selectOf(body)?.options.find((o: any) => o.default)?.value;
 
   const plan = await t.planner.propose({ ...base, rules: [TEX_RULE] });
   assert.equal(plan.rules![0]!.trigger.command!.visibility, "auto");
+  // The summary says who sees the replies; it is picked in 詳細.
+  assert.equal(selectOf(t.replies.at(-1)!.body), undefined);
+  assert.match(dialogText(t.replies.at(-1)!.body), /判定用のモデルが決めます/);
+  await t.planner.handleInteraction(click(plan, "details", "1"));
   assert.equal(chosen(t.replies.at(-1)!.body), "auto");
   score = 0.9;
   assert.equal((await t.planner.propose({ ...base, rules: [TEX_RULE] })).rules![0]!.trigger.command!.visibility, "public");
@@ -1266,4 +1349,11 @@ test("overwrites of one channel go in one PATCH; changes to one resource are mer
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["PATCH /channels/10", "PATCH /channels/11", `PATCH /guilds/${GUILD}/members/11`]);
   assert.deepEqual(calls[0]!.options!.body, { permission_overwrites: [{ id: MOD_ROLE, type: 0, allow: "1024", deny: "0" }, { id: GUILD, type: 0, allow: "0", deny: "1024" }] });
   assert.deepEqual(calls[1]!.options!.body, { name: "b", topic: "x" });
+});
+
+test("lineDiff marks added and removed lines with a little context", async () => {
+  const { lineDiff } = await import("../src/plan/diff.ts");
+  assert.equal(lineDiff("a\nb", "a\nb"), "");
+  assert.equal(lineDiff("1\n2\n3\n4\n5\n6\n7", "1\n2\n3\nX\n5\n6\n7", 1), "  3\n- 4\n+ X\n  5\n…");
+  assert.equal(lineDiff("a", "a\nb"), "  a\n+ b");
 });

@@ -171,7 +171,9 @@ export interface PlanRuleDraft {
     name: string;
     version: number;
     /** The version being replaced, so the dialog can show before and after. Absent when it may not be shown here. */
-    before?: { summary: string | null; trigger: RuleTrigger; allow: AllowEntry[]; params?: Record<string, unknown> };
+    before?: { summary: string | null; trigger: RuleTrigger; allow: AllowEntry[]; params?: Record<string, unknown>; limits?: RuleLimits; code?: string };
+    /** How the code's behaviour changes, written from both versions' code alone. Empty when the code is the same; absent when it could not be written. */
+    changes?: string[];
   };
   /** The dry run at proposal. */
   dry: RuleDryRun;
