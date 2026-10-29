@@ -1,7 +1,7 @@
 // A line diff for the approval dialog: two versions of a rule's code, shown
 // as hunks with a few lines of context so the reader sees what moved.
 
-/** Lines beyond this on either side are not compared; the whole is in 「JSONを見る」. */
+/** Lines beyond this on either side are not compared; the whole is in 「ファイルで受け取る」. */
 const MAX_LINES = 1500;
 
 /** A unified-style diff ("+ " added, "- " removed, "  " kept) with `context` lines around each change; "" when equal. */

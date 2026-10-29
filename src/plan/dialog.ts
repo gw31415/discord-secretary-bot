@@ -39,8 +39,9 @@ export type PlanAction =
   | "result"
   | "details"
   | "visibility"
-  | "files";
-const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result", "details", "visibility", "files"]);
+  | "files"
+  | "view";
+const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise", "revisetext", "redo", "resume", "restore", "keep", "code", "result", "details", "visibility", "files", "view"]);
 
 /** `rule` names which of the plan's rules a control is for ("visibility.r1"). */
 export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">, rule?: string): string {
@@ -290,13 +291,24 @@ function viewOf(plan: Plan, state: DialogState): DialogView {
   return views(plan).includes(view) ? view : "result";
 }
 
-function navButtons(plan: Plan, current: DialogView): APIButtonComponent[] {
-  const pages = views(plan);
-  const out: APIButtonComponent[] = pages.length > 1
-    ? pages.map((v) => ({ ...button(customId(v, plan), VIEW_LABEL[v], v === current ? ButtonStyle.Primary : ButtonStyle.Secondary), disabled: v === current }))
-    : [];
-  out.push(button(customId("json", plan), "JSONを見る", ButtonStyle.Secondary));
-  return out;
+/** The menu's choice that sends the plan as JSON, with its code, to whoever picked it. */
+export const FILES_CHOICE = "files";
+
+/** One menu switches the section and hands out files, so the only buttons left are the ones that act on the plan. */
+function viewMenu(plan: Plan, current: DialogView): APIActionRowComponent<APIStringSelectComponent> {
+  return {
+    type: ComponentType.ActionRow,
+    components: [
+      {
+        type: ComponentType.StringSelect,
+        custom_id: customId("view", plan),
+        options: [
+          ...views(plan).map((v) => ({ label: VIEW_LABEL[v], value: v, default: v === current })),
+          { label: "ファイルで受け取る", value: FILES_CHOICE },
+        ],
+      },
+    ],
+  };
 }
 
 /** Keeps a code block from being closed by its own content. */
@@ -322,7 +334,7 @@ function codeBody(plan: Plan, room: number): string[] {
     const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
     const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
     const cut = code.lastIndexOf("\n", limit);
-    const shown = code.length > limit ? `${code.slice(0, cut > 0 ? cut : limit)}\n${diff ? "…" : "// …"}(続きは「ファイルで」)` : code;
+    const shown = code.length > limit ? `${code.slice(0, cut > 0 ? cut : limit)}\n${diff ? "…" : "// …"}(続きは「ファイルで受け取る」)` : code;
     return [`**${title}**\n${explained}`, fenced(diff ? "diff" : (lang ?? "js"), shown)];
   });
 }
@@ -335,7 +347,7 @@ function diffable(r: PlanRuleDraft): boolean {
   return r.replaces?.before?.code !== undefined && (r.program.kind === "js" || !!r.program.module.source);
 }
 
-/** The code section in full, as files: the plan's code, each rule's code, and for a new version its diff and the old code. */
+/** The code in full, as files: the plan's code, each rule's code, and for a new version its diff and the old code. */
 export function codeFiles(plan: Plan): Array<{ name: string; data: Buffer }> {
   const file = (name: string, text: string) => ({ name, data: Buffer.from(text) });
   const ext = (r: PlanRuleDraft) => (r.program.kind === "js" ? "js" : "txt");
@@ -349,7 +361,7 @@ export function codeFiles(plan: Plan): Array<{ name: string; data: Buffer }> {
       const diff = lineDiff(r.replaces!.before!.code!, code, 3);
       return [...(diff ? [file(`${base}.diff`, diff)] : []), file(`${base}-v${r.replaces!.version}.${ext(r)}`, r.replaces!.before!.code!), file(`${base}.${ext(r)}`, code)];
     }),
-  ].slice(0, 10); // a message carries ten files at most
+  ].slice(0, 9); // a message carries ten files at most, one of them the JSON
 }
 
 /** A new version of a rule: what changed in its code, as a diff against the version it replaces. */
@@ -438,7 +450,7 @@ function ruleDetails(plan: Plan): string[] {
 function resultBody(plan: Plan, state: DialogState): string[] {
   const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps);
   const listed = lines.slice(0, MAX_LISTED);
-  if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「JSONを見る」)`);
+  if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「ファイルで受け取る」)`);
   const explained = plan.source ? [`**コードの説明**\n${plan.source.summary ?? "説明を作れませんでした。「コード」で確かめてください。"}`] : [];
   const rules = plan.rules?.length ? [`**登録するルール**(${label(plan, plan.actor.userId)} の権限で、確認なしに動きます)`] : [];
   return [...explained, ...listed, ...rules];
@@ -449,7 +461,7 @@ function detailsBody(plan: Plan): string[] {
   if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
     const json = JSON.stringify(plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) })));
-    out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fenced("json", json) : "長いため「JSONを見る」で確かめてください"}`);
+    out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fenced("json", json) : "長いため「ファイルで受け取る」で確かめてください"}`);
   }
   return [...out, ...ruleDetails(plan)];
 }
@@ -472,7 +484,7 @@ function header(plan: Plan): string {
 
 /**
  * Laid out from the parts to the whole: the shown section (on the summary, each
- * rule with the pick that belongs to it), the buttons that switch sections, and
+ * rule with the pick that belongs to it), the menu that switches sections, and
  * last, under a divider, the dialog's own status and the buttons that act on it.
  */
 export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
@@ -492,11 +504,7 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
         ...gallery(plan),
         ...(plan.rules ?? []).flatMap((r) => [text(ruleSummary(r)), ...visibilityRow(plan, state, r)]),
       ]
-    : [
-        text([header(plan), ...(view === "code" ? codeBody(plan, room - header(plan).length) : detailsBody(plan))].join("\n")),
-        // The code's own button sits with it: the whole code, the old version and the diff as files.
-        ...(view === "code" && codeFiles(plan).length > 0 ? row([button(customId("files", plan), "ファイルで", ButtonStyle.Secondary)]) : []),
-      ];
+    : [text([header(plan), ...(view === "code" ? codeBody(plan, room - header(plan).length) : detailsBody(plan))].join("\n"))];
   return {
     components: [
       {
@@ -504,7 +512,7 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
         accent_color: color(plan, state.status),
         components: [
           ...section,
-          ...row(navButtons(plan, view)),
+          viewMenu(plan, view),
           { type: ComponentType.Separator },
           { type: ComponentType.TextDisplay, content: status },
           ...row(buttons(plan, state)),
