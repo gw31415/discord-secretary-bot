@@ -52,24 +52,21 @@ export function parsePlanCustomId(id: string): { action: PlanAction; planId: str
 }
 
 
-/** While the plan waits, who sees each command's replies is picked here; the pick is part of what is approved. */
-function visibilityRows(plan: Plan, state: DialogState): APIActionRowComponent<APIStringSelectComponent>[] {
-  if (state.status !== "pending_approval" || state.actions === false) return [];
-  const commands = (plan.rules ?? []).filter((r) => r.trigger.command);
-  return commands.map((r) => ({
-    type: ComponentType.ActionRow,
-    components: [
-      {
-        type: ComponentType.StringSelect,
-        custom_id: customId("visibility", plan, r.key),
-        options: VISIBILITY_CHOICES.map((o) => ({
-          value: o.value,
-          label: commands.length > 1 ? `/${r.trigger.command!.name}: ${o.label}` : o.label,
-          default: (r.trigger.command!.visibility ?? "auto") === o.value,
-        })),
-      },
-    ],
-  }));
+/** While the plan waits, who sees a command's replies is picked under its rule; the pick is part of what is approved. */
+function visibilityRow(plan: Plan, state: DialogState, r: PlanRuleDraft): APIActionRowComponent<APIStringSelectComponent>[] {
+  if (state.status !== "pending_approval" || state.actions === false || !r.trigger.command) return [];
+  return [
+    {
+      type: ComponentType.ActionRow,
+      components: [
+        {
+          type: ComponentType.StringSelect,
+          custom_id: customId("visibility", plan, r.key),
+          options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (r.trigger.command!.visibility ?? "auto") === o.value })),
+        },
+      ],
+    },
+  ];
 }
 
 const MAX_LISTED = 15;
@@ -360,22 +357,15 @@ function changeLines(r: PlanRuleDraft): string[] {
   return [...code, ...settings.map((c) => `- ${c}`)];
 }
 
-/** The rules a plan registers, in short: when each runs, what it does or what changes, and how its dry run went. */
-function ruleSummaries(plan: Plan): string[] {
-  if (!plan.rules?.length) return [];
-  const owner = label(plan, plan.actor.userId);
+/** A rule the plan registers, in short: when it runs, what it does or what changes, and how its dry run went. */
+function ruleSummary(r: PlanRuleDraft): string {
+  const triggerChanged = r.replaces?.before && !same(r.replaces.before.trigger, r.trigger);
   return [
-    `**登録するルール**(${owner} の権限で、確認なしに動きます)`,
-    ...plan.rules.map((r) => {
-      const triggerChanged = r.replaces?.before && !same(r.replaces.before.trigger, r.trigger);
-      return [
-        `**${r.name}**${r.replaces ? `(v${r.replaces.version} からの変更${r.replaces.name !== r.name ? `、元の名前「${r.replaces.name}」` : ""})` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
-        ...(triggerChanged ? [] : [`きっかけ: ${triggerLabel(r.trigger)}`]),
-        ...(r.replaces ? changeLines(r) : [r.summary ?? "説明を作れませんでした。「コード」で確かめてください。"]),
-        dryLine(r),
-      ].join("\n");
-    }),
-  ];
+    `**${r.name}**${r.replaces ? `(v${r.replaces.version} からの変更${r.replaces.name !== r.name ? `、元の名前「${r.replaces.name}」` : ""})` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
+    ...(triggerChanged ? [] : [`きっかけ: ${triggerLabel(r.trigger)}`]),
+    ...(r.replaces ? changeLines(r) : [r.summary ?? "説明を作れませんでした。「コード」で確かめてください。"]),
+    dryLine(r),
+  ].join("\n");
 }
 
 /** Each rule's full definition, drawn only from it. */
@@ -397,7 +387,8 @@ function resultBody(plan: Plan, state: DialogState): string[] {
   const listed = lines.slice(0, MAX_LISTED);
   if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「JSONを見る」)`);
   const explained = plan.source ? [`**コードの説明**\n${plan.source.summary ?? "説明を作れませんでした。「コード」で確かめてください。"}`] : [];
-  return [...explained, ...listed, ...ruleSummaries(plan)];
+  const rules = plan.rules?.length ? [`**登録するルール**(${label(plan, plan.actor.userId)} の権限で、確認なしに動きます)`] : [];
+  return [...explained, ...listed, ...rules];
 }
 
 function detailsBody(plan: Plan): string[] {
@@ -436,17 +427,35 @@ export function renderView(plan: Plan, view: DialogView): { components: APIMessa
   };
 }
 
+/**
+ * Laid out from the parts to the whole: the plan's changes, each rule with the
+ * pick that belongs to it, the pages that show the plan, and last, under a
+ * divider, the dialog's own status and the buttons that act on it.
+ */
 export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
-  const text = [header(plan), ...resultBody(plan, state), "", statusLine(plan, state)].join("\n").slice(0, MAX_TEXT);
-  const rows: APIActionRowComponent<APIButtonComponent>[] = [buttons(plan, state), navButtons(plan)]
-    .filter((b) => b.length > 0)
-    .map((components) => ({ type: ComponentType.ActionRow, components }));
+  let room = MAX_TEXT;
+  const text = (content: string): APITextDisplayComponent => {
+    const shown = content.slice(0, Math.max(0, room));
+    room -= shown.length;
+    return { type: ComponentType.TextDisplay, content: shown || "…" };
+  };
+  const row = (components: APIButtonComponent[]): APIActionRowComponent<APIButtonComponent>[] => (components.length > 0 ? [{ type: ComponentType.ActionRow, components }] : []);
+  const status = statusLine(plan, state);
+  room -= status.length;
   return {
     components: [
       {
         type: ComponentType.Container,
         accent_color: color(plan, state.status),
-        components: [{ type: ComponentType.TextDisplay, content: text }, ...gallery(plan), ...visibilityRows(plan, state), ...rows],
+        components: [
+          text([header(plan), ...resultBody(plan, state)].join("\n")),
+          ...gallery(plan),
+          ...(plan.rules ?? []).flatMap((r) => [text(ruleSummary(r)), ...visibilityRow(plan, state, r)]),
+          ...row(navButtons(plan)),
+          { type: ComponentType.Separator },
+          { type: ComponentType.TextDisplay, content: status },
+          ...row(buttons(plan, state)),
+        ],
       },
     ],
     flags: MessageFlags.IsComponentsV2,
@@ -456,7 +465,7 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
 /** The dialog's text, for tests and logs. */
 export function dialogText(rendered: { components: APIMessageTopLevelComponent[] }): string {
   const container = rendered.components[0] as { components: Array<{ type: number; content?: string }> };
-  return container.components.find((c) => c.type === ComponentType.TextDisplay)?.content ?? "";
+  return container.components.filter((c) => c.type === ComponentType.TextDisplay).map((c) => c.content ?? "").join("\n");
 }
 
 export function dialogButtons(rendered: { components: APIMessageTopLevelComponent[] }): string[] {

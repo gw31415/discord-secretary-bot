@@ -281,7 +281,7 @@ test("a plan is proposed, approved by its actor, re-verified and executed in ord
   assert.equal(dialog.message_reference.message_id, "400");
   assert.deepEqual(dialog.allowed_mentions, { parse: [] });
   assert.match(dialogText(dialog), /チャンネル作成.*#new/);
-  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(dialog), ["JSONを見る", "実行", "修正", "取り消し"]);
 
   // Someone else cannot approve.
   await planner.handleInteraction(click(plan, "run", "3"));
@@ -384,7 +384,7 @@ test("a failed step stops the plan; restore proposes the inverse of what was don
   await settle(() => store.getPlan(plan.id)!.status === "failed");
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "failed", "pending"]);
   assert.match(dialogText(replies.at(-1)!.body), /途中で失敗しました\(1\/3件完了\)/);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["再開", "復元", "そのまま", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["JSONを見る", "再開", "復元", "そのまま"]);
 
   const { drafts, skipped } = planner.restoreDrafts(store.getPlan(plan.id)!);
   assert.deepEqual(drafts, [{ op: "DELETE /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } }]);
@@ -419,7 +419,7 @@ test("unanswered dialogs expire after five minutes", async () => {
   await planner.sweep();
   assert.equal(store.getPlan(plan.id)!.status, "cancelled");
   assert.match(dialogText(replies.at(-1)!.body), /期限切れ/);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["出し直す", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["JSONを見る", "出し直す"]);
   // A late click does nothing.
   await planner.handleInteraction(click(plan, "run", "1"));
   assert.match(replies.at(-1)!.body.content, /もう承認待ちではありません/);
@@ -569,7 +569,7 @@ test("a plan made from code shows its explanation and the changes; the code and 
   const opened = replies.at(-1)!.body;
   assert.match(dialogText(opened), /コードの説明\*\*\n全員に @Mod を付けます。[\s\S]*ロール付与/);
   assert.doesNotMatch(dialogText(opened), /```/);
-  assert.deepEqual(dialogButtons(opened), ["実行", "修正", "取り消し", "コード", "詳細", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(opened), ["コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
 
   // Anyone may read the code and details; they are answered to them alone and the dialog stays as it is.
   await planner.handleInteraction(click(plan, "code", "2"));
@@ -592,7 +592,7 @@ test("a plan made from steps has no code view", async () => {
     drafts: [{ op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "x" } }],
   });
   assert.equal(summarized.length, 0);
-  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["実行", "修正", "取り消し", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["JSONを見る", "実行", "修正", "取り消し"]);
 });
 
 // --- Plans made by event rules -------------------------------------------------
@@ -753,7 +753,7 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.match(text, /登録するルール/);
   assert.match(text, /通話部屋を作る/);
   assert.doesNotMatch(text, /lobby:/);
-  assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し", "コード", "詳細", "JSONを見る"]);
+  assert.deepEqual(dialogButtons(dialog), ["コード", "詳細", "JSONを見る", "実行", "修正", "取り消し"]);
   await t.planner.handleInteraction(click(plan, "details", "1"));
   const details = dialogText(t.replies.at(-1)!.body);
   assert.match(details, /lobby: \(s1 で作るもののid\)/);
