@@ -593,6 +593,7 @@ test("a plan made from code opens on its explanation and the changes; the code a
   const shown = replies.at(-1)!;
   assert.equal(shown.kind, "updateMessage");
   assert.match(dialogText(shown.body), /```js\nconst ids/);
+  assert.doesNotMatch(dialogText(shown.body), /全員に @Mod/); // only the code
   assert.deepEqual(menu(shown.body), ["概要", "コード*", "詳細", "ファイルで受け取る"]);
   // Files go only to whoever asked; the dialog stays on its section.
   await planner.handleInteraction(pick(plan, "files", "2"));
@@ -883,7 +884,8 @@ test("a new version of a rule lists what changes from the one it replaces", asyn
 
   // The code section shows the code as a diff against the replaced version.
   const diffed = dialogText(renderDialog(changed, { status: "pending_approval", view: "code" }));
-  assert.match(diffed, /コードの変更\(v1 から/);
+  assert.match(diffed, /v1 からの差分/);
+  assert.doesNotMatch(diffed, /空いた部屋を5分待って/);
   assert.match(diffed, /```diff\n[\s\S]*\n\+ \/\/ v2\n```/);
   assert.match(dialogText(renderDialog(plan, { status: "pending_approval", view: "code" })), /コードは変わりません/);
 

@@ -316,26 +316,29 @@ function fenced(lang: string, body: string): string {
   return `\`\`\`${lang}\n${body.replaceAll("```", "`\u200b``")}\n\`\`\``;
 }
 
+/**
+ * Only the code: whoever opens this section came to read it, and the summary
+ * already explains it. A new version of a rule shows its diff.
+ */
 function codeBody(plan: Plan, room: number): string[] {
-  const parts: Array<{ title: string; code: string; summary: string | null; wasm?: string; lang?: string; diff?: boolean }> = [
-    ...(plan.source ? [{ title: "コードの説明", ...plan.source }] : []),
-    ...(plan.rules ?? []).map((r) => (diffable(r) ? ruleDiffPart(r) : {
-      title: r.program.kind === "wasm" ? `ルール「${r.name}」が動かすWasm${r.program.module.source ? `(${r.program.module.source.language} からBotがコンパイル)` : ""}` : `ルール「${r.name}」のコードの説明`,
-      code: r.program.kind === "js" ? r.program.code : r.program.module.source ? r.program.module.source.files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n") : "",
-      ...(r.program.kind === "wasm" && !r.program.module.source ? { wasm: `sha256 ${r.program.module.sha256}${r.program.module.producers.length ? `\nビルド: ${r.program.module.producers.join("、")}` : ""}` } : {}),
-      ...(r.program.kind === "wasm" && r.program.module.source ? { lang: fenceLanguage(r.program.module.source.language) } : {}),
-      summary: r.replaces?.before && r.summary ? `変更前: ${r.replaces.before.summary ?? "説明はありません"}\n変更後: ${r.summary}` : r.summary,
-    })),
+  const parts: Array<{ title: string; code: string; lang: string }> = [
+    ...(plan.source ? [{ title: "変更を作るコード", code: plan.source.code, lang: "js" }] : []),
+    ...(plan.rules ?? []).map((r) => {
+      if (diffable(r)) return { title: `ルール「${r.name}」(v${r.replaces!.version} からの差分)`, code: lineDiff(r.replaces!.before!.code!, programCode(r)), lang: "diff" };
+      if (r.program.kind === "wasm" && !r.program.module.source) {
+        const m = r.program.module;
+        return { title: `ルール「${r.name}」が動かすWasm`, code: `sha256 ${m.sha256}${m.producers.length ? `\nビルド: ${m.producers.join("、")}` : ""}`, lang: "" };
+      }
+      return { title: `ルール「${r.name}」`, code: programCode(r), lang: r.program.kind === "wasm" ? fenceLanguage(r.program.module.source!.language) : "js" };
+    }),
   ];
   const share = Math.floor(room / Math.max(1, parts.length));
-  return parts.flatMap(({ title, code, summary, wasm, lang, diff }) => {
-    if (wasm) return [`**${title}**\n${summary ?? ""}`, fenced("", wasm)];
-    if (diff && !code) return [`**${title}**\nコードは変わりません。`];
-    const explained = summary ?? "説明を作れませんでした。コードを読んで確かめてください。";
-    const limit = Math.max(200, Math.min(MAX_CODE, share - explained.length - 200));
+  return parts.flatMap(({ title, code, lang }) => {
+    if (lang === "diff" && !code) return [`**${title}**\nコードは変わりません。`];
+    const limit = Math.max(200, Math.min(MAX_CODE, share - title.length - 100));
     const cut = code.lastIndexOf("\n", limit);
-    const shown = code.length > limit ? `${code.slice(0, cut > 0 ? cut : limit)}\n${diff ? "…" : "// …"}(続きは「ファイルで受け取る」)` : code;
-    return [`**${title}**\n${explained}`, fenced(diff ? "diff" : (lang ?? "js"), shown)];
+    const shown = code.length > limit ? `${code.slice(0, cut > 0 ? cut : limit)}\n${lang === "diff" ? "…" : "// …"}(続きは「ファイルで受け取る」)` : code;
+    return [`**${title}**`, fenced(lang, shown)];
   });
 }
 
@@ -362,18 +365,6 @@ export function codeFiles(plan: Plan): Array<{ name: string; data: Buffer }> {
       return [...(diff ? [file(`${base}.diff`, diff)] : []), file(`${base}-v${r.replaces!.version}.${ext(r)}`, r.replaces!.before!.code!), file(`${base}.${ext(r)}`, code)];
     }),
   ].slice(0, 9); // a message carries ten files at most, one of them the JSON
-}
-
-/** A new version of a rule: what changed in its code, as a diff against the version it replaces. */
-function ruleDiffPart(r: PlanRuleDraft): { title: string; code: string; summary: string | null; diff: true } {
-  const after = programCode(r);
-  const changes = r.replaces!.changes;
-  return {
-    title: `ルール「${r.name}」のコードの変更(v${r.replaces!.version} から。+ は足した行、- は消した行)`,
-    code: lineDiff(r.replaces!.before!.code!, after),
-    summary: changes?.length ? changes.map((c) => `- ${c}`).join("\n") : r.summary,
-    diff: true,
-  };
 }
 
 /** The code block language for a compiler language id. */
