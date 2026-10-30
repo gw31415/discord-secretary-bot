@@ -39,6 +39,11 @@ pub fn get(route: &str) -> Result<Value, String> {
     call(json!({ "fn": "get", "route": route }))
 }
 
+/// GET with a query string, e.g. `get_with("/channels/1/messages", json!({ "limit": 1 }))`.
+pub fn get_with(route: &str, query: Value) -> Result<Value, String> {
+    call(json!({ "fn": "get", "route": route, "query": query }))
+}
+
 /// Writes the result: { steps, state?, reply? }.
 pub fn output(result: Value) {
     std::io::stdout().write_all(result.to_string().as_bytes()).expect("stdout");

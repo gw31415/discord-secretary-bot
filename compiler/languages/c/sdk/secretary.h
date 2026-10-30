@@ -19,6 +19,9 @@ cJSON *secretary_call(const cJSON *request, char **error);
 /* GET a Discord route the rule's owner may read. */
 cJSON *secretary_get(const char *route, char **error);
 
+/* GET with a query string such as {"limit":1}; query may be NULL. The caller keeps query. */
+cJSON *secretary_get_query(const char *route, const cJSON *query, char **error);
+
 /* Writes the result { steps, state?, reply? } to stdout. */
 void secretary_output(const cJSON *result);
 

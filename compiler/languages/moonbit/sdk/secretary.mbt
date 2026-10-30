@@ -95,9 +95,12 @@ pub fn call(request : Json) -> Json raise Failure {
 }
 
 ///|
-/// GET a Discord route the rule's owner may read.
-pub fn get(route : String) -> Json raise Failure {
-  call({ "fn": "get", "route": Json(route) })
+/// GET a Discord route the rule's owner may read; `query` is its query string, e.g. { "limit": 1 }.
+pub fn get(route : String, query? : Json) -> Json raise Failure {
+  match query {
+    Some(q) => call({ "fn": "get", "route": Json(route), "query": q })
+    None => call({ "fn": "get", "route": Json(route) })
+  }
 }
 
 ///|

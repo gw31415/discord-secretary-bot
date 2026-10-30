@@ -114,7 +114,7 @@ JSON として buf[0:n] を読み、error があれば失敗として扱う
 | `image` | `data`(PNG・JPEG・GIF・WebP の Base64), `name?` | 画像ID。Botが描き直してから使う |
 | `runWasm` | `module`, `input?`, `stdin?` | `{ exitCode, stdout, logs }`。登録済みのモジュールを1回動かす(JavaScript の [`runWasm`](js-api.md#wasm-を動かすrunwasm) と同じ)。動かしたモジュールからは呼べない |
 
-例: `{"fn":"get","route":"/guilds/123/roles"}`、`{"fn":"get","route":"/channels/456/messages","query":{"limit":20}}`。
+例: `{"fn":"get","route":"/guilds/123/roles"}`、`{"fn":"get","route":"/channels/456/messages","query":{"limit":20}}`。route に `?limit=20` のようにクエリを書いても、`query` に移して同じに扱います(両方にあれば `query` の値が勝ちます)。
 
 `judge` と `rank` は合わせて10回、画像を作る関数は合わせて4枚までです。オプションは [JavaScript の API](js-api.md#画像) と同じです。画像IDは投稿の `body.files` に入れるか、コマンドでは返事に付きます。
 

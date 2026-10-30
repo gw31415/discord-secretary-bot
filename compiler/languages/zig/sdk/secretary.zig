@@ -60,6 +60,11 @@ pub fn get(route: []const u8) !std.json.Value {
     return request(.{ .@"fn" = "get", .route = route });
 }
 
+/// GET with a query string, e.g. getQuery("/channels/1/messages", .{ .limit = 1 }).
+pub fn getQuery(route: []const u8, query: anytype) !std.json.Value {
+    return request(.{ .@"fn" = "get", .route = route, .query = query });
+}
+
 /// Writes the result: { steps, state?, reply? }.
 pub fn output(result: anytype) !void {
     const text = try std.json.Stringify.valueAlloc(allocator, result, .{ .emit_null_optional_fields = false });

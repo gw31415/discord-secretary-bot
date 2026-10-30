@@ -12,8 +12,11 @@ wasi-sdk 25(clang)で wasm32-wasip1 のコマンドにします。`main.c`(C++ �
 cJSON *secretary_input(void);                               // 標準入力の JSON(guild, actor, eventName, event, batch, params, state)
 cJSON *secretary_call(const cJSON *request, char **error);  // {"fn": ...} を送り value を返す。失敗は NULL と *error
 cJSON *secretary_get(const char *route, char **error);      // Discord REST の GET(作成者が読める範囲)
+cJSON *secretary_get_query(const char *route, const cJSON *query, char **error);  // クエリつきの GET(query は呼んだ側が消す)
 void secretary_output(const cJSON *result);                 // 標準出力に { steps, state?, reply? }
 ```
+
+`limit` などのクエリは `secretary_get_query(route, query, &error)` の query(`{"limit":1}` の cJSON)で渡します(route に `?limit=1` と書いても同じに扱います)。読めるルートと使えるクエリは docs の「読めるルート」を見てください。
 
 ## 例: コマンドに返事をする
 

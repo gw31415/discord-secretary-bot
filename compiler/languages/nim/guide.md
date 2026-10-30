@@ -12,8 +12,11 @@ Nim 2.2 のコードを C にして、wasi-sdk 25 の clang(LLVM)で wasm32-wasi
 proc input*(): JsonNode                    # 標準入力の JSON(guild, actor, eventName, event, batch, params, state)
 proc call*(request: JsonNode): JsonNode    # %*{"fn": ...} を送り value を返す。失敗は HostError
 proc get*(route: string): JsonNode         # Discord REST の GET(作成者が読める範囲)
+proc get*(route: string, query: JsonNode): JsonNode  # クエリつきの GET
 proc output*(result: JsonNode)             # 標準出力に { steps, state?, reply? }
 ```
+
+`limit` などのクエリは `secretary.get("/channels/" & id & "/messages", %*{"limit": 1})` のように渡します(route に `?limit=1` と書いても同じに扱います)。読めるルートと使えるクエリは docs の「読めるルート」を見てください。
 
 ## 例: コマンドに返事をする
 

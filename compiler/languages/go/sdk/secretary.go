@@ -57,6 +57,11 @@ func Get(route string, out any) error {
 	return Call(map[string]any{"fn": "get", "route": route}, out)
 }
 
+// GetQuery is Get with a query string, e.g. GetQuery("/channels/1/messages", map[string]any{"limit": 1}, &msgs).
+func GetQuery(route string, query map[string]any, out any) error {
+	return Call(map[string]any{"fn": "get", "route": route, "query": query}, out)
+}
+
 // Output writes the result: { steps, state?, reply? }.
 func Output(result any) error {
 	b, err := json.Marshal(result)

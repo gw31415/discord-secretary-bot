@@ -78,9 +78,14 @@ cJSON *secretary_call(const cJSON *request, char **error) {
 }
 
 cJSON *secretary_get(const char *route, char **error) {
+  return secretary_get_query(route, NULL, error);
+}
+
+cJSON *secretary_get_query(const char *route, const cJSON *query, char **error) {
   cJSON *req = cJSON_CreateObject();
   cJSON_AddStringToObject(req, "fn", "get");
   cJSON_AddStringToObject(req, "route", route);
+  if (query) cJSON_AddItemToObject(req, "query", cJSON_Duplicate(query, 1));
   cJSON *value = secretary_call(req, error);
   cJSON_Delete(req);
   return value;

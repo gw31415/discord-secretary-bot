@@ -10,9 +10,11 @@ MoonBit(`--target wasm`)です。`main.mbt` の `fn main` が入口で、同じ�
 ```moonbit
 @secretary.input() -> Json                       // guild, actor, eventName, event, batch, params, state
 @secretary.call(request : Json) -> Json raise    // {"fn": ...} を送り value を返す
-@secretary.get(route : String) -> Json raise     // Discord REST の GET(作成者が読める範囲)
+@secretary.get(route : String, query? : Json) -> Json raise  // Discord REST の GET(作成者が読める範囲)
 @secretary.output(result : Json) -> Unit         // 標準出力に { steps, state?, reply? }
 ```
+
+`limit` などのクエリは `@secretary.get("/channels/\{id}/messages", query={ "limit": 1 })` のように `query` で渡します(route に `?limit=1` と書いても同じに扱います)。読めるルートと使えるクエリは docs の「読めるルート」を見てください。
 
 Json は `{ "k": Json(v) }` のリテラルで作り、`match` で取り出します。`call`・`get` は失敗すると `Failure` を投げるので、`try ... catch { e => ... }` で受けてください(`fn main` は失敗を投げられません)。
 
