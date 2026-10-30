@@ -261,6 +261,16 @@ export async function runModule(program: Program, bindings: WasmBindings, limits
 }
 
 /**
+ * A route may carry its query ("/channels/1/messages?limit=1"), as code often
+ * writes it; it is moved into the query, where an explicit value wins.
+ */
+export function splitRoute(route: string, query: Record<string, unknown>): { route: string; query: Record<string, unknown> } {
+  const at = route.indexOf("?");
+  if (at < 0) return { route, query };
+  return { route: route.slice(0, at), query: { ...Object.fromEntries(new URLSearchParams(route.slice(at + 1))), ...query } };
+}
+
+/**
  * Answers a module's requests; every answer is JSON, { value } or { error }.
  * The public ABI is get, judge, rank, renderMath, convertImage, image and
  * runWasm (docs/wasm.md); canvas and measure serve the JS engine's createCanvas.
@@ -286,7 +296,8 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits, engine 
     async get(r) {
       if (++gets > limits.maxGets) throw new Error(`discord.get は1回の実行で${limits.maxGets}回までです`);
       if (typeof r.route !== "string") throw new Error("get には route(文字列)が必要です");
-      return (await bindings.get(r.route, (r.query ?? {}) as Record<string, unknown>)) ?? null;
+      const { route, query } = splitRoute(r.route, (r.query ?? {}) as Record<string, unknown>);
+      return (await bindings.get(route, query)) ?? null;
     },
     async judge(r) {
       return decide(r.state ?? {}, r.questions ?? {});

@@ -39,7 +39,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 |---|---|
 | input | 標準入力の JSON(`guild`・`actor`・`eventName`・`event`・`batch`・`params`・`state`)を読む |
 | call | `{ "fn": ... }` を `secretary.call` で送り、`value` を返す。`error` なら失敗にする。バッファの取り直しは SDK がする |
-| get | `call` の `get`。Discord REST の GET(読める範囲だけ) |
+| get | `call` の `get`。Discord REST の GET(読める範囲だけ)。`limit` などのクエリを渡す形もある(route に `?limit=1` と書いても同じに扱う) |
 | output | 標準出力に `{ steps, state?, reply? }` を書く |
 
 `judge`・`rank`・`renderMath` などは `call` に `fn` を入れて呼びます([ホスト関数](wasm.md#ホスト関数))。
@@ -52,6 +52,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 cJSON *secretary_input(void);
 cJSON *secretary_call(const cJSON *request, char **error);  // 失敗は NULL と *error(free する)
 cJSON *secretary_get(const char *route, char **error);
+cJSON *secretary_get_query(const char *route, const cJSON *query, char **error);  // query は呼んだ側が消す
 void   secretary_output(const cJSON *result);
 char  *secretary_read_stdin(size_t *length);                 // 生の標準入力
 char  *secretary_call_raw(const char *request, size_t length); // 生の要求と応答
@@ -67,6 +68,7 @@ char  *secretary_call_raw(const char *request, size_t length); // 生の要求�
 secretary.Input(v any) error
 secretary.Call(request any, out any) error
 secretary.Get(route string, out any) error
+secretary.GetQuery(route string, query map[string]any, out any) error
 secretary.Output(result any) error
 ```
 
@@ -80,6 +82,7 @@ secretary.Output(result any) error
 secretary::input() -> serde_json::Value
 secretary::call(request: Value) -> Result<Value, String>
 secretary::get(route: &str) -> Result<Value, String>
+secretary::get_with(route: &str, query: Value) -> Result<Value, String>
 secretary::output(result: Value)
 ```
 
@@ -92,7 +95,7 @@ secretary::output(result: Value)
 ```moonbit
 @secretary.input() -> Json
 @secretary.call(request : Json) -> Json raise
-@secretary.get(route : String) -> Json raise
+@secretary.get(route : String, query? : Json) -> Json raise  // query={ "limit": 1 }
 @secretary.output(result : Json) -> Unit
 ```
 
@@ -106,6 +109,7 @@ secretary::output(result: Value)
 proc input*(): JsonNode
 proc call*(request: JsonNode): JsonNode   # 失敗は HostError
 proc get*(route: string): JsonNode
+proc get*(route: string, query: JsonNode): JsonNode
 proc output*(result: JsonNode)
 ```
 
@@ -120,6 +124,7 @@ secretary.input(T) !T                    // 知らないフィールドは無視
 secretary.inputText() ![]u8              // 標準入力そのまま
 secretary.request(req) !std.json.Value   // .{ .@"fn" = ..., ... }
 secretary.get(route) !std.json.Value
+secretary.getQuery(route, query) !std.json.Value  // query は .{ .limit = 1 } など
 secretary.output(result) !void           // null の optional は省く
 secretary.last_error                     // error.HostRefused のときの理由
 ```

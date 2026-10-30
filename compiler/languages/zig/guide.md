@@ -13,9 +13,12 @@ secretary.input(T) !T                    // 標準入力の JSON を T に(知�
 secretary.inputText() ![]u8              // 標準入力の JSON をそのまま
 secretary.request(req) !std.json.Value   // .{ .@"fn" = ..., ... } を送り value を返す
 secretary.get(route) !std.json.Value     // Discord REST の GET(作成者が読める範囲)
+secretary.getQuery(route, query) !std.json.Value  // クエリつきの GET(query は .{ .limit = 1 } など)
 secretary.output(result) !void           // 標準出力に { steps, state?, reply? }(null の optional は省く)
 secretary.last_error                     // request・get が error.HostRefused を返したときの理由
 ```
+
+`limit` などのクエリは `secretary.getQuery(route, .{ .limit = 1 })` のように渡します(route に `?limit=1` と書いても同じに扱います)。読めるルートと使えるクエリは docs の「読めるルート」を見てください。
 
 ## 例: コマンドに返事をする
 

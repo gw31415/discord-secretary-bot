@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_MEMORY_PAGES, ModuleRejected, prepareModule } from "../src/wasm/module.ts";
-import { execute, runModule, warmUp } from "../src/wasm/run.ts";
+import { execute, hostCalls, runModule, warmUp } from "../src/wasm/run.ts";
 
 // Small modules written out byte by byte, so the tests need no Wasm toolchain.
 
@@ -527,4 +527,17 @@ test("a compiled Wasm rule shows its source on the rule's code page", async () =
   const uploaded = text(detailView(base, (id) => id));
   assert.match(uploaded, /ソースはありません/);
   assert.doesNotMatch(uploaded, /ファイルで/);
+});
+
+test("get takes a query written into the route, and an explicit query wins", async () => {
+  const gets: Array<[string, unknown]> = [];
+  const call = hostCalls({ guildId: "1", actor: { kind: "user", userId: "2" }, get: async (route, query) => (gets.push([route, query]), []) }, { wallTimeMs: 10_000, maxGets: 10 });
+  await call(JSON.stringify({ fn: "get", route: "/channels/3/messages?limit=1" }));
+  await call(JSON.stringify({ fn: "get", route: "/channels/3/messages?limit=1&before=9", query: { limit: 5 } }));
+  await call(JSON.stringify({ fn: "get", route: "/channels/3/messages", query: { limit: 2 } }));
+  assert.deepEqual(gets, [
+    ["/channels/3/messages", { limit: "1" }],
+    ["/channels/3/messages", { limit: 5, before: "9" }],
+    ["/channels/3/messages", { limit: 2 }],
+  ]);
 });

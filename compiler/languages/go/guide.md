@@ -11,8 +11,11 @@ TinyGo 0.43(Go 1.25)の `-target=wasip1` です。モジュール名は `bot` �
 secretary.Input(v any) error                 // guild, actor, eventName, event, batch, params, state を v に
 secretary.Call(request any, out any) error   // {"fn": ...} を送り value を out に
 secretary.Get(route string, out any) error   // Discord REST の GET(作成者が読める範囲)
+secretary.GetQuery(route string, query map[string]any, out any) error  // クエリつきの GET
 secretary.Output(result any) error           // 標準出力に { steps, state?, reply? }
 ```
+
+`limit` などのクエリは `secretary.GetQuery("/channels/"+id+"/messages", map[string]any{"limit": 1}, &msgs)` のように渡します(route に `?limit=1` と書いても同じに扱います)。読めるルートと使えるクエリは docs の「読めるルート」を見てください。
 
 ## 例: コマンドに返事をする
 

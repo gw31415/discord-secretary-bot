@@ -13,8 +13,11 @@ Rust 1.90 の wasm32-wasip1 です。`src/main.rs` が入口で、`src/` の下�
 secretary::input() -> serde_json::Value                         // guild, actor, eventName, event, batch, params, state
 secretary::call(request: Value) -> Result<Value, String>        // {"fn": ...} を送り value を返す
 secretary::get(route: &str) -> Result<Value, String>            // Discord REST の GET(作成者が読める範囲)
+secretary::get_with(route: &str, query: Value) -> Result<Value, String>  // クエリつきの GET
 secretary::output(result: Value)                                // 標準出力に { steps, state?, reply? }
 ```
+
+`limit` などのクエリは `secretary::get_with(&format!("/channels/{id}/messages"), json!({ "limit": 1 }))` のように渡します(route に `?limit=1` と書いても同じに扱います)。読めるルートと使えるクエリは docs の「読めるルート」を見てください。
 
 ## 例: コマンドに返事をする
 

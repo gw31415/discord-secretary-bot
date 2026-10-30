@@ -40,6 +40,10 @@ proc get*(route: string): JsonNode =
   ## GETs a Discord route the rule's owner may read.
   call(%*{"fn": "get", "route": route})
 
+proc get*(route: string, query: JsonNode): JsonNode =
+  ## GET with a query string, e.g. get("/channels/1/messages", %*{"limit": 1}).
+  call(%*{"fn": "get", "route": route, "query": query})
+
 proc output*(result: JsonNode) =
   ## Writes the result: { steps, state?, reply? }.
   stdout.write($result)
