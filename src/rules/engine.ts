@@ -150,7 +150,7 @@ export class RuleEngine {
   /** Start times of recent runs per rule, for the per-minute limit. */
   readonly #runs = new Map<string, number[]>();
   /** Events that came while a rule was over its per-minute limit, run together once it is not. */
-  readonly #deferred = new Map<string, { version: number; batch: BatchItem[]; timer: unknown }>();
+  readonly #deferred = new Map<string, { version: number; batches: BatchItem[][]; timer: unknown }>();
   /** Rules whose rate-limit skip was already recorded this minute, so a flood leaves one row. */
   readonly #limitedNoted = new Map<string, number>();
   /** Runs that must not overlap, one after another in the order events arrived (see serialKey). */
@@ -480,24 +480,27 @@ export class RuleEngine {
     const { setTimer = defaultSetTimer } = this.deps;
     let deferred = this.#deferred.get(rule.id);
     if (deferred && deferred.version !== rule.version) deferred = undefined;
-    if (deferred) {
-      deferred.batch.push(...batch);
-      deferred.batch.splice(0, Math.max(0, deferred.batch.length - MAX_BATCH));
-      return;
+    const fresh = !deferred;
+    deferred ??= { version: rule.version, batches: [], timer: null };
+    // Nothing is dropped: past MAX_BATCH the events wait in the next batch, which runs as the limit allows.
+    for (const item of batch) {
+      const last = deferred.batches.at(-1);
+      if (last && last.length < MAX_BATCH) last.push(item);
+      else deferred.batches.push([item]);
     }
-    deferred = { version: rule.version, batch: batch.slice(-MAX_BATCH), timer: null };
+    if (!fresh) return;
     this.#deferred.set(rule.id, deferred);
     deferred.timer = setTimer(() => this.#resume(rule.id), wait);
   }
 
-  /** The limit allows a run again: one run on everything that waited. */
+  /** The limit allows a run again: the batches that waited run in order, each as the limit allows. */
   #resume(ruleId: string): void {
     const deferred = this.#deferred.get(ruleId);
     if (!deferred) return;
     this.#deferred.delete(ruleId);
     const rule = this.deps.store.getRule(ruleId);
     if (!rule?.enabled || rule.version !== deferred.version || this.halted(rule.guildId)) return;
-    this.#start(rule, deferred.batch);
+    for (const batch of deferred.batches) this.#start(rule, batch);
   }
 
   #debounce(rule: Rule, item: BatchItem): void {
@@ -510,12 +513,16 @@ export class RuleEngine {
     }
     pending ??= { version: rule.version, first: now, timer: null, batch: [] };
     pending.batch.push(item);
-    if (pending.batch.length > MAX_BATCH) pending.batch.shift();
     clearTimer(pending.timer);
+    this.#pending.set(rule.id, pending);
+    // A full batch runs now rather than dropping events.
+    if (pending.batch.length >= MAX_BATCH) {
+      this.#flush(rule.id);
+      return;
+    }
     const period = rule.trigger.debounceSeconds! * 1000;
     const wait = Math.max(0, Math.min(period, pending.first + period * MAX_WAIT_PERIODS - now));
     pending.timer = setTimer(() => this.#flush(rule.id), wait);
-    this.#pending.set(rule.id, pending);
   }
 
   /** A debounced rule's quiet moment came: one run on its batch, the latest event as `event`. */

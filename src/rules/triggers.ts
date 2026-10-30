@@ -262,8 +262,8 @@ export function triggerEvents(trigger: { event: string; events?: string[] }): st
 
 export const MAX_TRIGGER_EVENTS = 5;
 export const MAX_DEBOUNCE_SECONDS = 300;
-/** Events a debounced run keeps; the oldest are dropped. */
-export const MAX_BATCH = 50;
+/** Events one run takes at most; a debounced rule that gathers this many runs at once instead of waiting on. */
+export const MAX_BATCH = 128;
 
 /** Shape problems of a trigger. Every message starts with きっかけ. */
 export function triggerProblems(trigger: RuleTrigger): string[] {

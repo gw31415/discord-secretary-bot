@@ -8,6 +8,7 @@ import { normalizeSteps } from "../src/plan/validate.ts";
 import { AdminDenied, RuleAdmin } from "../src/rules/admin.ts";
 import { allowProblems, allowShapeProblems, missingPermissions } from "../src/rules/allow.ts";
 import { RuleEngine } from "../src/rules/engine.ts";
+import { MAX_BATCH } from "../src/rules/triggers.ts";
 import { parseRuleCustomId } from "../src/rules/panel.ts";
 import { DEFAULT_LIMITS } from "../src/rules/types.ts";
 import type { RuleDefinition } from "../src/rules/types.ts";
@@ -387,6 +388,26 @@ test("a debounced rule runs once on the whole batch, at the latest after five pe
   }
   await w.engine.idle();
   assert.equal(w.runs.length, 2);
+});
+
+test("a debounced rule drops no event: a batch of MAX_BATCH runs at once, and runs past the limit wait in order", async () => {
+  const w = world();
+  (w.engine.deps as any).setTimer = () => null;
+  (w.engine.deps as any).clearTimer = () => undefined;
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "MESSAGE_CREATE", debounceSeconds: 60 }, limits: { perMinute: 1, maxConsecutiveFailures: 3 } });
+  const total = MAX_BATCH * 2 + 5;
+  for (let i = 0; i < total; i++) w.engine.dispatch("MESSAGE_CREATE", GUILD, message("10", "3", String(10_000 + i)));
+  await w.engine.idle();
+  // The first full batch ran without waiting for a quiet moment; the second waits for the limit.
+  assert.equal(w.runs.length, 1);
+  assert.equal(w.seen[0].batch.length, MAX_BATCH);
+  w.engine.flushDebounced();
+  await w.engine.idle();
+  w.engine.flushDebounced();
+  await w.engine.idle();
+  const ids = w.seen.flatMap((s: any) => s.batch.map((b: any) => Number(b.event.id) - 10_000));
+  assert.deepEqual(ids, Array.from({ length: total }, (_, i) => i));
+  assert.ok(w.seen.every((s: any) => s.batch.length <= MAX_BATCH));
 });
 
 test("other_rules fires on other writers' changes but not on the rule's own", async () => {
