@@ -29,7 +29,7 @@ if [ ! -f secretary.py ]; then
   /toolchain/bin/mpy-cross -s secretary.py -o /work/mpy/secretary.mpy /lang/sdk/secretary.py
   set -- "$@" "secretary.mpy=/work/mpy/secretary.mpy"
 fi
-python3 /lang/sdk/files.py /work/files.c "$@"
+python3 /lang/sdk/files.py /work/files.c /work/src /toolchain/stdlib "$@"
 $SDK/bin/clang --target=wasm32-wasip1 -Oz -c /work/files.c -o /work/files.o
 $SDK/bin/clang --target=wasm32-wasip1 /work/files.o /toolchain/mp/libmicropython.a -lsetjmp \
   -Wl,-z,stack-size=1048576 -Wl,--gc-sections -o /work/linked.wasm

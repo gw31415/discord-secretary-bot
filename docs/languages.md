@@ -27,7 +27,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 | `rust` | Rust | Rust 1.90、wasm32-wasip1 | `src/main.rs` | `src/` の下の `.rs` | 標準ライブラリ、serde(derive)、serde_json | 180秒 |
 | `moonbit` | MoonBit | MoonBit 0.10.17、`--target wasm` | `main.mbt` | 同じパッケージの `.mbt` だけ | moonbitlang/core | 120秒 |
 | `nim` | Nim | Nim 2.2.12 → wasi-sdk 25 の clang | `main.nim` | `.nim`。サブディレクトリ可 | 標準ライブラリ(ファイル・ネットワーク・プロセス・スレッドを使わないもの) | 120秒 |
-| `python` | Python(MicroPython) | MicroPython 1.29 → wasi-sdk 25 の clang、binaryen 133 | `main.py` | `.py`。サブディレクトリ可 | MicroPython の組み込みモジュール(json・re・math・random・time・collections など) | 60秒 |
+| `python` | Python(MicroPython) | MicroPython 1.29 → wasi-sdk 25 の clang、binaryen 133 | `main.py` | `.py`。サブディレクトリ可 | 組み込みモジュール(json・re・math・time など)と micropython-lib(itertools・functools・datetime・collections など、使ったものだけ入る) | 60秒 |
 | `zig` | Zig | Zig 0.17、wasm32-wasi | `main.zig` | `.zig`。サブディレクトリ可 | 標準ライブラリ | 120秒 |
 
 どの言語も、実行時に使えるのは標準入出力・時計・乱数だけです。ファイル・ネットワークはなく、メモリは64MiB までです。言語ごとの細かい決まりと例は各言語の `guide.md` にあります。Botが `wasm_language_guide` で読むのはこれに、どの言語にも共通の [secretary.call](wasm.md#secretarycall) と [ホスト関数](wasm.md#ホスト関数) の節を足したものです。
@@ -118,7 +118,7 @@ proc output*(result: JsonNode)
 
 ### Python(MicroPython)
 
-`import secretary`。CPython ではなく MicroPython 1.29 で、標準ライブラリは組み込みモジュール(`json`・`re`・`math`・`random`・`time`・`collections`・`heapq`・`struct`・`hashlib` など)だけです。`os`・`datetime`・`itertools`・`functools` や pip のパッケージはありません。各 `.py` はバイトコードにして MicroPython と一緒に1つのモジュールにするので、大きさは350KB 前後です。`print()` はログ(標準エラー出力)に出ます。結果は `output` で書きます。
+`import secretary`。CPython ではなく MicroPython 1.29 で、標準ライブラリは組み込みモジュール(`json`・`re`・`math`・`time`・`struct`・`hashlib` など)と、Python で書かれた micropython-lib v1.29.0 のモジュール(`itertools`・`functools`・`datetime`・`collections`・`random`・`heapq`・`operator`・`string`・`base64`・`copy` など)です。micropython-lib で足りない itertools・functools・operator・random・string・traceback・defaultdict は CPython に合わせて補ってあります(`sdk/lib`)。`os`・`typing`・`dataclasses` や pip のパッケージはありません。各 `.py` と import した micropython-lib のモジュールはバイトコードにして MicroPython と一緒に1つのモジュールにするので、大きさは350〜400KB です。`print()` はログ(標準エラー出力)に出ます。結果は `output` で書きます。
 
 ```python
 secretary.input() -> dict

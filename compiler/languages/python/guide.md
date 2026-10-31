@@ -10,15 +10,19 @@ MicroPython 1.29 です。CPython(ふつうの Python)ではありません。�
 
 ## 使えるモジュール
 
-`json`・`re`(match・search・sub・compile)・`math`・`cmath`・`random`・`time`・`collections`(OrderedDict・deque・namedtuple)・`heapq`・`struct`・`array`・`binascii`・`hashlib`(sha256)・`io`(StringIO・BytesIO)・`sys`・`gc`・`errno`・`micropython`
+組み込み: `json`・`re`(match・search・sub・compile)・`math`・`cmath`・`time`・`sys`・`io`(StringIO・BytesIO)・`struct`・`array`・`binascii`・`hashlib`(sha256)・`gc`・`errno`・`micropython`
 
-使えないもの: `os`・`datetime`・`itertools`・`functools`・`typing`・`dataclasses`・`enum`・`string`・`base64`・`asyncio` など。pip のパッケージも入れられません。要るものは自分で書きます(`base64` は `binascii.b2a_base64`、日時は `time.gmtime()` / `time.localtime()`。どちらも UTC です)。
+Python で書かれたもの(micropython-lib。import したものだけがモジュールに入ります): `itertools`(product・permutations・combinations・groupby・zip_longest・islice・batched など全部)・`functools`(partial・reduce・wraps・cache・lru_cache・cmp_to_key・total_ordering)・`collections`(OrderedDict・deque・namedtuple・defaultdict)・`datetime`・`random`(randint・choice・shuffle・sample・choices・gauss など)・`heapq`(nlargest・nsmallest・merge も)・`operator`(itemgetter・attrgetter・methodcaller など)・`string`(Template・capwords と定数)・`base64`・`bisect`・`copy`・`contextlib`・`abc`・`types`・`inspect`・`keyword`・`colorsys`・`fnmatch`・`hmac`・`html`・`logging`・`pprint`・`quopri`・`traceback`・`warnings`
+
+使えないもの: `os`・`typing`・`dataclasses`・`enum`・`textwrap`・`decimal`・`fractions`・`statistics`・`asyncio` など。pip のパッケージも入れられません。要るものは自分で書きます。日時は `datetime`(タイムゾーンは `datetime.timezone.utc` か `timezone(timedelta(hours=9))` のように固定の差で)か `time.gmtime()` / `time.localtime()`(どちらも UTC)です。
 
 CPython との主な違い:
 
 - 整数は大きな数も扱えますが、`float` は倍精度だけです
 - f-string・`:=`・型ヒントの書き方は使えます(型ヒントは読み飛ばされます)。`match` 文はありません
+- 組み込み関数はキーワード引数を受けないものがあります(`int("ff", 16)` は使えるが `int("ff", base=16)` は使えない)
 - 文字列のメソッドは一部です(`format`・`split`・`join`・`strip`・`replace`・`startswith`・`upper` などはある。`casefold`・`zfill` などはない)
+- 関数に属性を付けられません(`f.x = 1` はエラー)
 - 辞書・集合のキーに文字列を数万個入れるような処理は遅くなります。扱う件数は数千件までを目安にしてください
 
 ## SDK
