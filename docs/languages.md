@@ -118,7 +118,7 @@ proc output*(result: JsonNode)
 
 ### Python(MicroPython)
 
-`import secretary`。CPython ではなく MicroPython 1.29 で、標準ライブラリは組み込みモジュール(`json`・`re`・`math`・`time`・`struct`・`hashlib` など)と、Python で書かれた micropython-lib v1.29.0 のモジュール(`itertools`・`functools`・`datetime`・`collections`・`random`・`heapq`・`operator`・`string`・`base64`・`copy` など)です。micropython-lib で足りない itertools・functools・operator・random・string・traceback・defaultdict は CPython に合わせて補ってあります(`sdk/lib`)。`os`・`typing`・`dataclasses` や pip のパッケージはありません。各 `.py` と import した micropython-lib のモジュールはバイトコードにして MicroPython と一緒に1つのモジュールにするので、大きさは350〜400KB です。`print()` はログ(標準エラー出力)に出ます。結果は `output` で書きます。
+`import secretary`。CPython ではなく MicroPython 1.29 で、標準ライブラリは組み込みモジュール(`json`・`re`・`math`・`time`・`struct`・`hashlib` など)と、Python で書かれた micropython-lib v1.29.0 のモジュール(`itertools`・`functools`・`datetime`・`collections`・`random`・`heapq`・`operator`・`string`・`base64`・`copy` など)です。micropython-lib で足りない itertools・functools・operator・random・string・traceback・defaultdict は CPython に合わせて補い、型ヒント用の何もしない `typing` も足してあります(`sdk/lib`)。`os`・`dataclasses` や pip のパッケージはありません。各 `.py` と import した micropython-lib のモジュールはバイトコードにして MicroPython と一緒に1つのモジュールにするので、大きさは350〜400KB です。`print()` はログ(標準エラー出力)に出ます。結果は `output` で書きます。
 
 ```python
 secretary.input() -> dict

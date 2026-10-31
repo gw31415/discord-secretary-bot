@@ -76,6 +76,8 @@ def main():
                     with open(source, encoding="utf-8") as src:
                         text = src.read()
                     for old, new in fixes:
+                        if new in text:
+                            continue  # applied by an earlier run
                         if text.count(old) != 1:
                             sys.exit("fix does not apply: " + source)
                         text = text.replace(old, new)

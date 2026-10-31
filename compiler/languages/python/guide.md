@@ -12,9 +12,9 @@ MicroPython 1.29 です。CPython(ふつうの Python)ではありません。�
 
 組み込み: `json`・`re`(match・search・sub・compile)・`math`・`cmath`・`time`・`sys`・`io`(StringIO・BytesIO)・`struct`・`array`・`binascii`・`hashlib`(sha256)・`gc`・`errno`・`micropython`
 
-Python で書かれたもの(micropython-lib。import したものだけがモジュールに入ります): `itertools`(product・permutations・combinations・groupby・zip_longest・islice・batched など全部)・`functools`(partial・reduce・wraps・cache・lru_cache・cmp_to_key・total_ordering)・`collections`(OrderedDict・deque・namedtuple・defaultdict)・`datetime`・`random`(randint・choice・shuffle・sample・choices・gauss など)・`heapq`(nlargest・nsmallest・merge も)・`operator`(itemgetter・attrgetter・methodcaller など)・`string`(Template・capwords と定数)・`base64`・`bisect`・`copy`・`contextlib`・`abc`・`types`・`inspect`・`keyword`・`colorsys`・`fnmatch`・`hmac`・`html`・`logging`・`pprint`・`quopri`・`traceback`・`warnings`
+Python で書かれたもの(micropython-lib。import したものだけがモジュールに入ります): `itertools`(product・permutations・combinations・groupby・zip_longest・islice・batched など全部)・`functools`(partial・reduce・wraps・cache・lru_cache・cmp_to_key・total_ordering)・`collections`(OrderedDict・deque・namedtuple・defaultdict)・`datetime`・`random`(randint・choice・shuffle・sample・choices・gauss など)・`heapq`(nlargest・nsmallest・merge も)・`operator`(itemgetter・attrgetter・methodcaller など)・`string`(Template・capwords と定数)・`base64`・`bisect`・`copy`・`contextlib`・`abc`・`types`・`inspect`・`keyword`・`colorsys`・`fnmatch`・`hmac`・`html`・`logging`・`pprint`・`quopri`・`traceback`・`warnings`・`typing`(型ヒント用。`List[int]`・`Optional`・`TypeVar`・`Generic[T]`・`Protocol`・`cast` などが import でき、中身は何もしません。`NamedTuple` は呼び出す形だけ)
 
-使えないもの: `os`・`typing`・`dataclasses`・`enum`・`textwrap`・`decimal`・`fractions`・`statistics`・`asyncio` など。pip のパッケージも入れられません。要るものは自分で書きます。日時は `datetime`(タイムゾーンは `datetime.timezone.utc` か `timezone(timedelta(hours=9))` のように固定の差で)か `time.gmtime()` / `time.localtime()`(どちらも UTC)です。
+使えないもの: `os`・`dataclasses`・`enum`・`textwrap`・`decimal`・`fractions`・`statistics`・`asyncio` など。pip のパッケージも入れられません。要るものは自分で書きます。日時は `datetime`(タイムゾーンは `datetime.timezone.utc` か `timezone(timedelta(hours=9))` のように固定の差で)か `time.gmtime()` / `time.localtime()`(どちらも UTC)です。
 
 CPython との主な違い:
 
