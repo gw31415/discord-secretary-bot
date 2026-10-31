@@ -17,7 +17,7 @@
 | `/settings` | APIキー、モデル(言語モデル・判定モデルと用途別のモデル)、Webツール、読み取りの範囲 |
 | `/settings` の「ルール」 | ルールの一覧・有効化・停止・削除・ドライラン・実行履歴・監査ログ・緊急停止 |
 | 会話に `.wasm` を添付 | 自分でビルドした Wasm モジュール(Go・Rust など)を一度だけ動かす、またはBotと相談しながら登録してルールやコマンドのコードとして使う。`/settings` の「Wasm」からも登録でき、一覧・名前変更・削除もそこで([docs/wasm.md](docs/wasm.md)) |
-| 会話で「C で書いて」 | C/C++・Rust・Go・MoonBit・Zig・Nim のソースを Bot が別サービスのコンパイラで Wasm にし、試したりルールにしたりする([docs/languages.md](docs/languages.md)) |
+| 会話で「C で書いて」 | C/C++・Rust・Go・MoonBit・Zig・Nim・Python(MicroPython)のソースを Bot が別サービスのコンパイラで Wasm にし、試したりルールにしたりする([docs/languages.md](docs/languages.md)) |
 
 使い方と API の詳しい説明は [docs/](docs/README.md) にあります。会話、`/settings`、ルール、JavaScript の API、Wasm の ABI、言語と SDK、書き込み操作の一覧に分けています。
 

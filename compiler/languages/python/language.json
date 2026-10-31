@@ -1,0 +1,14 @@
+{
+  "id": "python",
+  "name": "Python(MicroPython)",
+  "version": "1",
+  "toolchain": "micropython-1.29.0",
+  "rootfs": "base",
+  "entry": ["main.py"],
+  "extensions": [".py"],
+  "paths": "^([a-z0-9_]+/)*[a-z0-9_]+\\.py$",
+  "maxFiles": 32,
+  "timeoutMs": 60000,
+  "abi": ["secretary/1"],
+  "libraries": ["MicroPython の組み込みモジュール", "secretary"]
+}

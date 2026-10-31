@@ -11,7 +11,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 
 確認ダイアログと `/settings` の「Wasm」では、sha256 の代わりにこのソースが見られます。
 
-- 渡せるのはソースだけです。Cargo.toml・go.mod・moon.pkg・build.zig・nim.cfg・build.rs などのビルド設定と、依存の追加はできません。
+- 渡せるのはソースだけです。Cargo.toml・go.mod・moon.pkg・build.zig・nim.cfg・build.rs などのビルド設定と、依存の追加(pip のパッケージを含む)はできません。
 - ソースは合計256KB まで、ファイルは32個までです。
 - コンパイルは1人1件ずつ、1時間に30回までです。同じ言語・同じソースの結果は覚えておき、2回目からはすぐに返します(回数にも数えません)。
 - 最適化は既定でサイズ優先です。速さ優先も選べます。
@@ -27,6 +27,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 | `rust` | Rust | Rust 1.90、wasm32-wasip1 | `src/main.rs` | `src/` の下の `.rs` | 標準ライブラリ、serde(derive)、serde_json | 180秒 |
 | `moonbit` | MoonBit | MoonBit 0.10.17、`--target wasm` | `main.mbt` | 同じパッケージの `.mbt` だけ | moonbitlang/core | 120秒 |
 | `nim` | Nim | Nim 2.2.12 → wasi-sdk 25 の clang | `main.nim` | `.nim`。サブディレクトリ可 | 標準ライブラリ(ファイル・ネットワーク・プロセス・スレッドを使わないもの) | 120秒 |
+| `python` | Python(MicroPython) | MicroPython 1.29 → wasi-sdk 25 の clang、binaryen 133 | `main.py` | `.py`。サブディレクトリ可 | 組み込みモジュール(json・re・math・time など)と micropython-lib(itertools・functools・datetime・collections など、使ったものだけ入る) | 60秒 |
 | `zig` | Zig | Zig 0.17、wasm32-wasi | `main.zig` | `.zig`。サブディレクトリ可 | 標準ライブラリ | 120秒 |
 
 どの言語も、実行時に使えるのは標準入出力・時計・乱数だけです。ファイル・ネットワークはなく、メモリは64MiB までです。言語ごとの細かい決まりと例は各言語の `guide.md` にあります。Botが `wasm_language_guide` で読むのはこれに、どの言語にも共通の [secretary.call](wasm.md#secretarycall) と [ホスト関数](wasm.md#ホスト関数) の節を足したものです。
@@ -114,6 +115,21 @@ proc output*(result: JsonNode)
 ```
 
 案内と例: [compiler/languages/nim/guide.md](../compiler/languages/nim/guide.md)
+
+### Python(MicroPython)
+
+`import secretary`。CPython ではなく MicroPython 1.29 で、標準ライブラリは組み込みモジュール(`json`・`re`・`math`・`time`・`struct`・`hashlib` など)と、Python で書かれた micropython-lib v1.29.0 のモジュール(`itertools`・`functools`・`datetime`・`collections`・`random`・`heapq`・`operator`・`string`・`base64`・`copy` など)です。micropython-lib で足りない itertools・functools・operator・random・string・traceback・defaultdict は CPython に合わせて補い、型ヒント用の何もしない `typing` も足してあります(`sdk/lib`)。`os`・`dataclasses` や pip のパッケージはありません。各 `.py` と import した micropython-lib のモジュールはバイトコードにして MicroPython と一緒に1つのモジュールにするので、大きさは350〜400KB です。`print()` はログ(標準エラー出力)に出ます。結果は `output` で書きます。
+
+```python
+secretary.input() -> dict
+secretary.call(request: dict) -> Any        # 失敗は secretary.HostError
+secretary.get(route: str, query: dict = None) -> Any  # query={"limit": 1}
+secretary.output(result: dict) -> None
+```
+
+MicroPython の GC はスタックを調べて生きている値を見つけます。Wasm では関数のローカル変数がメモリの外にあって調べられないので、リンクしたあとに binaryen の `--spill-pointers` で、呼び出しをまたぐ値をメモリ上のスタックに書き出すようにしています。
+
+案内と例: [compiler/languages/python/guide.md](../compiler/languages/python/guide.md)
 
 ### Zig
 
