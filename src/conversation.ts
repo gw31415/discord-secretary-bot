@@ -471,7 +471,7 @@ export class Conversations {
     // A coding model whose key was removed falls back to the response model.
     const coder = codeModel && codeKey ? llmCoder(codeModel, codeKey) : undefined;
     const web = this.deps.webSearch
-      ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p))
+      ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p), speaker)
       : null;
     const reader = this.deps.makeReader({ guildId: input.guildId, channelId, speakerId: speaker });
     // Asked only when the agent finds it needs more than the channel's audience may see.

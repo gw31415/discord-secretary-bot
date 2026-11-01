@@ -8,6 +8,7 @@ import { chooseReaction } from "./agent/react.ts";
 import { respond } from "./agent/respond.ts";
 import { describeChanges, summarizeCode } from "./agent/summarize.ts";
 import { loadConfig } from "./config.ts";
+import { setRustxng } from "./agent/web.ts";
 import { Conversations, MAX_MESSAGES_PER_REPLY } from "./conversation.ts";
 import type { GuildMessage, ReactionAdd } from "./conversation.ts";
 import { Store } from "./db.ts";
@@ -31,6 +32,7 @@ import { WasmPanel } from "./wasm/panel.ts";
 import { warmWorkers } from "./wasm/run.ts";
 
 const config = loadConfig();
+setRustxng(config.rustxng);
 const store = new Store(config.dbPath, config.masterKey);
 const caches = new GuildCaches();
 const compiler = config.compilerSocket ? new CompilerClient(config.compilerSocket) : undefined;

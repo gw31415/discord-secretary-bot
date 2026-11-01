@@ -6,12 +6,14 @@ import type { KeyProviderId, ProviderId } from "../llm/models.ts";
 // Claude's and OpenAI's own tools run on the provider's servers, so they come only with a
 // response model of that provider: they are what "言語モデルの標準" means, not choices of
 // their own. The others are ordinary tools the bot calls, so they work with any model:
-// GLM Coding Plan's Web Search / Web Reader MCP servers, and Tavily's search and extract API.
+// GLM Coding Plan's Web Search / Web Reader MCP servers, Tavily's search and extract API,
+// and RustXNG, a metasearch engine run next to the bot for the people named in RUSTXNG_USERS.
 
 export const WEB_TOOLS = {
   auto: { label: "言語モデルの標準", description: "言語モデルがClaude・OpenAI・GLMなら、その検索を使います" },
   zai: { label: "GLM Coding Plan", description: "GLM Coding Planのキーが要ります" },
   tavily: { label: "Tavily", description: "Tavilyのキーが要ります。月1,000回まで無料です" },
+  rustxng: { label: "RustXNG", description: "Botと同じサーバーで動く検索エンジンです" },
   off: { label: "使わない", description: "" },
 } as const;
 
@@ -21,19 +23,47 @@ export function isWebTool(value: string): value is WebTool {
   return Object.hasOwn(WEB_TOOLS, value);
 }
 
+/** A RustXNG instance, and the people who may use it. Unset when the bot has none. */
+export interface RustxngConfig {
+  url: string;
+  users: ReadonlySet<string>;
+}
+
+let rustxng: RustxngConfig | undefined;
+
+/** Set once at startup from RUSTXNG_URL and RUSTXNG_USERS. */
+export function setRustxng(config: RustxngConfig | undefined): void {
+  rustxng = config;
+}
+
+/**
+ * Whether this person may see and pick the tool. RustXNG is someone's own service, so it is
+ * offered only to the people it was set up for; the rest never see it in /settings.
+ */
+export function webToolAvailable(tool: WebTool, userId: string): boolean {
+  return tool !== "rustxng" || (rustxng?.users.has(userId) ?? false);
+}
+
+/** The choices shown to this person, in order. */
+export function webToolsFor(userId: string): WebTool[] {
+  return (Object.keys(WEB_TOOLS) as WebTool[]).filter((tool) => webToolAvailable(tool, userId));
+}
+
 /** Providers whose web tools run on their own servers, inside the model's request. */
 export type HostedWebProvider = "anthropic" | "openai";
 
 export type WebAccess =
   | { kind: HostedWebProvider }
   | { kind: "zai"; apiKey: string }
-  | { kind: "tavily"; apiKey: string };
+  | { kind: "tavily"; apiKey: string }
+  | { kind: "rustxng"; url: string };
 
 /**
  * What the agent may use for this answer. Null when the choice does not fit the
  * response model or its key is missing; panelWarning() tells the person why.
  */
-export function resolveWebAccess(choice: WebTool, model: ProviderId, keyOf: (p: KeyProviderId) => string | undefined): WebAccess | null {
+export function resolveWebAccess(choice: WebTool, model: ProviderId, keyOf: (p: KeyProviderId) => string | undefined, userId: string): WebAccess | null {
+  if (choice === "rustxng") return rustxng && webToolAvailable(choice, userId) ? { kind: "rustxng", url: rustxng.url } : null;
   if (choice === "auto" && (model === "anthropic" || model === "openai")) return { kind: model };
   const tool = choice === "auto" ? (model === "zai" ? "zai" : "off") : choice;
   switch (tool) {
@@ -48,8 +78,9 @@ export function resolveWebAccess(choice: WebTool, model: ProviderId, keyOf: (p: 
 }
 
 /** Why the chosen web tool will not work with these settings, or null if it will. */
-export function webToolWarning(choice: WebTool, model: ProviderId | undefined, keys: ReadonlySet<KeyProviderId>): string | null {
+export function webToolWarning(choice: WebTool, model: ProviderId | undefined, keys: ReadonlySet<KeyProviderId>, userId: string): string | null {
   if (choice === "off" || !model) return null;
+  if (!webToolAvailable(choice, userId)) return "このWebツールは使えなくなったので、Webを使いません。";
   if (choice === "auto" && !hasOwnWebTools(model)) return "この言語モデルには標準のWebツールがないので、Webを使いません。Tavilyなら使えます。";
   if ((choice === "auto" && model === "zai") || choice === "zai") {
     if (!keys.has("zai")) return "GLM Coding Planのキーがないので、Webを使いません。";
@@ -106,6 +137,7 @@ function checkUrl(url: string): void {
 /** The agent's web_search and web_fetch tools for services the bot calls itself. */
 export function webTools(access: WebAccess, fetchImpl: typeof fetch = fetch): AgentTool<any>[] {
   if (isHostedWeb(access)) return [];
+  if (access.kind === "rustxng") return [rustxngSearch(access.url, fetchImpl)];
   const service = access.kind === "zai" ? zaiService(access.apiKey, fetchImpl) : tavilyService(access.apiKey, fetchImpl);
   const search: AgentTool<typeof searchParams> = {
     name: "web_search",
@@ -178,6 +210,67 @@ function tavilyService(apiKey: string, fetchImpl: typeof fetch): WebService {
       const page = data.results[0];
       if (!page) throw new Error(`読めませんでした: ${data.failed_results?.[0]?.error ?? "不明な理由"}`);
       return page.raw_content;
+    },
+  };
+}
+
+// --- RustXNG ----------------------------------------------------------------
+
+// RustXNG (github.com/sahenjp/RustXNG) answers SearXNG's /search?format=json. It has no
+// endpoint that reads a given URL, so instead of web_fetch its search can bring the text
+// of its top pages, which it fetches itself from public addresses only.
+
+const rustxngParams = Type.Object({
+  query: Type.String({ description: "検索語。先頭に !github や !wikipedia を付けると、そのサイトだけを検索します" }),
+  time_range: Type.Optional(Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("year")], { description: "新しい情報だけに絞る期間" })),
+  include_content: Type.Optional(Type.Boolean({ description: "true にすると、上位5件のページ本文も返します。要約だけでは足りないときに使います" })),
+});
+
+interface RustxngResponse {
+  results?: { title?: string; url: string; content?: string; publishedDate?: string | null; raw_content?: string | null }[];
+  answers?: (string | { answer?: string })[];
+}
+
+const RUSTXNG_PAGE = 3_000;
+
+function rustxngSearch(base: string, fetchImpl: typeof fetch): AgentTool<typeof rustxngParams> {
+  return {
+    name: "web_search",
+    label: "Web検索",
+    description: "Webを検索し、ページのタイトル・URL・要約を返します。最新の情報やサーバーの外の情報が必要なときに使います。ページの中身が要るときは include_content を true にします。",
+    parameters: rustxngParams,
+    execute: async (_id, params, signal) => {
+      const url = new URL("/search", base);
+      url.searchParams.set("q", params.query);
+      url.searchParams.set("format", "json");
+      url.searchParams.set("max_results", "8");
+      if (params.time_range) url.searchParams.set("time_range", params.time_range);
+      if (params.include_content) url.searchParams.set("include_raw_content", "1");
+      let res: Response;
+      try {
+        res = await fetchImpl(url, { signal: withTimeout(signal) });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        throw new Error("RustXNGに接続できませんでした");
+      }
+      if (!res.ok) throw new Error(`RustXNGがエラーを返しました(${res.status})`);
+      const data = (await res.json()) as RustxngResponse;
+      const answers = (data.answers ?? []).map((a) => (typeof a === "string" ? a : a.answer)).filter(Boolean);
+      const results = data.results ?? [];
+      if (results.length === 0 && answers.length === 0) return text("見つかりませんでした。");
+      const lines = [
+        ...answers.map((a) => `答え: ${a}`),
+        ...results.map((r) => {
+          const entry = [`- ${r.title || r.url}`, `  ${r.url}${r.publishedDate ? ` (${r.publishedDate})` : ""}`];
+          if (r.content) entry.push(`  ${r.content.replaceAll("\n", " ")}`);
+          if (r.raw_content) {
+            const page = r.raw_content.length > RUSTXNG_PAGE ? `${r.raw_content.slice(0, RUSTXNG_PAGE)}…` : r.raw_content;
+            entry.push(`  本文: ${page.replaceAll("\n", " ")}`);
+          }
+          return entry.join("\n");
+        }),
+      ];
+      return text(lines.join("\n"));
     },
   };
 }

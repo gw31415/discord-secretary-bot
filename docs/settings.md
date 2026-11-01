@@ -58,9 +58,12 @@ OpenRouter はモデルが多いので、各モデルの選択肢から「OpenRo
 | 言語モデルの標準 | 言語モデルが Claude・OpenAI・GLM Coding Plan なら、その検索を使う。ほかでは使わない |
 | GLM Coding Plan | GLM Coding Plan の検索とページ読み取り。キーが要る |
 | Tavily | Tavily の検索とページ読み取り。キーが要る(月1,000回まで無料) |
+| RustXNG | Botと同じサーバーで動く検索エンジン。運用側が決めた人にだけ表示される。検索だけで、上位5件の本文も一緒に取れる |
 | 使わない | Webを使わない |
 
 組み合わせで使えないとき(キーがないなど)は、画面に理由が出て、Webを使わずに答えます。運用側が環境変数 `WEB_SEARCH=off` にすると、全員のWebツールが止まります。
+
+RustXNG は、運用側が環境変数 `RUSTXNG_URL`(RustXNG のURL)と `RUSTXNG_USERS`(使える人の Discord ユーザーID、カンマ区切り)を設定したときだけ現れます。ほかの人の画面には出ず、選ぶこともできません。指定したURLのページを読む機能はないので、`web_fetch` は渡しません。
 
 ### 読み取りの範囲
 

@@ -126,6 +126,7 @@ compiler/        wasm-compiler(ソースを Wasm にする別サービス、言�
 | `MASTER_KEY` | キー暗号化用の32バイト鍵(`openssl rand -base64 32`)。失うと登録済みキーは復号できない |
 | `DB_PATH` | SQLiteのパス(既定 `data/bot.db`) |
 | `WEB_SEARCH` | `off` で全員のWebツールを無効にする |
+| `RUSTXNG_URL` / `RUSTXNG_USERS` | 任意。自前の RustXNG(例 `http://127.0.0.1:8888`)と、それをWebツールに選べる人の Discord ユーザーID(カンマ区切り)。両方あるときだけ選択肢に出る |
 
 ```sh
 npm ci
@@ -143,3 +144,17 @@ botctl status | dev [branch] | promote | rollback | logs prod|dev [n] | install
 ```
 
 それぞれ専用のユーザー(`secretary-prod` / `secretary-dev`)で動きます。`.env` は root だけが読めるファイルにしてあり、systemd が起動のときに読んで環境変数として渡します。Bot からは `.env` も、もう一方の環境も、ホームのほかのファイルも見えません。`.env` を作り直したときは `botctl install` をもう一度実行してください。
+
+### RustXNG
+
+Webツールの RustXNG は、同じサーバーの `127.0.0.1:8888` で動かします(外には公開しない)。`deploy/rustxng.service` を使います。
+
+```sh
+cargo build --release --locked            # RustXNG のソース(github.com/sahenjp/RustXNG)で
+sudo install -D -m755 target/release/rustxng /opt/rustxng/rustxng
+sudo install -m644 deploy/rustxng.toml /opt/rustxng/settings.toml   # このリポジトリから
+sudo install -m644 deploy/rustxng.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now rustxng
+```
+
+使う環境の `.env` に `RUSTXNG_URL=http://127.0.0.1:8888` と `RUSTXNG_USERS=<DiscordユーザーID>` を足して、Bot を再起動します。

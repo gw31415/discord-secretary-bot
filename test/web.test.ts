@@ -1,25 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isWebTool, pickMcpTool, resolveWebAccess, webToolWarning, webTools, ZAI_MCP } from "../src/agent/web.ts";
+import { isWebTool, pickMcpTool, resolveWebAccess, setRustxng, webToolsFor, webToolWarning, webTools, ZAI_MCP } from "../src/agent/web.ts";
 import type { KeyProviderId } from "../src/llm/models.ts";
 
 const keys = (map: Partial<Record<KeyProviderId, string>>) => (p: KeyProviderId) => map[p];
 
 test("the web choice resolves against the response model and the person's keys", () => {
-  assert.deepEqual(resolveWebAccess("auto", "anthropic", keys({})), { kind: "anthropic" });
-  assert.deepEqual(resolveWebAccess("auto", "zai", keys({ zai: "z" })), { kind: "zai", apiKey: "z" });
-  assert.deepEqual(resolveWebAccess("auto", "openai", keys({})), { kind: "openai" });
-  assert.equal(resolveWebAccess("auto", "openrouter", keys({ tavily: "t" })), null, "no standard web tool");
-  assert.equal(resolveWebAccess("auto", "zai", keys({})), null);
-  assert.deepEqual(resolveWebAccess("tavily", "anthropic", keys({ tavily: "t" })), { kind: "tavily", apiKey: "t" });
-  assert.equal(resolveWebAccess("tavily", "anthropic", keys({})), null);
-  assert.deepEqual(resolveWebAccess("zai", "anthropic", keys({ zai: "z" })), { kind: "zai", apiKey: "z" }, "GLM's tools work with Claude too");
-  assert.equal(resolveWebAccess("off", "anthropic", keys({ tavily: "t" })), null);
-  assert.equal(webToolWarning("tavily", "anthropic", new Set()), "Tavilyのキーがないので、Webを使いません。");
-  assert.equal(webToolWarning("tavily", "anthropic", new Set(["tavily"])), null);
-  assert.equal(webToolWarning("auto", "openai", new Set()), null);
-  assert.match(webToolWarning("auto", "openrouter", new Set()) ?? "", /標準のWebツールがない/);
-  assert.match(webToolWarning("auto", "zai", new Set()) ?? "", /GLM Coding Planのキーがない/);
+  assert.deepEqual(resolveWebAccess("auto", "anthropic", keys({}), "u"), { kind: "anthropic" });
+  assert.deepEqual(resolveWebAccess("auto", "zai", keys({ zai: "z" }), "u"), { kind: "zai", apiKey: "z" });
+  assert.deepEqual(resolveWebAccess("auto", "openai", keys({}), "u"), { kind: "openai" });
+  assert.equal(resolveWebAccess("auto", "openrouter", keys({ tavily: "t" }), "u"), null, "no standard web tool");
+  assert.equal(resolveWebAccess("auto", "zai", keys({}), "u"), null);
+  assert.deepEqual(resolveWebAccess("tavily", "anthropic", keys({ tavily: "t" }), "u"), { kind: "tavily", apiKey: "t" });
+  assert.equal(resolveWebAccess("tavily", "anthropic", keys({}), "u"), null);
+  assert.deepEqual(resolveWebAccess("zai", "anthropic", keys({ zai: "z" }), "u"), { kind: "zai", apiKey: "z" }, "GLM's tools work with Claude too");
+  assert.equal(resolveWebAccess("off", "anthropic", keys({ tavily: "t" }), "u"), null);
+  assert.equal(webToolWarning("tavily", "anthropic", new Set(), "u"), "Tavilyのキーがないので、Webを使いません。");
+  assert.equal(webToolWarning("tavily", "anthropic", new Set(["tavily"]), "u"), null);
+  assert.equal(webToolWarning("auto", "openai", new Set(), "u"), null);
+  assert.match(webToolWarning("auto", "openrouter", new Set(), "u") ?? "", /標準のWebツールがない/);
+  assert.match(webToolWarning("auto", "zai", new Set(), "u") ?? "", /GLM Coding Planのキーがない/);
 });
 
 test("Claude's and OpenAI's web tools run on their servers, so the bot adds no tools of its own", () => {
@@ -84,4 +84,42 @@ test("an MCP tool is found despite case and separator differences in its publish
   assert.equal(pickMcpTool(tools, "webSearchPrime")?.name, "web_search_prime");
   assert.equal(pickMcpTool([{ name: "search" }], "webSearchPrime")?.name, "search", "a server with one tool");
   assert.equal(pickMcpTool(tools, "webReader"), undefined);
+});
+
+test("RustXNG is offered only to the people it was set up for", async (t) => {
+  t.after(() => setRustxng(undefined));
+  assert.ok(!webToolsFor("owner").includes("rustxng"), "hidden while there is none");
+  assert.equal(resolveWebAccess("rustxng", "anthropic", keys({}), "owner"), null);
+  setRustxng({ url: "http://127.0.0.1:8888", users: new Set(["owner"]) });
+  assert.ok(webToolsFor("owner").includes("rustxng"));
+  assert.ok(!webToolsFor("someone").includes("rustxng"), "others never see it");
+  assert.deepEqual(resolveWebAccess("rustxng", "openrouter", keys({}), "owner"), { kind: "rustxng", url: "http://127.0.0.1:8888" });
+  assert.equal(resolveWebAccess("rustxng", "openrouter", keys({}), "someone"), null);
+  assert.equal(webToolWarning("rustxng", "anthropic", new Set(), "owner"), null);
+  assert.match(webToolWarning("rustxng", "anthropic", new Set(), "someone") ?? "", /使えなくなった/);
+
+  const urls: URL[] = [];
+  const fake = (async (url: URL) => {
+    urls.push(new URL(url));
+    return json({
+      answers: ["42"],
+      results: [{ title: "Tokio", url: "https://tokio.rs/", content: "async\nruntime", publishedDate: "2026-10-01", raw_content: "# Tokio" }],
+    });
+  }) as unknown as typeof fetch;
+  const tools = webTools({ kind: "rustxng", url: "http://127.0.0.1:8888" }, fake);
+  assert.deepEqual(tools.map((tool) => tool.name), ["web_search"], "RustXNG cannot read a given URL");
+  const found = await tools[0]!.execute("1", { query: "!github tokio & co", time_range: "week", include_content: true });
+  assert.equal(
+    (found.content[0] as { text: string }).text,
+    "答え: 42\n- Tokio\n  https://tokio.rs/ (2026-10-01)\n  async runtime\n  本文: # Tokio",
+  );
+  const sent = urls[0]!;
+  assert.equal(sent.origin + sent.pathname, "http://127.0.0.1:8888/search");
+  assert.equal(sent.searchParams.get("q"), "!github tokio & co");
+  assert.equal(sent.searchParams.get("format"), "json");
+  assert.equal(sent.searchParams.get("time_range"), "week");
+  assert.equal(sent.searchParams.get("include_raw_content"), "1");
+
+  const down = (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch;
+  await assert.rejects(webTools({ kind: "rustxng", url: "http://127.0.0.1:8888" }, down)[0]!.execute("2", { query: "x" }), /RustXNGに接続できません/);
 });
