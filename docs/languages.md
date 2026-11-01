@@ -11,7 +11,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 
 確認ダイアログと `/settings` の「Wasm」では、sha256 の代わりにこのソースが見られます。
 
-- 渡せるのはソースだけです。Cargo.toml・go.mod・moon.pkg・build.zig・nim.cfg・build.rs などのビルド設定と、依存の追加(pip のパッケージを含む)はできません。
+- 渡せるのはソースだけです。Cargo.toml・go.mod・moon.pkg・build.zig・nim.cfg・build.rs・tsconfig.json・package.json などのビルド設定と、依存の追加(pip のパッケージを含む)はできません。
 - ソースは合計256KB まで、ファイルは32個までです。
 - コンパイルは1人1件ずつ、1時間に30回までです。同じ言語・同じソースの結果は覚えておき、2回目からはすぐに返します(回数にも数えません)。
 - 最適化は既定でサイズ優先です。速さ優先も選べます。
@@ -28,6 +28,7 @@ wasm-compiler(`compiler/`)を入れてあれば、ビルドしなくてもソー
 | `moonbit` | MoonBit | MoonBit 0.10.17、`--target wasm` | `main.mbt` | 同じパッケージの `.mbt` だけ | moonbitlang/core | 120秒 |
 | `nim` | Nim | Nim 2.2.12 → wasi-sdk 25 の clang | `main.nim` | `.nim`。サブディレクトリ可 | 標準ライブラリ(ファイル・ネットワーク・プロセス・スレッドを使わないもの) | 120秒 |
 | `python` | Python(MicroPython) | MicroPython 1.29 → wasi-sdk 25 の clang、binaryen 133 | `main.py` | `.py`。サブディレクトリ可 | 組み込みモジュール(json・re・math・time など)と micropython-lib(itertools・functools・datetime・collections など、使ったものだけ入る) | 60秒 |
+| `typescript` | TypeScript(scriptc・試験的) | scriptc 0.4.7(Zig 0.16 でリンク)、binaryen 133 | `main.ts` | `.ts`。サブディレクトリ可 | scriptc が対応する標準の API(npm のパッケージは不可) | 120秒 |
 | `zig` | Zig | Zig 0.17、wasm32-wasi | `main.zig` | `.zig`。サブディレクトリ可 | 標準ライブラリ | 120秒 |
 
 どの言語も、実行時に使えるのは標準入出力・時計・乱数だけです。ファイル・ネットワークはなく、メモリは64MiB までです。言語ごとの細かい決まりと例は各言語の `guide.md` にあります。Botが `wasm_language_guide` で読むのはこれに、どの言語にも共通の [secretary.call](wasm.md#secretarycall) と [ホスト関数](wasm.md#ホスト関数) の節を足したものです。
@@ -131,6 +132,29 @@ MicroPython の GC はスタックを調べて生きている値を見つけま�
 
 案内と例: [compiler/languages/python/guide.md](../compiler/languages/python/guide.md)
 
+### TypeScript(scriptc)
+
+`import { input, get, output } from "./secretary"`。Vercel Labs の [scriptc](https://scriptc.dev) 0.4.7(試験的)で、TypeScript を JavaScript エンジンなしのネイティブの Wasm にします。型検査は本物の TypeScript です。`main.ts` の最上位のコードがそのまま1回動きます。`unknown` を `as` で型にすると中身を確かめ、合わなければ場所つきの `TypeError` になります。`async`・`Promise`・タイマーは使えず(下の作りのため)、標準の API でも scriptc が未対応のもの(`Function.name` など)はコンパイルエラーになります。`console.log` はログに出ます。できるモジュールは300〜600KB で、2回目以降の実行は数ms です。
+
+```ts
+input(): Input                         // event・params・state は unknown
+call(request: Record<string, unknown>): unknown  // 失敗は HostError
+get(route: string, query?: Record<string, unknown>): unknown
+output(result: Output): void           // { steps?, state?, reply?, response?, later? }
+```
+
+scriptc の WASI 実行ファイルはホスト関数を import できない(ネイティブの FFI も WASI では使えない)ので、ライブラリ(WASI の reactor)としてビルドし、`sdk/adapter.wat` を binaryen の `wasm-merge` でつなぎます。
+
+- 入口は `main.ts` を import するだけの `sdk/entry.ts` で、`main.ts` の最上位のコードはモジュールの初期化で動きます。`_start` は `_initialize` と初期化を呼ぶだけです
+- SDK の `secretaryCall`(`declare function`)は scriptc の import `scriptc.secretaryCall` になり、引数の形(要求のポインタと長さ、応答のバッファのポインタと長さ、戻り値)が `secretary.call` と同じなので、そのまま渡します。応答は `Uint8Array` に直接書き込みます
+- 結果は `secretaryOutput` から標準出力に書きます。プログラムの `fd_write` の import は `sdk/rename_import.py` で付け替え、標準出力(`console.log`)を標準エラー出力に回します
+- 例外やトラップは `scriptc.panic` に来るので、そのメッセージを標準エラー出力に書いて終了コード1で終わります
+- 最後に `wasm-metadce` で export を `_start` と `memory` だけにし、`wasm-opt` で縮めます
+
+scriptc 0.4.7 はライブラリのリンクで `scr_decl_adopt.o` を入れ忘れる(`unknown` を型に `as` すると `scr_dyn_adopt_shared` が未定義になる)ので、`sdk/link.sh` が足しています。scriptc は npm の `@scriptc/cli-linux-<arch>-gnu`・`@scriptc/llvm-…`・`@scriptc/runtime-wasm32-wasi` を直接取ってきて展開し、npm の postinstall がするはずの設定ファイルを setup.sh が書きます(ツールチェーンは約730MB)。
+
+案内と例: [compiler/languages/typescript/guide.md](../compiler/languages/typescript/guide.md)
+
 ### Zig
 
 `pub fn main() !void` が入口で、SDK は `@import("secretary")` です。メモリは `secretary.allocator` から取り、解放しなくてかまいません(実行が終わると消えます)。標準入出力は SDK を通します。スタックは1MiB です。
@@ -157,6 +181,7 @@ secretary.last_error                     // error.HostRefused のときの理由
 | Rust | `cargo build --release --target wasm32-wasip1` |
 | C/C++ | wasi-sdk の clang(`--target=wasm32-wasip1`) |
 | Zig | `zig build-exe -target wasm32-wasi` |
+| TypeScript | `SCRIPTC_TARGET=wasm32-wasi scriptc build main.ts`(標準入出力だけ。ホスト関数を使うならコンパイラの typescript を使う) |
 
 `secretary.call` を import として宣言する書き方は [examples/wasm](../examples/wasm) にあります。
 

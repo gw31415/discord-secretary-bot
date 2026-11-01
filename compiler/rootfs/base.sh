@@ -1,7 +1,8 @@
 #!/bin/sh
 # The root filesystem every build box starts from: a minimal Ubuntu with a C
 # toolchain for the host (Rust's build scripts and proc macros link with cc;
-# MicroPython's prewarm builds with make and python3).
+# MicroPython's prewarm builds with make and python3; the TypeScript build
+# renames an import with python3).
 # Nothing of the host is copied in. Needs root, network and mmdebstrap.
 # Usage (through main.ts): DEST=<dir> sh rootfs/base.sh
 set -eu

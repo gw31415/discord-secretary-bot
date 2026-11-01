@@ -18,7 +18,7 @@ const WASM = Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
 
 test("reads every language directory", () => {
   const languages = loadLanguages(LANGUAGES);
-  assert.deepEqual([...languages.keys()], ["c", "go", "moonbit", "nim", "python", "rust", "zig"]);
+  assert.deepEqual([...languages.keys()], ["c", "go", "moonbit", "nim", "python", "rust", "typescript", "zig"]);
   for (const l of languages.values()) {
     assert.match(l.fingerprint, /^[0-9a-f]{16}$/);
     assert.ok(l.entry.every((e) => l.paths.test(e)));
@@ -47,6 +47,10 @@ test("requests carry source files only, at the paths the language allows", () =>
   refused("rust", "src/main.rs", "build.rs");
   refused("rust", "src/main.rs", ".cargo/config.toml");
   refused("go", "main.go", "go.mod");
+  assert.equal(ok("typescript", "main.ts", "lib/parseArgs.ts").files.length, 2);
+  refused("typescript", "main.ts", "tsconfig.json");
+  refused("typescript", "main.ts", "package.json");
+  refused("typescript", "main.ts", "util.js");
   refused("c", "main.c", "Makefile");
   // Ways out of the job directory.
   refused("c", "main.c", "../main.c");
@@ -309,7 +313,7 @@ test("the API lists languages, gives guides and compiles over a Unix socket", as
   await new Promise<void>((resolve) => server.listen(socket, resolve));
   try {
     const languages = JSON.parse((await call(socket, "GET", "/v1/languages")).body) as { languages: Array<{ id: string; ready: boolean; version: string }> };
-    assert.deepEqual(languages.languages.map((l) => [l.id, l.ready]), [["c", true], ["go", true], ["moonbit", true], ["nim", true], ["python", true], ["rust", true], ["zig", true]]);
+    assert.deepEqual(languages.languages.map((l) => [l.id, l.ready]), [["c", true], ["go", true], ["moonbit", true], ["nim", true], ["python", true], ["rust", true], ["typescript", true], ["zig", true]]);
     const guide = await call(socket, "GET", "/v1/languages/rust/guide");
     assert.match(guide.body, /mod secretary/);
     const ok = JSON.parse((await call(socket, "POST", "/v1/compile", { language: "go", files: [{ path: "main.go", content: "package main" }] })).body) as { ok: boolean; wasm: string };
