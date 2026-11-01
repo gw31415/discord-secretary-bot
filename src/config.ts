@@ -10,6 +10,8 @@ export interface Config {
   dbPath: string;
   /** wasm-compiler's socket; unset when there is none, and then nothing is built from source. */
   compilerSocket?: string;
+  /** A RustXNG instance for the web tool, offered only to `users`. */
+  rustxng?: { url: string; users: Set<string> };
 }
 
 function required(name: string): string {
@@ -30,6 +32,7 @@ export function loadConfig(): Config {
     masterKey,
     dbPath: process.env.DB_PATH ?? "data/bot.db",
     ...compilerSocket(),
+    ...rustxng(),
   };
 }
 
@@ -40,4 +43,14 @@ function compilerSocket(): { compilerSocket?: string } {
   const set = process.env.WASM_COMPILER_SOCKET;
   if (set !== undefined) return set ? { compilerSocket: set } : {};
   return existsSync(DEFAULT_COMPILER_SOCKET) ? { compilerSocket: DEFAULT_COMPILER_SOCKET } : {};
+}
+
+/** RUSTXNG_URL and RUSTXNG_USERS (comma-separated Discord user ids); both are needed. */
+function rustxng(): { rustxng?: { url: string; users: Set<string> } } {
+  const url = process.env.RUSTXNG_URL?.trim();
+  const users = new Set((process.env.RUSTXNG_USERS ?? "").split(",").map((id) => id.trim()).filter(Boolean));
+  if (!url || users.size === 0) return {};
+  const protocol = new URL(url).protocol;
+  if (protocol !== "http:" && protocol !== "https:") throw new Error("RUSTXNG_URL は http か https のURLにしてください");
+  return { rustxng: { url, users } };
 }

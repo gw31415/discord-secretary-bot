@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Builds RustXNG and installs it as the rustxng service.
+#
+#   sudo deploy/rustxng-install users        # create the two users (once)
+#   sudo deploy/rustxng-install build v0.26.0 # build as rustxng-build
+#   sudo deploy/rustxng-install install       # copy the binary and start the service
+#
+# The build and the service run as different users, neither of them the deploying user:
+# - rustxng-build owns the toolchain, the source and the build. Building runs other
+#   people's code (build scripts, proc macros), so it gets no sudo and no access to
+#   anything else; it can only write /var/lib/rustxng-build.
+# - rustxng runs the service. It cannot write its binary or settings (root-owned in
+#   /opt/rustxng), and cannot read the build user's home.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BUILD_USER=rustxng-build
+BUILD_HOME=/var/lib/rustxng-build
+RUN_USER=rustxng
+REPO=https://github.com/sahenjp/RustXNG.git
+PREFIX=/opt/rustxng
+
+[[ $EUID -eq 0 ]] || { echo "root で実行してください(sudo)" >&2; exit 1; }
+
+as_builder() { sudo -u "$BUILD_USER" -H env -C "$BUILD_HOME" bash -lc "$1"; }
+
+case "${1:-}" in
+  users)
+    id "$BUILD_USER" &>/dev/null || useradd --system --create-home --home-dir "$BUILD_HOME" --shell /usr/sbin/nologin "$BUILD_USER"
+    chmod 700 "$BUILD_HOME"
+    id "$RUN_USER" &>/dev/null || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$RUN_USER"
+    ;;
+  build)
+    tag="${2:?タグを指定してください(例 v0.26.0)}"
+    if ! as_builder 'command -v cargo' &>/dev/null; then
+      as_builder 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path'
+    fi
+    as_builder "set -e
+      export PATH=\$HOME/.cargo/bin:\$PATH
+      rm -rf src && git clone -q --depth 1 --branch '$tag' '$REPO' src
+      cd src && cargo build --release --locked"
+    ;;
+  install)
+    built="$BUILD_HOME/src/target/release/rustxng"
+    [[ -x $built ]] || { echo "$built がありません。先に build を実行してください" >&2; exit 1; }
+    install -d -o root -g root -m 755 "$PREFIX"
+    install -o root -g root -m 755 "$built" "$PREFIX/rustxng"
+    install -o root -g root -m 644 "$HERE/rustxng.toml" "$PREFIX/settings.toml"
+    install -o root -g root -m 644 "$HERE/rustxng.service" /etc/systemd/system/rustxng.service
+    systemctl daemon-reload
+    systemctl enable rustxng
+    systemctl restart rustxng
+    "$PREFIX/rustxng" --version || true
+    ;;
+  *)
+    echo "使い方: $0 users | build <tag> | install" >&2
+    exit 2
+    ;;
+esac

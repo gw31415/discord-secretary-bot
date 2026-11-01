@@ -8,7 +8,7 @@ import type {
   APIStringSelectComponent,
 } from "discord-api-types/v10";
 import type { ReadScopeSetting, Store } from "../db.ts";
-import { isWebTool, WEB_TOOLS, webToolWarning } from "../agent/web.ts";
+import { isWebTool, WEB_TOOLS, webToolsFor, webToolWarning } from "../agent/web.ts";
 import type { WebTool } from "../agent/web.ts";
 import { findModel, isClassifier, judgesOnly, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
@@ -287,7 +287,7 @@ function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
 function webSection(store: Store, userId: string): APIComponentInContainer[] {
   const settings = store.getSettings(userId);
   const keys = new Set(store.listKeys(userId).map((k) => k.provider));
-  const warning = webToolWarning(settings.web, settings.response?.provider, keys);
+  const warning = webToolWarning(settings.web, settings.response?.provider, keys, userId);
   return [
     { type: ComponentType.Separator },
     {
@@ -304,7 +304,7 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
         type: ComponentType.StringSelect,
         custom_id: CUSTOM_ID.webSelect,
         placeholder: "Webツール",
-        options: (Object.keys(WEB_TOOLS) as WebTool[]).map((tool) => ({
+        options: webToolsFor(userId).map((tool) => ({
           label: WEB_TOOLS[tool].label,
           value: tool,
           ...(WEB_TOOLS[tool].description ? { description: WEB_TOOLS[tool].description.slice(0, 100) } : {}),

@@ -1,0 +1,6 @@
+# Overrides merged onto RustXNG's bundled settings.toml.
+[server]
+bind_address = "127.0.0.1"
+port = 8888
+# The bot reads JSON only; the HTML pages and image proxy are not needed.
+image_proxy = false

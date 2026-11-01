@@ -3,7 +3,7 @@ import { InteractionType, MessageFlags } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
 import { modalValue } from "./discord/modal.ts";
-import { WEB_TOOLS } from "./agent/web.ts";
+import { WEB_TOOLS, webToolAvailable } from "./agent/web.ts";
 import { findModel, judgesOnly, KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
 import { keyModal, parseCustomId, readScopeLabel, renderPanel, roleLabel, typedModelId, typedModelModal } from "./llm/panel.ts";
 import type { ModelRole, PanelPage } from "./llm/panel.ts";
@@ -80,6 +80,10 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         return;
       }
       case "selectWeb": {
+        if (!webToolAvailable(action.tool, userId)) {
+          await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, "そのWebツールは選べません", "lookup"));
+          return;
+        }
         store.setWebTool(userId, action.tool);
         store.audit(actor, "llm.web.set", { tool: action.tool });
         await api.interactions.updateMessage(
