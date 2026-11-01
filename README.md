@@ -147,14 +147,12 @@ botctl status | dev [branch] | promote | rollback | logs prod|dev [n] | install
 
 ### RustXNG
 
-Webツールの RustXNG は、同じサーバーの `127.0.0.1:8888` で動かします(外には公開しない)。`deploy/rustxng.service` を使います。
+Webツールの RustXNG は、同じサーバーの `127.0.0.1:8888` で動かします(外には公開しない)。ビルドと実行は別のユーザーです。ビルドは `rustxng-build`(sudo なし、`/var/lib/rustxng-build` だけに書ける)、実行は `rustxng`(バイナリと設定を書き換えられない)が行います。
 
 ```sh
-cargo build --release --locked            # RustXNG のソース(github.com/sahenjp/RustXNG)で
-sudo install -D -m755 target/release/rustxng /opt/rustxng/rustxng
-sudo install -m644 deploy/rustxng.toml /opt/rustxng/settings.toml   # このリポジトリから
-sudo install -m644 deploy/rustxng.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now rustxng
+sudo deploy/rustxng-install users          # ユーザーを作る(初回だけ)
+sudo deploy/rustxng-install build v0.26.0  # rustxng-build でビルドする
+sudo deploy/rustxng-install install        # /opt/rustxng に置いて rustxng.service を起動する
 ```
 
 使う環境の `.env` に `RUSTXNG_URL=http://127.0.0.1:8888` と `RUSTXNG_USERS=<DiscordユーザーID>` を足して、Bot を再起動します。

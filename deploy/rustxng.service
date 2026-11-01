@@ -1,6 +1,7 @@
 # RustXNG, the self-hosted metasearch engine behind the bot's "RustXNG" web tool.
 # It listens on 127.0.0.1 only: the bot reaches it there, nothing outside does.
-# The binary and its settings live in /opt/rustxng (see README).
+# It runs as rustxng, which is not the user that builds it (rustxng-build) and cannot
+# write its binary or settings in /opt/rustxng. deploy/rustxng-install sets this up.
 [Unit]
 Description=RustXNG metasearch for discord-secretary-bot
 After=network-online.target
@@ -8,7 +9,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-DynamicUser=yes
+User=rustxng
+Group=rustxng
 WorkingDirectory=/opt/rustxng
 ExecStart=/opt/rustxng/rustxng --config /opt/rustxng/settings.toml
 Restart=on-failure
