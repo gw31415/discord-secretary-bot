@@ -1,0 +1,4 @@
+[
+  { "name": "start", "root": true, "export": "_start" },
+  { "name": "memory", "root": true, "export": "memory" }
+]

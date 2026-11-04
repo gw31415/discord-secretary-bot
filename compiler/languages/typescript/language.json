@@ -1,0 +1,14 @@
+{
+  "id": "typescript",
+  "name": "TypeScript(scriptc・試験的)",
+  "version": "1",
+  "toolchain": "scriptc-0.4.7",
+  "rootfs": "base",
+  "entry": ["main.ts"],
+  "extensions": [".ts"],
+  "paths": "^([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.ts$",
+  "maxFiles": 32,
+  "timeoutMs": 120000,
+  "abi": ["secretary/1"],
+  "libraries": ["scriptc が対応する標準の API", "secretary"]
+}

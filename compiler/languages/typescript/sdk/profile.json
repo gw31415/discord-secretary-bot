@@ -1,0 +1,17 @@
+{
+  "profile_format": 2,
+  "name": "module",
+  "entry": "entry.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "module_",
+    "init_symbol": "module_init",
+    "sink_register_symbol": "module_sink",
+    "callback_register_symbol": "module_callback"
+  },
+  "callbacks": [
+    { "name": "secretaryCall", "params": ["string", "bytes"], "returns": "i32" },
+    { "name": "secretaryOutput", "params": ["string"], "returns": "void" }
+  ],
+  "exports": [{ "export": "run", "symbol": "module_run", "params": [], "returns": "void" }]
+}
