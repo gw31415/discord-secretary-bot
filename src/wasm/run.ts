@@ -150,9 +150,32 @@ async function executeIn(module: WebAssembly.Module, stdin: Uint8Array, host: (r
 // Starting a thread costs tens of milliseconds, so finished ones are kept for the next run.
 const MAX_IDLE_WORKERS = MAX_RUNNING;
 const idle: Worker[] = [];
+// Each idle thread holds tens of MB, so past one, threads unused this long are stopped.
+const IDLE_TRIM_MS = 10 * 60_000;
+const idleSince = new WeakMap<Worker, number>();
+let trimTimer: NodeJS.Timeout | null = null;
 
 function takeWorker(): Worker {
   return idle.pop() ?? spawn();
+}
+
+function park(worker: Worker): void {
+  idleSince.set(worker, Date.now());
+  idle.push(worker);
+  armTrim();
+}
+
+/** Taken last-in first-out, so the front of `idle` has waited longest. */
+function armTrim(): void {
+  if (trimTimer || idle.length <= 1) return;
+  const due = (idleSince.get(idle[0]!) ?? 0) + IDLE_TRIM_MS;
+  trimTimer = setTimeout(() => {
+    trimTimer = null;
+    const cutoff = Date.now() - IDLE_TRIM_MS;
+    while (idle.length > 1 && (idleSince.get(idle[0]!) ?? 0) <= cutoff) void idle.shift()!.terminate();
+    armTrim();
+  }, Math.max(0, due - Date.now()));
+  trimTimer.unref();
 }
 
 function spawn(): Worker {
@@ -166,13 +189,18 @@ function spawn(): Worker {
 }
 
 function giveBack(worker: Worker): void {
-  if (idle.length < MAX_IDLE_WORKERS) idle.push(worker);
+  if (idle.length < MAX_IDLE_WORKERS) park(worker);
   else void worker.terminate();
 }
 
 /** Starts threads ahead of the first runs. */
 export function warmWorkers(count = 2): void {
-  while (idle.length < Math.min(count, MAX_IDLE_WORKERS)) idle.push(spawn());
+  while (idle.length < Math.min(count, MAX_IDLE_WORKERS)) park(spawn());
+}
+
+/** How many threads wait for a run (for tests). */
+export function idleWorkers(): number {
+  return idle.length;
 }
 
 // V8 compiles a module's functions the first time they are called, so a

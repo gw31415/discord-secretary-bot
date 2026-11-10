@@ -421,7 +421,8 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 // Everything rules run is compiled before the first event: the JS engine, every enabled rule's code (kept
 // as bytecode across restarts) and every uploaded module an enabled rule runs.
 await precompileJsEngine().catch((e) => log("JSエンジンのコンパイルに失敗", e));
-warmWorkers();
+// With nothing for rules to run, the threads wait for the first run instead.
+if (store.enabledRuleCode().length + store.wasmInUse().length > 0) warmWorkers();
 void warmJsEngine();
 {
   let compiled = 0;
