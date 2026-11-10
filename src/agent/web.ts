@@ -1,6 +1,8 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { KeyProviderId, ProviderId } from "../llm/models.ts";
+import { truncate } from "../text.ts";
+import { toolText } from "./tool-text.ts";
 
 // Web access for the agent. Each person picks the service in /settings; the keys are theirs.
 // Claude's and OpenAI's own tools run on the provider's servers, so they come only with a
@@ -115,8 +117,7 @@ const MAX_OUTPUT = 15_000;
 const TIMEOUT_MS = 30_000;
 
 function text(value: string) {
-  const body = value.length > MAX_OUTPUT ? `${value.slice(0, MAX_OUTPUT)}\n…(長いため省略)` : value;
-  return { content: [{ type: "text" as const, text: body }], details: {} };
+  return toolText(value, MAX_OUTPUT);
 }
 
 const searchParams = Type.Object({
@@ -264,7 +265,7 @@ function rustxngSearch(base: string, fetchImpl: typeof fetch): AgentTool<typeof 
           const entry = [`- ${r.title || r.url}`, `  ${r.url}${r.publishedDate ? ` (${r.publishedDate})` : ""}`];
           if (r.content) entry.push(`  ${r.content.replaceAll("\n", " ")}`);
           if (r.raw_content) {
-            const page = r.raw_content.length > RUSTXNG_PAGE ? `${r.raw_content.slice(0, RUSTXNG_PAGE)}…` : r.raw_content;
+            const page = truncate(r.raw_content, RUSTXNG_PAGE);
             entry.push(`  本文: ${page.replaceAll("\n", " ")}`);
           }
           return entry.join("\n");

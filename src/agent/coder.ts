@@ -8,6 +8,8 @@ import { triggerSummary } from "../rules/triggers.ts";
 import { compileJs, WASM_CODE_LINE } from "../sandbox.ts";
 import { JUDGE_CODE_LINE } from "./decide.ts";
 import { retryFailedCall } from "./retry.ts";
+import { truncate } from "../text.ts";
+import { TOOL_CUT } from "./tool-text.ts";
 
 // A second agent, on the model the speaker picked for writing code. The conversation
 // agent describes what the code should do; this agent tries code against the server
@@ -111,7 +113,7 @@ function textOf(m: AssistantMessage): string {
 }
 
 function clip(value: string): string {
-  return value.length > MAX_TRY_OUTPUT ? `${value.slice(0, MAX_TRY_OUTPUT)}\n…(長いため省略)` : value;
+  return truncate(value, MAX_TRY_OUTPUT, TOOL_CUT);
 }
 
 function reply(text: string, extra: { isError?: boolean; terminate?: boolean } = {}) {

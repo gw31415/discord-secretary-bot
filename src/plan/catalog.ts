@@ -3,6 +3,7 @@ import type { TSchema } from "typebox";
 import { PermissionFlagsBits as P } from "discord-api-types/v10";
 import { FILE_ID_PATTERN, MAX_IMAGES_PER_REPLY } from "./types.ts";
 import type { Risk, StepDraft } from "./types.ts";
+import { truncate } from "../text.ts";
 
 // The permission table: every write the bot can make, with the Discord
 // permissions it needs, where they are evaluated, whether role hierarchy
@@ -93,8 +94,7 @@ function bits(value: unknown): bigint {
 }
 
 function short(text: unknown, max = 60): string {
-  const s = String(text ?? "").replaceAll("\n", " ");
-  return s.length > max ? `${s.slice(0, max)}…` : s;
+  return truncate(String(text ?? "").replaceAll("\n", " "), max);
 }
 
 function show(key: string, value: unknown): string {

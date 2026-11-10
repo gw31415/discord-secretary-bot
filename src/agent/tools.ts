@@ -32,6 +32,7 @@ import { MAX_MODULE_BYTES, prepareModule } from "../wasm/module.ts";
 import { execute, hostCalls, wasmInput } from "../wasm/run.ts";
 import type { WasmBindings } from "../wasm/run.ts";
 import { errorMessage } from "../errors.ts";
+import { toolText } from "./tool-text.ts";
 
 /** How much of a one-shot module's stdout the model sees. */
 const MAX_WASM_OUTPUT = 20_000;
@@ -46,8 +47,12 @@ import { docsIndex, loadDocs, readDoc, searchDocs } from "./docs.ts";
 const MAX_TOOL_OUTPUT = 20_000;
 
 function text(value: string) {
-  const body = value.length > MAX_TOOL_OUTPUT ? `${value.slice(0, MAX_TOOL_OUTPUT)}\n…(長いため省略)` : value;
-  return { content: [{ type: "text" as const, text: body }], details: {} };
+  return toolText(value, MAX_TOOL_OUTPUT);
+}
+
+/** A run's log lines, to add after its result or error. */
+function logsText(logs: string[]): string {
+  return logs.length > 0 ? `\nlog:\n${logs.join("\n")}` : "";
 }
 
 const ImageSourceSchema = Type.Union([
@@ -349,7 +354,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     parameters: Type.Object({ code: Type.String({ description: "関数本体。最後に return で結果を返す" }) }),
     execute: async (_id, params) => {
       const { result, made } = await runDrawing(params.code);
-      const logs = result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : "";
+      const logs = logsText(result.logs);
       if (!result.ok) throw new Error(`${result.error}${logs}`);
       return { content: [{ type: "text" as const, text: `${JSON.stringify(result.value, null, 1)}${logs}` }, ...(await drawn(made))], details: {} };
     },
@@ -374,13 +379,13 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       const { code } = await writeCode(coder!, "read", params.task, {
         check: async (code) => {
           ({ result, made } = await runDrawing(code));
-          return result.ok ? null : `${result.error}${result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : ""}`;
+          return result.ok ? null : `${result.error}${logsText(result.logs)}`;
         },
         run: (code) => runSandboxed(code, trialBindings, SANDBOX_LIMITS),
         tools: coderTools,
         ...(box ? { canvas: true } : {}),
       });
-      const logs = result!.logs.length > 0 ? `\nlog:\n${result!.logs.join("\n")}` : "";
+      const logs = logsText(result!.logs);
       return { content: [{ type: "text" as const, text: `コード:\n${code}\n\n結果:\n${JSON.stringify(result!.value, null, 1)}${logs}` }, ...(await drawn(made))], details: {} };
     },
   });

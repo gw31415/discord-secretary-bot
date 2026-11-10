@@ -9,6 +9,7 @@ import type { Halt } from "./engine.ts";
 import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { ACTOR_EVENTS, TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
+import { truncate } from "../text.ts";
 
 const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
 
@@ -81,10 +82,6 @@ function fenced(lang: string, body: string): string {
   return `\`\`\`${lang}\n${body.replaceAll("```", "`​``")}\n\`\`\``;
 }
 
-function clip(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
 function button(id: string, label: string, style: ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger = ButtonStyle.Secondary, disabled = false): APIButtonComponent {
   return { type: ComponentType.Button, custom_id: id, label, style, disabled };
 }
@@ -98,7 +95,7 @@ function container(texts: string[], rows: APIComponentInContainer[], accent?: nu
   const parts: APIComponentInContainer[] = [];
   for (const t of texts) {
     if (!t || budget <= 50) continue;
-    const content = clip(t, budget);
+    const content = truncate(t, budget);
     budget -= content.length;
     parts.push({ type: ComponentType.TextDisplay, content });
   }
@@ -153,10 +150,10 @@ export function dryRunText(dry: RuleDryRun): string {
       if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
   }
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
-  if (dry.response !== undefined) body.push(`応答: ${clip(dry.response, 300)}`);
-  if (dry.reply !== undefined || dry.images) body.push(`返事: ${clip(dry.reply ?? "", 300)}${dry.images ? `(画像${dry.images}枚)` : ""}`);
-  if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${clip(dry.state, 300)}\``);
-  if (dry.logs.length > 0) body.push(`-# log: ${clip(dry.logs.slice(0, 5).join(" / "), 300)}`);
+  if (dry.response !== undefined) body.push(`応答: ${truncate(dry.response, 300)}`);
+  if (dry.reply !== undefined || dry.images) body.push(`返事: ${truncate(dry.reply ?? "", 300)}${dry.images ? `(画像${dry.images}枚)` : ""}`);
+  if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${truncate(dry.state, 300)}\``);
+  if (dry.logs.length > 0) body.push(`-# log: ${truncate(dry.logs.slice(0, 5).join(" / "), 300)}`);
   return [head, ...body].join("\n");
 }
 
@@ -166,7 +163,7 @@ export function paramsText(params: Record<string, unknown>, label: (id: string) 
     .slice(0, 10)
     .map(([k, v]) => {
       const text = typeof v === "string" && label(v) !== v ? `${label(v)}(${v})` : valueText(v, (id) => JSON.stringify(id));
-      return `- ${k}: ${clip(text ?? "null", 120)}`;
+      return `- ${k}: ${truncate(text ?? "null", 120)}`;
     })
     .join("\n");
 }
@@ -215,9 +212,9 @@ export function homeView(input: HomeInput): Rendered {
           const last = input.lastRuns.get(r.id);
           const owner = r.ownerId === input.userId ? "" : " · ほかの人のルール";
           return {
-            label: clip(`${r.enabled ? "🟢" : "⏸️"} ${r.name}`, 100),
+            label: truncate(`${r.enabled ? "🟢" : "⏸️"} ${r.name}`, 100),
             value: r.id,
-            description: clip(`${triggerEvents(r.trigger).map((e) => (e === "COMMAND" && r.trigger.command ? `/${r.trigger.command.name}` : TRIGGERS[e]?.label ?? e)).join("/")}${last ? ` · 最後: ${OUTCOME_LABEL[last.outcome]}` : ""}${owner}`, 100),
+            description: truncate(`${triggerEvents(r.trigger).map((e) => (e === "COMMAND" && r.trigger.command ? `/${r.trigger.command.name}` : TRIGGERS[e]?.label ?? e)).join("/")}${last ? ` · 最後: ${OUTCOME_LABEL[last.outcome]}` : ""}${owner}`, 100),
           };
         }),
       }],
@@ -249,12 +246,11 @@ export interface DetailInput {
 const MAX_STATE_SHOWN = 600;
 
 export function stateText(state: unknown, max = MAX_STATE_SHOWN): string {
-  const json = JSON.stringify(state, null, 1);
-  return json.length > max ? `${json.slice(0, max)}…` : json;
+  return truncate(JSON.stringify(state, null, 1), max);
 }
 
 function runLine(run: RuleRun): string {
-  const error = run.error ? ` — ${clip(run.error.replaceAll("\n", " "), 120)}` : "";
+  const error = run.error ? ` — ${truncate(run.error.replaceAll("\n", " "), 120)}` : "";
   const plan = run.planId ? ` 変更 \`${run.planId}\`` : "";
   return `<t:${unix(run.startedAt)}:R> v${run.ruleVersion} ${OUTCOME_LABEL[run.outcome]}${plan}${error}`;
 }
@@ -316,7 +312,7 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
     );
   } else if (page === "source") {
     texts.push(
-      `**元の依頼**\n${clip(rule.sourcePrompt, 300)}`,
+      `**元の依頼**\n${truncate(rule.sourcePrompt, 300)}`,
       ...(rule.program.kind === "js"
         ? [fenced("js", rule.program.code.length > MAX_CODE ? `${rule.program.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.program.code)]
         : input.wasmSource
@@ -349,7 +345,7 @@ export function plansView(plans: Array<PlanRow & { updatedAt?: string }>, all: b
   const lines = plans.map(({ plan, status, reason }) => {
     const who = plan.rule ? `ルール「${plan.rule.name}」` : `<@${plan.actor.userId}>`;
     const ops = [...new Set(plan.steps.map((s) => s.op))].slice(0, 3).join(", ");
-    return `<t:${unix(plan.createdAt)}:R> \`${plan.id}\` ${STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${ops}${reason ? ` — ${clip(reason.replaceAll("\n", " "), 80)}` : ""}`;
+    return `<t:${unix(plan.createdAt)}:R> \`${plan.id}\` ${STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${ops}${reason ? ` — ${truncate(reason.replaceAll("\n", " "), 80)}` : ""}`;
   });
   return container(
     [`### 変更の履歴\n${all ? "このサーバーの最近の変更です。" : "あなたの最近の変更です(ルールによるものを含む)。"}`, lines.join("\n") || "ありません"],
@@ -411,9 +407,9 @@ export function commandsView(input: CommandsInput): Rendered {
         custom_id: ruleCustomId("cmd"),
         placeholder: `自分のコマンドを開く(${own.length}件)`,
         options: own.slice(0, 25).map((r) => ({
-          label: clip(`${r.enabled ? "🟢" : "⏸️"} /${r.trigger.command!.name}`, 100),
+          label: truncate(`${r.enabled ? "🟢" : "⏸️"} /${r.trigger.command!.name}`, 100),
           value: r.id,
-          description: clip(r.trigger.command!.description, 100),
+          description: truncate(r.trigger.command!.description, 100),
         })),
       }],
     });

@@ -6,6 +6,7 @@ import { containsRef, isRef, maxRisk } from "../plan/types.ts";
 import type { AllowEntry, Risk, Step } from "../plan/types.ts";
 import { MAX_STEPS } from "../plan/validate.ts";
 import { errorMessage } from "../errors.ts";
+import { truncate } from "../text.ts";
 
 // The allow list a rule's owner approves: which operations the rule may make,
 // with JSON Schemas on path parameters and the body. Every step a rule
@@ -243,8 +244,7 @@ export function allowRisk(allow: AllowEntry[]): Risk {
 }
 
 function compact(schema: unknown, max = 160): string {
-  const text = JSON.stringify(schema);
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  return truncate(JSON.stringify(schema), max);
 }
 
 /** A value of a schema or of params, with a ref to a step result shown as such. */
