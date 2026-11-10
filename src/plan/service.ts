@@ -1115,7 +1115,11 @@ export class Planner {
     for (const row of this.deps.store.expiredPlans(new Date(now))) {
       if (await this.#expire(row.plan.id)) await this.#refresh(row.plan.id).catch((e) => this.deps.log(`変更 ${row.plan.id} の表示更新に失敗`, e));
     }
-    this.deps.store.deleteSnapshotsBefore(new Date(now - SNAPSHOT_RETENTION_MS));
+  }
+
+  /** Drops snapshots past their retention; days long, so an hourly call is enough. */
+  pruneSnapshots(): void {
+    this.deps.store.deleteSnapshotsBefore(new Date(this.deps.now() - SNAPSHOT_RETENTION_MS));
   }
 
   /** A restart interrupted these plans; whether the in-flight request landed is unknown. */

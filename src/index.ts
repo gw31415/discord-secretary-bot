@@ -394,13 +394,20 @@ const sweeper = setInterval(() => {
   conversations.sweep();
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
   engine.sweep();
+}, 60_000);
+// Retention is counted in days, so deleting old rows hourly is enough.
+const pruneOld = () => {
+  planner.pruneSnapshots();
   store.deleteRuleRunsBefore(new Date(Date.now() - SNAPSHOT_RETENTION_MS));
   store.deleteBytecodeBefore(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
-}, 60_000);
+};
+pruneOld();
+const pruner = setInterval(pruneOld, 60 * 60_000);
 
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
+  clearInterval(pruner);
   engine.stopSchedules();
   presence.stop();
   await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);

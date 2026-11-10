@@ -166,6 +166,10 @@ const MIGRATIONS: string[] = [
       ELSE json_object('kind', 'js', 'code', coalesce(json_extract(rule_json, '$.code'), '')) END), '$.code', '$.wasm')
   WHERE json_extract(rule_json, '$.program') IS NULL;
   `,
+  // The retention sweep deletes by started_at; without this it scans the whole table.
+  `
+  CREATE INDEX IF NOT EXISTS rule_runs_started ON rule_runs (started_at);
+  `,
 ];
 
 export interface ModelRef {

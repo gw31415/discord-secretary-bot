@@ -348,3 +348,14 @@ test("enabledRules picks the same rules, in the same order, as filtering every r
   }
   assert.ok(names.filter((e) => store.enabledRules("g", e).length > 1).length > 10, "the sample covers most events");
 });
+
+test("old rule runs are deleted through the started_at index, and newer ones stay", () => {
+  const store = new Store(":memory:", master);
+  const plan = store.db.prepare("EXPLAIN QUERY PLAN DELETE FROM rule_runs WHERE started_at < ?").all("x") as Array<{ detail: string }>;
+  assert.ok(plan.some((row) => row.detail.includes("rule_runs_started")), JSON.stringify(plan));
+  const insert = store.db.prepare("INSERT INTO rule_runs (rule_id, rule_version, event_id, outcome, started_at) VALUES ('r', 1, 'e', 'executed', ?)");
+  insert.run("2026-01-01T00:00:00.000Z");
+  insert.run("2026-03-01T00:00:00.000Z");
+  store.deleteRuleRunsBefore(new Date("2026-02-01T00:00:00.000Z"));
+  assert.deepEqual(store.db.prepare("SELECT started_at FROM rule_runs").pluck().all(), ["2026-03-01T00:00:00.000Z"]);
+});

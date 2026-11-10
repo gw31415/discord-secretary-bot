@@ -329,7 +329,8 @@ test("rules saved before programs were a union read as a JS or a Wasm program", 
   const old = { sourcePrompt: "", trigger: { event: "MESSAGE_CREATE" }, allow: [], summary: null, limits: { perMinute: 10, maxConsecutiveFailures: 5 } };
   insert.run("js", "js", JSON.stringify({ ...old, name: "js", code: "return null" }));
   insert.run("wasm", "wasm", JSON.stringify({ ...old, name: "wasm", code: "", wasm: "ab".repeat(32) }));
-  store.db.pragma(`user_version = ${version - 1}`);
+  // Back to before the migration that made programs a union (the one before the rule_runs index).
+  store.db.pragma(`user_version = ${version - 2}`);
   store.close();
   store = new Store(path, key);
   try {
