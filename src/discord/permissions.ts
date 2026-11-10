@@ -60,9 +60,14 @@ export function basePermissions(guild: GuildState, member: MemberState): bigint 
   return perms;
 }
 
-function applyOverwrites(guild: GuildState, member: MemberState, channel: ChannelState, base: bigint): bigint {
+type OverwriteIndex = Map<string, OverwriteState>;
+
+function overwriteIndex(channel: ChannelState): OverwriteIndex {
+  return new Map(channel.overwrites.map((o) => [o.id, o]));
+}
+
+function applyOverwrites(guild: GuildState, member: MemberState, byId: OverwriteIndex, base: bigint): bigint {
   let perms = base;
-  const byId = new Map(channel.overwrites.map((o) => [o.id, o]));
 
   const everyone = byId.get(guild.id);
   if (everyone) perms = (perms & ~everyone.deny) | everyone.allow;
@@ -83,14 +88,20 @@ function applyOverwrites(guild: GuildState, member: MemberState, channel: Channe
   return perms;
 }
 
+/** The channel whose overwrites decide `channelId`: a thread's parent, or the channel itself. */
+function overwritesHolder(guild: GuildState, channelId: string): ChannelState | undefined {
+  const channel = guild.channels.get(channelId);
+  if (channel && isThread(channel) && channel.parentId) return guild.channels.get(channel.parentId);
+  return channel;
+}
+
 /** Effective permissions of `member` in `channelId`. Threads use their parent's overwrites. */
 export function channelPermissions(guild: GuildState, member: MemberState, channelId: string): bigint {
   const base = basePermissions(guild, member);
   if (base === ALL_PERMISSIONS) return ALL_PERMISSIONS;
-  let channel = guild.channels.get(channelId);
-  if (channel && isThread(channel) && channel.parentId) channel = guild.channels.get(channel.parentId);
+  const channel = overwritesHolder(guild, channelId);
   if (!channel) return 0n;
-  return applyOverwrites(guild, member, channel, base);
+  return applyOverwrites(guild, member, overwriteIndex(channel), base);
 }
 
 export function has(perms: bigint, ...bits: bigint[]): boolean {
@@ -153,12 +164,47 @@ export function shareableChannels(
   const bot = self(guild, selfId);
   const result = new Set<string>([currentChannelId]);
   if (!bot) return result;
+  // Permissions follow from being the owner, the set of roles and a member's own overwrite
+  // in the channel. So the audience is checked once per role set, and anyone with their
+  // own overwrite in a channel (or the owner) is checked as themselves there.
+  const groups = new Map<string, { members: MemberState[]; base: bigint }>();
+  const byUser = new Map<string, { member: MemberState; base: bigint }>();
+  for (const member of audience) {
+    const key = member.userId === guild.ownerId ? `owner:${member.userId}` : [...new Set(member.roleIds)].sort().join(",");
+    let group = groups.get(key);
+    if (!group) groups.set(key, (group = { members: [], base: basePermissions(guild, member) }));
+    group.members.push(member);
+    byUser.set(member.userId, { member, base: group.base });
+  }
+  const reads = (member: MemberState, base: bigint, holder: ChannelState | undefined, byId: OverwriteIndex | undefined) =>
+    has(base === ALL_PERMISSIONS ? ALL_PERMISSIONS : holder ? applyOverwrites(guild, member, byId!, base) : 0n, PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory);
+  const botBase = basePermissions(guild, bot);
+  const speakerBase = basePermissions(guild, speaker);
   for (const channel of guild.channels.values()) {
     if (channel.id === currentChannelId) continue;
     if (channel.type === ChannelType.PrivateThread) continue;
-    if (!canReadHistory(guild, bot, channel.id)) continue;
-    if (!canReadHistory(guild, speaker, channel.id)) continue;
-    if (audience.every((m) => canReadHistory(guild, m, channel.id))) result.add(channel.id);
+    const holder = overwritesHolder(guild, channel.id);
+    const byId = holder ? overwriteIndex(holder) : undefined;
+    if (!reads(bot, botBase, holder, byId)) continue;
+    if (!reads(speaker, speakerBase, holder, byId)) continue;
+    const own = new Set<string>();
+    for (const id of byId?.keys() ?? []) if (byUser.has(id)) own.add(id);
+    let everyone = true;
+    for (const id of own) {
+      const viewer = byUser.get(id)!;
+      if (!reads(viewer.member, viewer.base, holder, byId)) everyone = false;
+      if (!everyone) break;
+    }
+    if (everyone) {
+      for (const group of groups.values()) {
+        const representative = group.members.find((m) => !own.has(m.userId));
+        if (representative && !reads(representative, group.base, holder, byId)) {
+          everyone = false;
+          break;
+        }
+      }
+    }
+    if (everyone) result.add(channel.id);
   }
   return result;
 }
