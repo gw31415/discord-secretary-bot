@@ -2,8 +2,8 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { open, seal } from "./crypto.ts";
-import { isKeyProviderId, isProviderId } from "./llm/models.ts";
-import type { KeyProviderId, ProviderId } from "./llm/models.ts";
+import { isKeyProviderId, isProviderId, MODEL_ROLES } from "./llm/models.ts";
+import type { KeyProviderId, ModelRole, ProviderId } from "./llm/models.ts";
 import { isWebTool } from "./agent/web.ts";
 import type { WebTool } from "./agent/web.ts";
 import type { Actor, Plan, PlanStatus, StepState } from "./plan/types.ts";
@@ -173,6 +173,15 @@ export interface ModelRef {
   provider: ProviderId;
   model: string;
 }
+
+/** Each model role's provider and model columns in user_settings ("response" predates the roles). */
+const MODEL_COLUMNS: Record<ModelRole, readonly [string, string]> = {
+  response: ["default_provider", "default_model"],
+  judge: ["judge_provider", "judge_model"],
+  addressee: ["addressee_provider", "addressee_model"],
+  code: ["code_provider", "code_model"],
+  reaction: ["reaction_provider", "reaction_model"],
+};
 
 export interface UserSettings {
   response: ModelRef | null;
@@ -440,41 +449,37 @@ export class Store {
   // --- Model settings -----------------------------------------------------
 
   getSettings(userId: string): UserSettings {
-    const row = this.db.prepare("SELECT * FROM user_settings WHERE user_id = ?").get(userId) as
-      | { default_provider: string | null; default_model: string | null; judge_provider: string | null; judge_model: string | null; addressee_provider: string | null; addressee_model: string | null; code_provider: string | null; code_model: string | null; reaction_provider: string | null; reaction_model: string | null; web_tool: string | null; read_scope: string | null }
-      | undefined;
-    const ref = (provider: string | null | undefined, model: string | null | undefined): ModelRef | null =>
-      provider && model && isProviderId(provider) ? { provider, model } : null;
+    const row = this.db.prepare("SELECT * FROM user_settings WHERE user_id = ?").get(userId) as Record<string, string | null> | undefined;
+    const ref = (role: ModelRole): ModelRef | null => {
+      const [providerCol, modelCol] = MODEL_COLUMNS[role];
+      const provider = row?.[providerCol];
+      const model = row?.[modelCol];
+      return provider && model && isProviderId(provider) ? { provider, model } : null;
+    };
     return {
-      response: ref(row?.default_provider, row?.default_model),
-      judge: ref(row?.judge_provider, row?.judge_model),
-      addressee: ref(row?.addressee_provider, row?.addressee_model),
-      code: ref(row?.code_provider, row?.code_model),
-      reaction: ref(row?.reaction_provider, row?.reaction_model),
+      ...(Object.fromEntries(MODEL_ROLES.map((role) => [role, ref(role)])) as Record<ModelRole, ModelRef | null>),
       web: row?.web_tool && isWebTool(row.web_tool) ? row.web_tool : "auto",
       readScope: row?.read_scope === "always" ? "always" : "ask",
     };
   }
 
-  setReadScope(userId: string, scope: ReadScopeSetting): void {
+  #ensureSettingsRow(userId: string): void {
     this.db.prepare("INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING").run(userId);
+  }
+
+  setReadScope(userId: string, scope: ReadScopeSetting): void {
+    this.#ensureSettingsRow(userId);
     this.db.prepare("UPDATE user_settings SET read_scope = ? WHERE user_id = ?").run(scope, userId);
   }
 
   setWebTool(userId: string, tool: WebTool): void {
-    this.db.prepare("INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING").run(userId);
+    this.#ensureSettingsRow(userId);
     this.db.prepare("UPDATE user_settings SET web_tool = ? WHERE user_id = ?").run(tool, userId);
   }
 
-  setModel(userId: string, role: "response" | "judge" | "addressee" | "code" | "reaction", ref: ModelRef | null): void {
-    const [providerCol, modelCol] = {
-      response: ["default_provider", "default_model"],
-      judge: ["judge_provider", "judge_model"],
-      addressee: ["addressee_provider", "addressee_model"],
-      code: ["code_provider", "code_model"],
-      reaction: ["reaction_provider", "reaction_model"],
-    }[role];
-    this.db.prepare("INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING").run(userId);
+  setModel(userId: string, role: ModelRole, ref: ModelRef | null): void {
+    const [providerCol, modelCol] = MODEL_COLUMNS[role];
+    this.#ensureSettingsRow(userId);
     this.db
       .prepare(`UPDATE user_settings SET ${providerCol} = ?, ${modelCol} = ? WHERE user_id = ?`)
       .run(ref?.provider ?? null, ref?.model ?? null, userId);

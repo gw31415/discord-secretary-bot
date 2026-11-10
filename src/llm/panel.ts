@@ -10,7 +10,7 @@ import type {
 import type { ReadScopeSetting, Store } from "../db.ts";
 import { isWebTool, WEB_TOOLS, webToolsFor, webToolWarning } from "../agent/web.ts";
 import type { WebTool } from "../agent/web.ts";
-import { findModel, isClassifier, judgesOnly, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
+import { findModel, isClassifier, judgesOnly, isKeyProviderId, isModelRole, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 import { ruleCustomId } from "../rules/panel.ts";
 import { NS, WASM_HOME_ID } from "../discord/custom-id.ts";
@@ -433,11 +433,10 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "key" && isKeyProviderId(arg)) return { kind: "openKeyModal", provider: arg };
   if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
   if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
-  const isRole = (r: string | undefined): r is ModelRole => r === "response" || r === "judge" || r === "addressee" || r === "code" || r === "reaction";
   // The OpenRouter select and buttons on panels opened before its option joined the model selects.
-  if (kind === "typed" && isRole(arg)) return { kind: "openTypedModelModal", role: arg };
-  if (kind === "typed" && arg === "role") return isRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
-  if (kind === "typedmodal" && isRole(arg)) return { kind: "submitTypedModel", role: arg };
+  if (kind === "typed" && isModelRole(arg)) return { kind: "openTypedModelModal", role: arg };
+  if (kind === "typed" && arg === "role") return isModelRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
+  if (kind === "typedmodal" && isModelRole(arg)) return { kind: "submitTypedModel", role: arg };
   // "advanced" is the per-use page's id on panels opened before it moved under the models page.
   if (kind === "page" && arg === "advanced") return { kind: "page", page: "roles" };
   if (kind === "page" && (arg === "home" || arg === "keys" || arg === "models" || arg === "roles" || arg === "lookup")) return { kind: "page", page: arg };
@@ -449,7 +448,7 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
     const tool = values[0] ?? "";
     return isWebTool(tool) ? { kind: "selectWeb", tool } : null;
   }
-  if (kind === "model" && isRole(arg)) {
+  if (kind === "model" && isModelRole(arg)) {
     const value = values[0] ?? "";
     if (arg !== "response" && value === MODEL_UNSET) return { kind: "clearModel", role: arg };
     if (value === MODEL_TYPED) return { kind: "openTypedModelModal", role: arg };

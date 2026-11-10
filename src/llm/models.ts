@@ -31,7 +31,12 @@ export const KEY_PROVIDERS = {
 } as const;
 
 export type KeyProviderId = keyof typeof KEY_PROVIDERS;
-export type ModelRole = "response" | "judge" | "addressee" | "code" | "reaction";
+export const MODEL_ROLES = ["response", "judge", "addressee", "code", "reaction"] as const;
+export type ModelRole = (typeof MODEL_ROLES)[number];
+
+export function isModelRole(value: string | undefined): value is ModelRole {
+  return (MODEL_ROLES as readonly (string | undefined)[]).includes(value);
+}
 
 /** Roles that take a classifier as well as a chat model. */
 export function judgesOnly(role: ModelRole): boolean {
