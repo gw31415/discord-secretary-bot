@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 // Envelope encryption: each secret gets its own data key (DEK), and the DEK is
 // wrapped with the master key. Rotating the master key only rewraps DEKs.
@@ -41,4 +41,13 @@ export function seal(masterKey: Buffer, plaintext: string, aad: string): Sealed 
 export function open(masterKey: Buffer, sealed: Sealed, aad: string): string {
   const dek = decrypt(masterKey, sealed.wrappedDek, `dek:${aad}`);
   return decrypt(dek, sealed.ciphertext, aad).toString("utf8");
+}
+
+export function sha256Hex(data: string | Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+/** 12 hex characters; ids are shown to people and fit custom_id patterns. */
+export function shortId(): string {
+  return randomBytes(6).toString("hex");
 }

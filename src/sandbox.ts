@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { sha256Hex } from "./crypto.ts";
 import { CANVAS_PRELUDE } from "./canvas.ts";
 import { DECIDE_PRELUDE } from "./agent/decide.ts";
 import type { Decide } from "./agent/decide.ts";
@@ -132,7 +133,7 @@ let runner: Promise<{ module: WebAssembly.Module; sha256: string }> | null = nul
 export function precompileJsEngine(): Promise<{ module: WebAssembly.Module; sha256: string }> {
   runner ??= (async () => {
     const bytes = await readFile(new URL("./wasm/js-runner.wasm", import.meta.url));
-    return { module: await WebAssembly.compile(bytes), sha256: createHash("sha256").update(bytes).digest("hex") };
+    return { module: await WebAssembly.compile(bytes), sha256: sha256Hex(bytes) };
   })();
   runner.catch(() => (runner = null));
   return runner;

@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 
@@ -32,7 +33,7 @@ export function isTransient(message: string): boolean {
 export async function retryFailedCall(
   agent: Agent,
   canRetry: () => boolean,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep: (ms: number) => Promise<void> = delay,
 ): Promise<number> {
   let retries = 0;
   for (;;) {

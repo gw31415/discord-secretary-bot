@@ -1,4 +1,5 @@
-import { createHash, randomBytes } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { sha256Hex, shortId } from "../crypto.ts";
 import { VISIBILITIES } from "../rules/command.ts";
 import type { CommandVisibility } from "../rules/command.ts";
 import type { API } from "@discordjs/core";
@@ -134,19 +135,15 @@ function stable(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
 export function fingerprint(resource: Resource, fields: string[]): string {
   if (!resource) return "absent";
-  return sha256(stable(fields.map((f) => [f, resource[f] ?? null])));
+  return sha256Hex(stable(fields.map((f) => [f, resource[f] ?? null])));
 }
 
 export function planHash(plan: Omit<Plan, "hash">): string {
   const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, rules, createdAt, expiresAt } = plan;
   // The rules are approved too, so a change to them (such as who sees a command's replies) changes the hash.
-  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, ...(rules ? { rules } : {}), createdAt, expiresAt }));
+  return sha256Hex(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, ...(rules ? { rules } : {}), createdAt, expiresAt }));
 }
 
 /** Fields shown as "before" in the preview, on top of the ones the step depends on. */
@@ -260,7 +257,7 @@ export class Planner {
     const cache = this.deps.caches.get(input.guildId);
     if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
     const guild = cache.guild;
-    const id = randomBytes(6).toString("hex");
+    const id = shortId();
     const ruleInputs = input.rules ?? [];
     if (ruleInputs.length > 0 && !this.deps.rules) throw new PlanRejected(["ルールはここでは作れません"]);
     const steps = normalizeSteps(input.drafts, input.guildId, id, ruleInputs.length > 0);
@@ -343,7 +340,7 @@ export class Planner {
     const cache = this.deps.caches.get(input.guildId);
     if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
     const guild = cache.guild;
-    const id = randomBytes(6).toString("hex");
+    const id = shortId();
     const steps = normalizeSteps(input.drafts, input.guildId, id);
     const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId(), ...(input.rule.ownReply ? { ownReply: input.rule.ownReply } : {}) };
     // Who may not see or do a step learns only that. The state of its target is
@@ -932,7 +929,7 @@ export class Planner {
       payload = {
         ...text,
         allowed_mentions: { parse: ["users"] },
-        nonce: sha256(step.idempotencyKey).slice(0, 25),
+        nonce: sha256Hex(step.idempotencyKey).slice(0, 25),
         enforce_nonce: true,
         ...(uploads.length > 0 ? { attachments: uploads.map((f, i) => ({ id: i, filename: f.name })) } : {}),
       };
@@ -961,7 +958,7 @@ export class Planner {
     const row = store.getPlan(planId);
     if (!row || !store.transitionPlan(planId, ["approved"], "executing")) return;
     const { plan } = row;
-    const sleep = this.deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+    const sleep = this.deps.sleep ?? delay;
 
     {
       const rows = new Map(store.getSteps(plan.id).map((s) => [s.stepId, s]));

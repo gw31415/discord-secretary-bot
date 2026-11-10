@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../crypto.ts";
 import type { RuleTimer, Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { toChannel } from "../discord/cache.ts";
@@ -932,6 +932,6 @@ export type Evaluation =
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {
   const own = data.id ?? data.message_id ?? data.user?.id ?? data.user_id ?? data.role?.id ?? data.role_id;
-  const hash = createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 10);
+  const hash = sha256Hex(JSON.stringify(data)).slice(0, 10);
   return `${event}:${own ?? "-"}:${hash}`;
 }

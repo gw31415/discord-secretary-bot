@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { Client, GatewayDispatchEvents, GatewayIntentBits } from "@discordjs/core";
 import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
@@ -403,7 +404,7 @@ async function shutdown(signal: string): Promise<void> {
   clearInterval(sweeper);
   engine.stopSchedules();
   presence.stop();
-  await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);
+  await Promise.race([engine.idle(), sleep(10_000)]);
   await gateway.destroy();
   store.close();
   process.exit(0);

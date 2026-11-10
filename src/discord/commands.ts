@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../crypto.ts";
 import type { API } from "@discordjs/core";
 import { ApplicationCommandType, ApplicationIntegrationType, InteractionContextType } from "discord-api-types/v10";
 import type { RESTPutAPIApplicationCommandsJSONBody, RESTPutAPIApplicationGuildCommandsJSONBody } from "discord-api-types/v10";
@@ -32,7 +32,7 @@ export const SETTINGS_COMMAND_ID = "command_id:settings";
 
 /** /settings, the same in every server; rules are one of its sections. */
 export async function registerGlobalCommands(api: API, store: Store, applicationId: string): Promise<boolean> {
-  const hash = createHash("sha256").update(JSON.stringify(COMMANDS)).digest("hex");
+  const hash = sha256Hex(JSON.stringify(COMMANDS));
   const key = "commands_hash:global";
   const unchanged = store.getMeta(key) === hash;
   if (unchanged && store.getMeta(SETTINGS_COMMAND_ID)) return false;
@@ -53,7 +53,7 @@ export function guildCommandIdsKey(guildId: string): string {
 
 export async function registerCommands(api: API, store: Store, applicationId: string, guildId: string): Promise<boolean> {
   const commands = guildCommands(store, guildId);
-  const hash = createHash("sha256").update(JSON.stringify({ guildId, commands })).digest("hex");
+  const hash = sha256Hex(JSON.stringify({ guildId, commands }));
   const key = `commands_hash:${guildId}`;
   const unchanged = store.getMeta(key) === hash;
   if (unchanged && store.getMeta(guildCommandIdsKey(guildId))) return false;

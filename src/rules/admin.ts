@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { shortId } from "../crypto.ts";
 import { VISIBILITIES } from "./command.ts";
 import type { CommandVisibility } from "./command.ts";
 import { PermissionFlagsBits as P } from "discord-api-types/v10";
@@ -139,7 +139,7 @@ export class RuleAdmin {
     const now = new Date(this.deps.now()).toISOString();
     const rule: Rule = {
       ...definition,
-      id: randomBytes(6).toString("hex"),
+      id: shortId(),
       guildId,
       ownerId,
       version: 1,
