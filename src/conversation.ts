@@ -3,6 +3,7 @@ import type { Store, WasmModule } from "./db.ts";
 import type { CompilerLanguage, SourceFile } from "./wasm/compiler.ts";
 import type { CompileResult, FreshModule } from "./wasm/registry.ts";
 import { formatMessage } from "./agent/tools.ts";
+import type { WasmTools } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
 import { resolveWebAccess } from "./agent/web.ts";
@@ -144,6 +145,32 @@ export function styleSamples(messages: Pick<APIMessage, "author" | "webhook_id" 
     .slice(-STYLE_SAMPLES);
 }
 
+/** The context the reply is written in: the messages before it, newest first from the API. */
+function contextOf(before: APIMessage[]): ChannelContext {
+  return { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
+}
+
+/** The Wasm tools as the agent sees them: bound to the speaker, who owns the modules. */
+function speakerWasm(wasm: NonNullable<NonNullable<ConversationDeps["rules"]>["wasm"]>, speaker: string, guildId: string): WasmTools {
+  const { compiler } = wasm;
+  return {
+    list: () => wasm.list(speaker),
+    upload: (name, bytes) => wasm.upload(speaker, name, bytes),
+    load: (ref) => wasm.load(speaker, guildId, ref),
+    ...(compiler
+      ? {
+          compiler: {
+            languages: () => compiler.languages(),
+            guide: (language) => compiler.guide(language),
+            compile: (language, files, optimize) => compiler.compile(speaker, language, files, optimize),
+            fresh: (ref) => compiler.fresh(speaker, ref),
+            keep: (name, ref) => compiler.keep(speaker, name, ref),
+          },
+        }
+      : {}),
+  };
+}
+
 /** Splits a reply into posts: first at the model's own breaks, then at Discord's length limit. */
 export function splitForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
   return text.split(/^[ \t]*<next>[ \t]*$/m).flatMap((part) => splitByLength(part, limit));
@@ -257,8 +284,14 @@ export class Conversations {
   }
 
   async #context(message: GuildMessage): Promise<ChannelContext> {
-    const before = await this.deps.fetchBefore(message.channel_id, message.id, CONTEXT_MESSAGES);
-    return { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
+    return contextOf(await this.deps.fetchBefore(message.channel_id, message.id, CONTEXT_MESSAGES));
+  }
+
+  /** Keeps the channel's conversation awake for another session from now. */
+  #extend(channelId: string): void {
+    const latest = this.deps.store.getConversation(channelId);
+    if (latest) this.deps.store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
+    this.deps.onAwake?.();
   }
 
   async #addressed(transcript: string[], message: GuildMessage): Promise<boolean> {
@@ -290,9 +323,7 @@ export class Conversations {
     });
     this.deps.onAwake?.();
     if (await this.#reactInstead(message, context)) {
-      const latest = store.getConversation(message.channel_id);
-      if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
-      this.deps.onAwake?.();
+      this.#extend(message.channel_id);
       return;
     }
     await this.#answer({
@@ -309,9 +340,7 @@ export class Conversations {
     });
 
     // Extend the session from the moment the reply went out.
-    const latest = store.getConversation(message.channel_id);
-    if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
-    this.deps.onAwake?.();
+    this.#extend(message.channel_id);
   }
 
   /** The speaker's reaction model, or without one their judge model (or language model). */
@@ -392,9 +421,7 @@ export class Conversations {
       images: [],
       audit: { channelId: data.channel_id, messageId: data.message_id, reaction: line },
     });
-    const latest = store.getConversation(data.channel_id);
-    if (latest) store.saveConversation({ ...latest, awakeUntil: deps.now() + SESSION_MS });
-    deps.onAwake?.();
+    this.#extend(data.channel_id);
   }
 
   /**
@@ -408,8 +435,7 @@ export class Conversations {
       return Promise.reject(new Error("/settings の設定が終わっていないため修正できません"));
     }
     const run = async () => {
-      const before = await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES);
-      const context = { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
+      const context = contextOf(await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES));
       const current = plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) }));
       const name = plan.labels[speaker] ?? speaker;
       await this.#answer({
@@ -456,7 +482,8 @@ export class Conversations {
   }): Promise<void> {
     const { store } = this.deps;
     const { speaker, channelId } = input;
-    const ref = store.getSettings(speaker).response!;
+    const settings = store.getSettings(speaker);
+    const ref = settings.response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
     const code = chatModelFor(store, speaker, (s) => s.code);
@@ -464,7 +491,7 @@ export class Conversations {
     // A coding model whose key was removed falls back to the response model.
     const coder = code ? llmCoder(code.model, code.apiKey) : undefined;
     const web = this.deps.webSearch
-      ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p), speaker)
+      ? resolveWebAccess(settings.web, ref.provider, (p) => store.getApiKey(speaker, p), speaker)
       : null;
     const reader = this.deps.makeReader({ guildId: input.guildId, channelId, speakerId: speaker });
     // Asked only when the agent finds it needs more than the channel's audience may see.
@@ -548,26 +575,7 @@ export class Conversations {
           ? {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
               runs: (ruleId, limit) => this.deps.rules!.runs(input.guildId, speaker, ruleId, reader.shareable(), limit),
-              ...(this.deps.rules.wasm
-                ? {
-                    wasm: {
-                      list: () => this.deps.rules!.wasm!.list(speaker),
-                      upload: (name: string, bytes: Uint8Array) => this.deps.rules!.wasm!.upload(speaker, name, bytes),
-                      load: (ref: string) => this.deps.rules!.wasm!.load(speaker, input.guildId, ref),
-                      ...(this.deps.rules.wasm.compiler
-                        ? {
-                            compiler: {
-                              languages: () => this.deps.rules!.wasm!.compiler!.languages(),
-                              guide: (language: string) => this.deps.rules!.wasm!.compiler!.guide(language),
-                              compile: (language: string, files: SourceFile[], optimize: "size" | "speed") => this.deps.rules!.wasm!.compiler!.compile(speaker, language, files, optimize),
-                              fresh: (ref: string) => this.deps.rules!.wasm!.compiler!.fresh(speaker, ref),
-                              keep: (name: string, ref: string) => this.deps.rules!.wasm!.compiler!.keep(speaker, name, ref),
-                            },
-                          }
-                        : {}),
-                    },
-                  }
-                : {}),
+              ...(this.deps.rules.wasm ? { wasm: speakerWasm(this.deps.rules.wasm, speaker, input.guildId) } : {}),
             }
           : undefined,
       });
