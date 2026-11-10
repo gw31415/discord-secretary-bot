@@ -489,7 +489,9 @@ export class Conversations {
       : undefined;
 
     await this.deps.typing(channelId).catch(() => undefined);
-    const typing = setInterval(() => void this.deps.typing(channelId).catch(() => undefined), 8000);
+    const keepTyping = () => setInterval(() => void this.deps.typing(channelId).catch(() => undefined), 8000);
+    let typing = keepTyping();
+    let typingStopped = false;
     const inbox = new Inbox();
     this.#working.set(channelId, { speaker, messageIds: new Set(input.messageIds ?? []), inbox });
     // The first post answers the message; the rest follow it as a series.
@@ -528,6 +530,11 @@ export class Conversations {
         ...(this.deps.askContinue ? { askContinue: (turns: number) => this.deps.askContinue!({ channelId, replyToId: input.replyToId, speakerId: speaker, turns }) } : {}),
         onProgress: async (content) => {
           await post(content);
+          // Restarted so the next tick comes a full interval after this one, not right on top of it.
+          if (!typingStopped) {
+            clearInterval(typing);
+            typing = keepTyping();
+          }
           await this.deps.typing(channelId).catch(() => undefined);
         },
         propose: this.deps.propose
@@ -593,6 +600,7 @@ export class Conversations {
         ...(e instanceof ReplyFailed ? { turns: e.turns, toolCalls: e.toolCalls, retries: e.retries } : {}),
       };
     } finally {
+      typingStopped = true;
       clearInterval(typing);
       if (this.#working.get(channelId)?.inbox === inbox) this.#working.delete(channelId);
     }
