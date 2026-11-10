@@ -397,6 +397,11 @@ export class Store {
     return statement;
   }
 
+  /** Runs `f` as one transaction (nested calls join the outer one). */
+  transaction<T>(f: () => T): T {
+    return this.db.transaction(f)();
+  }
+
   getMeta(key: string): string | undefined {
     const row = this.#stmt("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
     return row?.value;
@@ -712,9 +717,9 @@ export class Store {
 
   /** Counts a failed run; returns the count in a row. A success resets it. */
   recordRuleResult(id: string, failed: boolean): number {
-    this.#stmt("UPDATE rules SET consecutive_failures = CASE WHEN ? THEN consecutive_failures + 1 ELSE 0 END WHERE id = ?")
-      .run(failed ? 1 : 0, id);
-    return (this.#stmt("SELECT consecutive_failures AS n FROM rules WHERE id = ?").get(id) as { n: number } | undefined)?.n ?? 0;
+    const row = this.#stmt("UPDATE rules SET consecutive_failures = CASE WHEN ? THEN consecutive_failures + 1 ELSE 0 END WHERE id = ? RETURNING consecutive_failures AS n")
+      .get(failed ? 1 : 0, id) as { n: number } | undefined;
+    return row?.n ?? 0;
   }
 
   /** What the rule's code saved with setState on its last successful run; null when none. */

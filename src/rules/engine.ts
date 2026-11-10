@@ -604,10 +604,11 @@ export class RuleEngine {
     const owned = ownerAllowProblems(guild, rule.ownerId, this.deps.selfId(), rule.allow, "ルールの作成者");
     if (owned.length > 0) {
       const error = owned.join("\n").slice(0, MAX_ERROR);
-      store.finishRuleRun(runId, { outcome: "rejected", error, logs: [] });
-      store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome: "rejected", event: eventId, version }, undefined, rule.id);
       // This is the rule's own problem, so it counts toward switching the rule off.
-      this.#settle(rule, true, error);
+      this.#record(rule, true, error, () => {
+        store.finishRuleRun(runId, { outcome: "rejected", error, logs: [] });
+        store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome: "rejected", event: eventId, version }, undefined, rule.id);
+      });
       return { outcome: "rejected", error, reply: null, images: [], steps: 0 };
     }
     const last = batch.at(-1)!;
@@ -640,9 +641,8 @@ export class RuleEngine {
       if (result.kind === "none") keepState();
       const error = result.kind === "error" ? result.error : answerError;
       const outcome = error === null ? "no_change" : "failed";
-      store.finishRuleRun(runId, { outcome, error, logs: result.logs });
       // A command run that failed only because whoever ran it has no judge model is not the rule's fault.
-      this.#settle(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error);
+      this.#record(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error, () => store.finishRuleRun(runId, { outcome, error, logs: result.logs }));
       return { outcome, error, reply, images, steps: 0, ...(result.response !== undefined ? { response: result.response } : {}), ...(timers.length ? { timers } : {}) };
     }
     // A TIMER from a command may edit that command's reply as whoever ran it, without managing messages.
@@ -677,10 +677,11 @@ export class RuleEngine {
       outcome = "failed";
       error = error ? `${error}\n${answerError}` : answerError;
     }
-    store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
-    store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     // A command turned down for what its runner may not do says nothing about the rule, and must not let anyone switch it off.
-    this.#settle(rule, outcome === "failed" || (outcome === "rejected" && !command), error);
+    this.#record(rule, outcome === "failed" || (outcome === "rejected" && !command), error, () => {
+      store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
+      store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
+    });
     return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length, ...(result.response !== undefined ? { response: result.response } : {}), ...(timers.length ? { timers } : {}) };
   }
 
@@ -714,14 +715,22 @@ export class RuleEngine {
     });
   }
 
-  /** Counts the outcome; too many failures in a row switch the rule off and tell its owner. */
-  #settle(rule: Rule, failed: boolean, error: string | null): void {
+  /**
+   * Writes the run's records (`write`) and counts the outcome in one transaction;
+   * too many failures in a row switch the rule off and tell its owner.
+   */
+  #record(rule: Rule, failed: boolean, error: string | null, write: () => void): void {
     const { store } = this.deps;
-    const count = store.recordRuleResult(rule.id, failed);
-    if (!failed || count < rule.limits.maxConsecutiveFailures) return;
-    const reason = `${count}回続けて失敗したため自動で止めました`;
-    store.setRuleEnabled(rule.id, false, reason);
-    store.audit({ kind: "system" }, "rule.auto_disable", { reason, lastError: error?.slice(0, MAX_ERROR) ?? null }, undefined, rule.id);
+    const count = store.transaction(() => {
+      write();
+      const n = store.recordRuleResult(rule.id, failed);
+      if (!failed || n < rule.limits.maxConsecutiveFailures) return null;
+      const reason = `${n}回続けて失敗したため自動で止めました`;
+      store.setRuleEnabled(rule.id, false, reason);
+      store.audit({ kind: "system" }, "rule.auto_disable", { reason, lastError: error?.slice(0, MAX_ERROR) ?? null }, undefined, rule.id);
+      return n;
+    });
+    if (count === null) return;
     this.deps.onRulesChanged?.(rule.guildId);
     void this.deps.notifyOwner?.(
       rule.ownerId,
