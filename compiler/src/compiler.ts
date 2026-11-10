@@ -31,7 +31,10 @@ export interface CompilerOptions {
   box: BoxRunner;
   concurrency?: number;
   maxQueue?: number;
+  /** Most results kept. */
   cacheSize?: number;
+  /** Most bytes of results kept (modules and logs); 64 MB by default. */
+  cacheBytes?: number;
 }
 
 export class Busy extends Error {}
@@ -46,7 +49,9 @@ export class Compiler {
   readonly #concurrency: number;
   readonly #maxQueue: number;
   readonly #cacheSize: number;
+  readonly #cacheBytes: number;
   readonly #cache = new Map<string, CompileResult>();
+  #cachedBytes = 0;
   readonly #waiting: Array<() => void> = [];
   #running = 0;
   #compiled = 0;
@@ -58,6 +63,7 @@ export class Compiler {
     this.#concurrency = options.concurrency ?? 1;
     this.#maxQueue = options.maxQueue ?? 8;
     this.#cacheSize = options.cacheSize ?? 64;
+    this.#cacheBytes = options.cacheBytes ?? 64 * 1024 * 1024;
   }
 
   ready(language: Language): boolean {
@@ -87,11 +93,26 @@ export class Compiler {
     }
     this.#compiled++;
     // A run cut short by the limits may pass another time, so only finished builds are kept.
-    if (result.ok || result.stage !== "limit") {
-      this.#cache.set(key, result);
-      while (this.#cache.size > this.#cacheSize) this.#cache.delete(this.#cache.keys().next().value!);
-    }
+    if (result.ok || result.stage !== "limit") this.#keep(key, result);
     return result;
+  }
+
+  /** Least recently used results go first, past either limit; modules go up to 8 MB each, so bytes are counted too. */
+  #keep(key: string, result: CompileResult): void {
+    const size = resultBytes(result);
+    if (size > this.#cacheBytes) return;
+    const old = this.#cache.get(key);
+    if (old) {
+      this.#cache.delete(key);
+      this.#cachedBytes -= resultBytes(old);
+    }
+    this.#cache.set(key, result);
+    this.#cachedBytes += size;
+    while (this.#cache.size > this.#cacheSize || this.#cachedBytes > this.#cacheBytes) {
+      const [oldest, dropped] = this.#cache.entries().next().value!;
+      this.#cache.delete(oldest);
+      this.#cachedBytes -= resultBytes(dropped);
+    }
   }
 
   async #build(request: CompileRequest): Promise<CompileResult> {
@@ -153,6 +174,10 @@ export class Compiler {
     if (next) next();
     else this.#running--;
   }
+}
+
+function resultBytes(result: CompileResult): number {
+  return (result.ok ? result.wasm.length : 0) + result.log.length;
 }
 
 export function cacheKey(request: CompileRequest): string {
