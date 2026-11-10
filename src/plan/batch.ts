@@ -1,3 +1,4 @@
+import { routeOf } from "./catalog.ts";
 import type { Step } from "./types.ts";
 
 // Steps that Discord can take in one request. A plan is still shown, checked
@@ -57,7 +58,7 @@ function samePatch(param: string): Kind {
     max: 50,
     request: async (steps) => ({
       method: "PATCH",
-      path: pathOf(steps[0]!),
+      path: routeOf(steps[0]!.op, steps[0]!.pathParams).path,
       body: Object.assign({}, ...steps.map((s) => s.body as Record<string, unknown>)),
     }),
   };
@@ -167,11 +168,6 @@ function onlyFields(body: unknown, allowed: Set<string>): boolean {
 
 function snowflakeTime(id: unknown): number {
   return typeof id === "string" && /^\d{1,20}$/.test(id) ? Number((BigInt(id) >> 22n) + DISCORD_EPOCH) : Number.NaN;
-}
-
-function pathOf(step: Step): `/${string}` {
-  const template = step.op.slice(step.op.indexOf(" ") + 1);
-  return template.replace(/\{(\w+)\}/g, (_, name: string) => encodeURIComponent(String(step.pathParams[name]))) as `/${string}`;
 }
 
 /** Ids of the steps some step refers to with `$ref`. */

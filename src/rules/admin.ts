@@ -7,7 +7,7 @@ import type { GuildCaches } from "../discord/cache.ts";
 import { basePermissions, has } from "../discord/permissions.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { allowShapeProblems, missingPermissions, ownerAllowProblems } from "./allow.ts";
-import { haltKey } from "./engine.ts";
+import { haltKey, readHalt } from "./engine.ts";
 import type { Halt } from "./engine.ts";
 import { triggerEvents, triggerProblems } from "./triggers.ts";
 import type { Rule, RuleDefinition, RuleRun } from "./types.ts";
@@ -197,8 +197,7 @@ export class RuleAdmin {
   }
 
   halted(guildId: string): Halt | null {
-    const raw = this.deps.store.getMeta(haltKey(guildId));
-    return raw ? (JSON.parse(raw) as Halt) : null;
+    return readHalt(this.deps.store, guildId);
   }
 
   /** Stops every rule in the server at once, without confirmation. */

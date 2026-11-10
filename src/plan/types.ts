@@ -24,6 +24,14 @@ export function isRef(value: unknown): value is Ref {
   return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 1 && typeof (value as Ref).$ref === "string";
 }
 
+/** Whether a value holds refs to a plan's step results anywhere inside it. */
+export function containsRef(value: unknown): boolean {
+  if (isRef(value)) return true;
+  if (Array.isArray(value)) return value.some(containsRef);
+  if (value && typeof value === "object") return Object.values(value).some(containsRef);
+  return false;
+}
+
 /** An image fetched with attach_image, ready to upload; `data` is base64 so it can live inside a plan. */
 export interface Attachment {
   name: string;

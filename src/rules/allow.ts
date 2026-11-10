@@ -2,7 +2,7 @@ import { Value } from "typebox/value";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { basePermissions, channelPermissions } from "../discord/permissions.ts";
 import { CATALOG, pathParamNames, permissionNames } from "../plan/catalog.ts";
-import { isRef, maxRisk } from "../plan/types.ts";
+import { containsRef, isRef, maxRisk } from "../plan/types.ts";
 import type { AllowEntry, Risk, Step } from "../plan/types.ts";
 import { MAX_STEPS } from "../plan/validate.ts";
 import { errorMessage } from "../errors.ts";
@@ -141,13 +141,6 @@ export function needsTarget(step: Step, allow: AllowEntry[]): boolean {
   return allow.some((entry) => entry.op === step.op && entry.target !== undefined);
 }
 
-function containsRef(value: unknown): boolean {
-  if (isRef(value)) return true;
-  if (Array.isArray(value)) return value.some(containsRef);
-  if (value && typeof value === "object") return Object.values(value).some(containsRef);
-  return false;
-}
-
 /** Top-level body fields that wait on an earlier step are left out until they are known. */
 function withoutRefs(body: unknown): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
@@ -182,11 +175,15 @@ function possibleFields(entry: AllowEntry): string[] {
   return Object.keys(spec.byField ?? {});
 }
 
+/** The schema an entry puts on its operation's channel parameter, if the operation has one. */
+export function channelSchema(entry: AllowEntry): { enum?: unknown[]; const?: unknown } | undefined {
+  const spec = CATALOG.get(entry.op);
+  return spec?.channel ? (entry.path?.[spec.channel] as { enum?: unknown[]; const?: unknown } | undefined) : undefined;
+}
+
 /** Channels the entry is pinned to by an enum or const on the channel parameter. */
 function pinnedChannels(entry: AllowEntry): string[] | null {
-  const spec = CATALOG.get(entry.op)!;
-  if (!spec.channel) return null;
-  const schema = entry.path?.[spec.channel] as { enum?: unknown[]; const?: unknown } | undefined;
+  const schema = channelSchema(entry);
   if (schema?.enum?.every((v) => typeof v === "string")) return schema.enum as string[];
   if (typeof schema?.const === "string") return [schema.const];
   return null;

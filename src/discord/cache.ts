@@ -5,7 +5,7 @@ import type {
   APIRole,
   GatewayGuildCreateDispatchData,
 } from "discord-api-types/v10";
-import { ChannelType } from "discord-api-types/v10";
+import { isThread } from "./permissions.ts";
 import type { ChannelState, GuildState, MemberState, OverwriteState, RoleState } from "./permissions.ts";
 
 // In-memory mirror of each guild the bot serves, kept current from Gateway
@@ -35,8 +35,6 @@ export function toChannel(channel: APIChannel): ChannelState {
 export function toMember(member: Pick<APIGuildMember, "roles"> & { user: { id: string; bot?: boolean } }): MemberState {
   return { userId: member.user.id, roleIds: [...member.roles], bot: member.user.bot ?? false };
 }
-
-const THREAD_TYPES = new Set<number>([ChannelType.AnnouncementThread, ChannelType.PublicThread, ChannelType.PrivateThread]);
 
 export class GuildCache {
   guild: GuildState | null = null;
@@ -99,7 +97,7 @@ export class GuildCache {
 
   upsertChannel(channel: APIChannel): void {
     this.guild?.channels.set(channel.id, toChannel(channel));
-    if (!THREAD_TYPES.has(channel.type)) this.raw?.channels.set(channel.id, channel);
+    if (!isThread(channel)) this.raw?.channels.set(channel.id, channel);
   }
 
   deleteChannel(channelId: string): void {

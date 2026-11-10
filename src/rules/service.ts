@@ -10,15 +10,14 @@ import type { GuildCaches } from "../discord/cache.ts";
 import { guildCommandIds } from "../discord/commands.ts";
 import type { GuildState } from "../discord/permissions.ts";
 import type { Reader } from "../discord/reader.ts";
-import { CATALOG } from "../plan/catalog.ts";
 import { stepLines } from "../plan/dialog.ts";
 import type { PrepareRulesInput } from "../plan/service.ts";
-import { isRef } from "../plan/types.ts";
+import { containsRef } from "../plan/types.ts";
 import type { Plan, PlanRuleDraft, RuleDryRun } from "../plan/types.ts";
 import { badRefs, normalizeSteps, permissionProblems, PlanRejected, planRisk, stepProblems } from "../plan/validate.ts";
 import { AdminDenied } from "./admin.ts";
 import type { RuleAdmin } from "./admin.ts";
-import { allowProblems } from "./allow.ts";
+import { allowProblems, channelSchema } from "./allow.ts";
 import { attachmentsFor } from "../plan/files.ts";
 import type { RuleEngine } from "./engine.ts";
 import { auditView, commandsView, commandView, DELETE_CHOICE, detailView, homeView, parseRuleCustomId, plansView, RULE_PAGES } from "./panel.ts";
@@ -86,21 +85,11 @@ export function cacheLabel(guild: GuildState | null | undefined): (id: string) =
   };
 }
 
-/** Whether a value holds refs to a plan's step results. */
-function hasRefs(value: unknown): boolean {
-  if (isRef(value)) return true;
-  if (Array.isArray(value)) return value.some(hasRefs);
-  if (value && typeof value === "object") return Object.values(value).some(hasRefs);
-  return false;
-}
-
 /** Channels an allow list pins its entries to. */
 function pinnedIds(draft: Pick<RuleProposal, "allow">): string[] {
   const ids: string[] = [];
   for (const entry of draft.allow) {
-    const spec = CATALOG.get(entry.op);
-    if (!spec?.channel) continue;
-    const schema = entry.path?.[spec.channel] as { enum?: unknown[]; const?: unknown } | undefined;
+    const schema = channelSchema(entry);
     for (const v of schema?.enum ?? (schema?.const !== undefined ? [schema.const] : [])) if (typeof v === "string") ids.push(v);
   }
   return ids;
@@ -260,7 +249,7 @@ export class RuleService {
 
       let dry = r.dry;
       if (!dry) {
-        const waits = hasRefs(r.allow) || hasRefs(r.params);
+        const waits = containsRef(r.allow) || containsRef(r.params);
         const tried = input.reader
           ? await this.dryRun(input.guildId, input.ownerId, input.channelId, r, input.reader, input.shareable)
           : { source: null, outcome: "no_event" as const, lines: [], problems: [], logs: [] };

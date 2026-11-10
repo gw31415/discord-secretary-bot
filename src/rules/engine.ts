@@ -135,6 +135,11 @@ export function haltKey(guildId: string): string {
   return `rules_halted:${guildId}`;
 }
 
+export function readHalt(store: Pick<Store, "getMeta">, guildId: string): Halt | null {
+  const raw = store.getMeta(haltKey(guildId));
+  return raw ? (JSON.parse(raw) as Halt) : null;
+}
+
 export interface Halt {
   by: string;
   at: string;
@@ -165,8 +170,7 @@ export class RuleEngine {
   }
 
   halted(guildId: string): Halt | null {
-    const raw = this.deps.store.getMeta(haltKey(guildId));
-    return raw ? (JSON.parse(raw) as Halt) : null;
+    return readHalt(this.deps.store, guildId);
   }
 
   /** The Planner reports each write, so events it causes are recognised. */

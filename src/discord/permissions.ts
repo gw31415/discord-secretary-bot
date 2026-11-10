@@ -48,7 +48,7 @@ const THREAD_TYPES = new Set<ChannelType>([
   ChannelType.AnnouncementThread,
 ]);
 
-export function isThread(channel: ChannelState): boolean {
+export function isThread(channel: Pick<ChannelState, "type">): boolean {
   return THREAD_TYPES.has(channel.type);
 }
 

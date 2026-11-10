@@ -687,7 +687,8 @@ export function resolveOp(op: string): { spec: OpSpec; path: Params } | null {
   return best && { spec: best.spec, path: best.path };
 }
 
-function safeDecode(value: string): string {
+/** The decoded text, or the text itself when it is not valid percent-encoding. */
+export function safeDecode(value: string): string {
   try {
     return decodeURIComponent(value);
   } catch {
