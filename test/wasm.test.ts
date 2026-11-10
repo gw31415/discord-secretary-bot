@@ -136,6 +136,29 @@ test("rule code compiles to bytecode once and runs from it", async () => {
   }
 });
 
+test("a rule's program run again comes from memory and only marks its bytecode as used", async () => {
+  const { jsProgram, setBytecodeCache } = await import("../src/sandbox.ts");
+  const kept = new Map<string, Buffer>();
+  const calls: string[] = [];
+  setBytecodeCache({
+    get: (k) => (calls.push("get"), kept.get(k)),
+    set: (k, v) => (calls.push("set"), void kept.set(k, v)),
+    touch: (k) => (assert.ok(kept.has(k)), void calls.push("touch")),
+  });
+  try {
+    const code = "return plan([])";
+    const first = await jsProgram(code);
+    const second = await jsProgram(code);
+    assert.deepEqual(second.prefix, first.prefix);
+    assert.deepEqual(calls, ["get", "set", "touch"]);
+    setBytecodeCache({ get: (k) => (calls.push("get2"), kept.get(k)), set: () => assert.fail("kept already") });
+    assert.deepEqual((await jsProgram(code)).prefix, first.prefix);
+    assert.equal(calls.at(-1), "get2", "a new cache starts without the old one's memory");
+  } finally {
+    setBytecodeCache(null);
+  }
+});
+
 /** A module that prints `output` and nothing else. */
 function printer(output: string): Uint8Array {
   return wasm({
@@ -329,7 +352,8 @@ test("rules saved before programs were a union read as a JS or a Wasm program", 
   const old = { sourcePrompt: "", trigger: { event: "MESSAGE_CREATE" }, allow: [], summary: null, limits: { perMinute: 10, maxConsecutiveFailures: 5 } };
   insert.run("js", "js", JSON.stringify({ ...old, name: "js", code: "return null" }));
   insert.run("wasm", "wasm", JSON.stringify({ ...old, name: "wasm", code: "", wasm: "ab".repeat(32) }));
-  store.db.pragma(`user_version = ${version - 1}`);
+  // Back to before the migration that made programs a union (the one before the rule_runs index).
+  store.db.pragma(`user_version = ${version - 2}`);
   store.close();
   store = new Store(path, key);
   try {

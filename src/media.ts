@@ -3,26 +3,11 @@ import type { Metadata } from "sharp";
 import { Type } from "typebox";
 import type { Static } from "typebox";
 import { Value } from "typebox/value";
-import { mathjax } from "@mathjax/src/js/mathjax.js";
-import { TeX } from "@mathjax/src/js/input/tex.js";
-import { SVG } from "@mathjax/src/js/output/svg.js";
-import { liteAdaptor } from "@mathjax/src/js/adaptors/liteAdaptor.js";
-import { RegisterHTMLHandler } from "@mathjax/src/js/handlers/html.js";
-import "@mathjax/src/js/input/tex/base/BaseConfiguration.js";
-import "@mathjax/src/js/input/tex/ams/AmsConfiguration.js";
-import "@mathjax/src/js/input/tex/newcommand/NewcommandConfiguration.js";
-import "@mathjax/src/js/input/tex/boldsymbol/BoldsymbolConfiguration.js";
-import "@mathjax/src/js/input/tex/color/ColorConfiguration.js";
-import "@mathjax/src/js/input/tex/cancel/CancelConfiguration.js";
-import "@mathjax/src/js/input/tex/mhchem/MhchemConfiguration.js";
-import "@mathjax/src/js/util/asyncLoad/esm.js";
-import { MathJaxNewcmFont } from "@mathjax/mathjax-newcm-font/js/svg.js";
-import { MathJaxMhchemFontExtension } from "@mathjax/mathjax-mhchem-font-extension/js/svg.js";
 
 // Image work for the agent and its sandboxed code: TeX drawn with MathJax, and
 // conversions (size, crop, format) with sharp. Everything works on bytes in
 // memory; nothing here reads a file or a URL. Only the TeX packages imported
-// above exist, so \require, \href and the like are unknown macros.
+// in mathjax.ts exist, so \require, \href and the like are unknown macros.
 
 export const MAX_TEX = 2_000;
 export const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
@@ -35,23 +20,12 @@ const MAX_INPUT_PIXELS = 50_000_000;
 
 const COLOR = /^(#[0-9a-fA-F]{3,8}|[a-zA-Z]{1,20}|rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*(,\s*[\d.]+\s*)?\))$/;
 
-let doc: ReturnType<typeof mathjax.document> | null = null;
-const adaptor = liteAdaptor();
+// MathJax takes about 100 ms and 26 MB to load, so it loads on the first formula; one promise, so it is set up once.
+let math: Promise<typeof import("./mathjax.ts")> | null = null;
 
-function mathDocument() {
-  if (doc) return doc;
-  RegisterHTMLHandler(adaptor);
-  // \ce arrows come from their own glyphs.
-  MathJaxNewcmFont.addExtension(MathJaxMhchemFontExtension);
-  const tex = new TeX({
-    packages: ["base", "ams", "newcommand", "boldsymbol", "color", "cancel", "mhchem"],
-    // A mistake in the TeX comes back as an error the model can fix, not as red text in the picture.
-    formatError: (_jax: unknown, err: Error) => {
-      throw err;
-    },
-  });
-  doc = mathjax.document("", { InputJax: tex, OutputJax: new SVG({ fontCache: "none", fontData: MathJaxNewcmFont }) });
-  return doc;
+function loadMath() {
+  math ??= import("./mathjax.ts");
+  return math;
 }
 
 export interface MathOptions {
@@ -89,6 +63,7 @@ export async function renderMath(tex: string, options: MathOptions = {}): Promis
 
   let svg: string;
   try {
+    const { adaptor, mathDocument } = await loadMath();
     const node = await mathDocument().convertPromise(tex, { display: options.display ?? true });
     svg = adaptor.innerHTML(node);
   } catch (e) {

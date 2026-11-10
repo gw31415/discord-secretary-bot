@@ -38,7 +38,7 @@ const store = new Store(config.dbPath, config.masterKey);
 const caches = new GuildCaches();
 const compiler = config.compilerSocket ? new CompilerClient(config.compilerSocket) : undefined;
 const wasm = new WasmRegistry(store, compiler);
-setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data) });
+setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data), touch: (key) => store.touchBytecode(key) });
 
 function served(guildId: string | undefined): guildId is string {
   return !!guildId && (config.allowedGuildIds.size === 0 || config.allowedGuildIds.has(guildId));
@@ -116,7 +116,7 @@ async function sendDm(userId: string, content: string): Promise<void> {
 // Custom slash commands follow the rules; changes close together register once.
 const commandSyncs = new Map<string, ReturnType<typeof setTimeout>>();
 function syncCommands(guildId: string): void {
-  // SCHEDULE rules' cron jobs follow the rules at once.
+  // SCHEDULE rules' timer follows the rules at once.
   try {
     engine.syncSchedules(guildId);
   } catch (e) {
@@ -281,7 +281,7 @@ client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
   } catch (e) {
     log(`${data.name}: BOT_READY のルールの振り分けに失敗`, e);
   }
-  // The SCHEDULE rules' cron jobs, and later() requests that came due while the bot was away.
+  // The SCHEDULE rules' timer, and later() requests that came due while the bot was away.
   try {
     engine.syncSchedules(data.id);
     engine.runTimers([data.id]);
@@ -387,13 +387,20 @@ const sweeper = setInterval(() => {
   conversations.sweep();
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
   engine.sweep();
+}, 60_000);
+// Retention is counted in days, so deleting old rows hourly is enough.
+const pruneOld = () => {
+  planner.pruneSnapshots();
   store.deleteRuleRunsBefore(new Date(Date.now() - SNAPSHOT_RETENTION_MS));
   store.deleteBytecodeBefore(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
-}, 60_000);
+};
+pruneOld();
+const pruner = setInterval(pruneOld, 60 * 60_000);
 
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
+  clearInterval(pruner);
   engine.stopSchedules();
   presence.stop();
   await Promise.race([engine.idle(), sleep(10_000)]);
@@ -407,7 +414,8 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 // Everything rules run is compiled before the first event: the JS engine, every enabled rule's code (kept
 // as bytecode across restarts) and every uploaded module an enabled rule runs.
 await precompileJsEngine().catch((e) => log("JSエンジンのコンパイルに失敗", e));
-warmWorkers();
+// With nothing for rules to run, the threads wait for the first run instead.
+if (store.enabledRuleCode().length + store.wasmInUse().length > 0) warmWorkers();
 void warmJsEngine();
 {
   let compiled = 0;
