@@ -58,16 +58,11 @@ export class InteractionAnswer implements InteractionResponder {
   /** Answers go out one at a time, so the first one is the interaction's response. */
   #chain: Promise<unknown> = Promise.resolve();
   #timer: ReturnType<typeof setTimeout> | undefined;
-  readonly createdAt = Date.now();
 
   constructor(api: API, interaction: APIInteraction, log: (message: string, error?: unknown) => void) {
     this.#api = api;
     this.#interaction = interaction;
     this.#log = log;
-  }
-
-  get id(): string {
-    return this.#interaction.id;
   }
 
   /** Acknowledges the press without a change if nothing has answered by then. */

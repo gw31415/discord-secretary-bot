@@ -78,7 +78,7 @@ function thinksAnyway(model: Model<Api>): boolean {
   return model.provider === "openrouter" && mustThink.has(model.id);
 }
 
-/** Mark a model as one that cannot skip thinking (also used by tests). */
+/** Mark a model as one that cannot skip thinking. */
 export function rememberMustThink(model: Model<Api>): void {
   mustThink.add(model.id);
 }
