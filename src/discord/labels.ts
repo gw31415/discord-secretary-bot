@@ -182,6 +182,8 @@ export function discordErrorText(error: unknown): string {
   for (const [message, code] of DISCORD_ERROR_TEXT) {
     if (text === message || text.startsWith(`${message}\n`)) return codeLabel(code)!;
   }
+  // Discord words its limits (30001–30099) "Maximum number of …" or "Max number of …".
+  if (/^Max(imum)? number of /.test(text)) return LIMIT_LABEL;
   return text;
 }
 

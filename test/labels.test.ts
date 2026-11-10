@@ -29,6 +29,7 @@ test("the common Discord errors are said in Japanese, from the error or the text
   assert.equal(discordErrorText(error(50007, "Cannot send messages to this user")), "Cannot send messages to this user");
   assert.equal(discordErrorText("Unknown Message"), "メッセージがありません");
   assert.equal(discordErrorText("Invalid Form Body\nname[BASE_TYPE_REQUIRED]: This field is required"), "内容が Discord の形に合いません");
+  assert.equal(discordErrorText("Maximum number of guild roles reached (250)"), "Discord の上限に達しました");
   assert.equal(discordErrorText("Missing Permissions here"), "Missing Permissions here");
   assert.equal(discordErrorText(new Error("BANできませんでした")), "BANできませんでした");
 });

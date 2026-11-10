@@ -1434,5 +1434,6 @@ test("a Discord error is said by its code in the dialog, and the step keeps Disc
   await settle(() => store.getPlan(plan.id)!.status === "failed");
   assert.equal(store.getPlan(plan.id)!.reason, "2. ロール付与ができませんでした。Discord の上限に達しました。");
   assert.equal(store.getSteps(plan.id)[1]!.error, "Maximum number of guild roles reached (250)");
+  assert.match(dialogText(replies.at(-1)!.body), /\n　→ Discord の上限に達しました\n/);
   assert.match(dialogText(replies.at(-1)!.body), /\n⚠️ 途中で失敗しました\(1\/2件完了\)。2\. ロール付与ができませんでした。Discord の上限に達しました。$/);
 });
