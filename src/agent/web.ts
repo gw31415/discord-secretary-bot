@@ -12,7 +12,7 @@ import { toolText } from "./tool-text.ts";
 // and RustXNG, a metasearch engine run next to the bot for the people named in RUSTXNG_USERS.
 
 export const WEB_TOOLS = {
-  auto: { label: "言語モデルの標準", description: "言語モデルがClaude・OpenAI・GLMなら、その検索を使います" },
+  auto: { label: "言語モデルの標準", description: "言語モデルがClaude・OpenAI・GLM Coding Planなら、その検索を使います" },
   zai: { label: "GLM Coding Plan", description: "GLM Coding Planのキーが要ります" },
   tavily: { label: "Tavily", description: "Tavilyのキーが要ります。月1,000回まで無料です" },
   rustxng: { label: "RustXNG", description: "Botと同じサーバーで動く検索エンジンです" },

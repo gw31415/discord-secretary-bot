@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
 import { findChatModel, isMustThinkError, judgeRef, lightestThinking, llm, selectableModels } from "../src/llm/models.ts";
-import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
+import { ButtonStyle } from "discord-api-types/v10";
+import { CUSTOM_ID, keyModal, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
 import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
 import { TRIGGERS, triggerEvents } from "../src/rules/triggers.ts";
 import type { Rule } from "../src/rules/types.ts";
@@ -375,4 +376,40 @@ test("a kept program's used_at is written at most once a day", (t) => {
   t.mock.timers.tick(60_000);
   store.getBytecode("k");
   assert.equal(usedAt(), "2026-01-02T01:00:00.000Z");
+});
+
+test("the settings pages say each thing once, name models rather than ids, and keep the moves gray", () => {
+  const store = new Store(":memory:", master);
+  store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
+  store.setApiKey("u1", "tavily", "tvly-abcdefgh5678");
+  const model = selectableModels("anthropic", "response")[0]!;
+  store.setModel("u1", "response", { provider: "anthropic", model: model.id });
+  const buttons = (view: { components: unknown[] }): Array<{ label: string; style: number }> => {
+    const found: Array<{ label: string; style: number }> = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!node || typeof node !== "object") return;
+      const c = node as { type?: number; label?: string; style?: number; components?: unknown };
+      if (c.type === 2) found.push({ label: c.label!, style: c.style! });
+      walk(c.components);
+    };
+    walk(view.components);
+    return found;
+  };
+  const home = renderPanel(store, "u1");
+  const homeText = JSON.stringify(home);
+  assert.match(homeText, /"## 設定"/);
+  assert.doesNotMatch(homeText, /あなたにだけ見えています/);
+  assert.match(homeText, new RegExp(`${model.name}\\(`));
+  assert.doesNotMatch(homeText, new RegExp(`${model.id}\\(`));
+  // Moving between screens is gray; nothing on the settings pages asks for an action.
+  assert.ok(buttons(home).every((b) => b.style === ButtonStyle.Secondary), JSON.stringify(buttons(home)));
+  const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
+  assert.match(keys, /Tavily: 登録済み/);
+  assert.doesNotMatch(keys, /Webツール\)/);
+  assert.match(JSON.stringify(keyModal("anthropic")), /Claude API のキー/);
+  assert.doesNotMatch(JSON.stringify(keyModal("anthropic")), /placeholder/);
+  const models = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
+  assert.match(models, /Botがあなたのキーで使うモデルです"/);
+  assert.match(models, /Bot宛てかの判定、返事を見せる相手、リアクション、judge\(\)・rank\(\) に使います。軽いモデルが向いています。/);
 });
