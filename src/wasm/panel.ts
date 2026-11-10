@@ -1,5 +1,5 @@
 import type { API } from "@discordjs/core";
-import { ButtonStyle, ComponentType, InteractionType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, InteractionType, TextInputStyle } from "discord-api-types/v10";
 import type { APIButtonComponent, APIComponentInContainer, APIInteraction, APIModalInteractionResponseCallbackData, APIModalSubmitInteraction } from "discord-api-types/v10";
 import type { WasmModule, WasmSource } from "../db.ts";
 import { modalValue } from "../discord/modal.ts";
@@ -10,6 +10,7 @@ import { MAX_MEMORY_PAGES, MAX_MODULE_BYTES } from "./module.ts";
 import { MAX_BYTES_PER_USER, MAX_MODULES_PER_USER, ModuleRejected, sizeLabel } from "./registry.ts";
 import type { WasmRegistry } from "./registry.ts";
 import { errorMessage } from "../errors.ts";
+import { editV2, replyEphemeral, selectedValues, updateV2, userIdOf } from "../discord/respond.ts";
 
 // The "Wasm" section of /settings: the presser's own modules. A module is
 // usually added in conversation (attached, or compiled from source, and
@@ -191,11 +192,11 @@ export class WasmPanel {
     if (interaction.type !== InteractionType.MessageComponent && interaction.type !== InteractionType.ModalSubmit) return false;
     const parsed = parse(interaction.data.custom_id);
     if (!parsed) return false;
-    const userId = interaction.member?.user.id ?? interaction.user?.id;
+    const userId = userIdOf(interaction);
     if (!userId) return true;
     const { api, registry } = this.#deps;
-    const update = (rendered: Rendered) => api.interactions.updateMessage(interaction.id, interaction.token, { ...rendered, flags: MessageFlags.IsComponentsV2 });
-    const sha = parsed.arg || ("values" in interaction.data ? (interaction.data.values?.[0] ?? "") : "");
+    const update = (rendered: Rendered) => updateV2(api, interaction, rendered);
+    const sha = parsed.arg || (selectedValues(interaction)[0] ?? "");
     try {
       switch (parsed.action) {
         case "home":
@@ -232,7 +233,7 @@ export class WasmPanel {
           }
           // Downloading and checking can take longer than the 3 seconds an answer may wait.
           await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
-          const edit = (rendered: Rendered) => api.interactions.editReply(interaction.application_id, interaction.token, { ...rendered, flags: MessageFlags.IsComponentsV2 });
+          const edit = (rendered: Rendered) => editV2(api, interaction, rendered);
           try {
             const res = await (this.#deps.fetch ?? fetch)(file.url);
             if (!res.ok) throw new ModuleRejected(`ファイルを取得できませんでした(${res.status})`);
@@ -262,7 +263,7 @@ export class WasmPanel {
       }
     } catch (e) {
       if (e instanceof ModuleRejected) {
-        await api.interactions.reply(interaction.id, interaction.token, { content: e.message.slice(0, 1800), flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+        await replyEphemeral(api, interaction, e.message.slice(0, 1800));
         return true;
       }
       throw e;

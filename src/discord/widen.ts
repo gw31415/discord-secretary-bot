@@ -1,8 +1,9 @@
 import type { API } from "@discordjs/core";
-import { ButtonStyle, ComponentType, InteractionType, MessageFlags } from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, InteractionType } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import { randomUUID } from "node:crypto";
 import { NS } from "./custom-id.ts";
+import { replyEphemeral, userIdOf } from "./respond.ts";
 
 // Questions to the speaker in the middle of a reply: letting it read beyond
 // what everyone in the channel can see, or going on past its turn limit. The
@@ -125,14 +126,14 @@ export class WidenPrompts {
     if (interaction.type !== InteractionType.MessageComponent) return false;
     const [ns, token, answer] = interaction.data.custom_id.split(":");
     if (ns !== PREFIX || !token) return false;
-    const userId = interaction.member?.user.id ?? interaction.user?.id;
+    const userId = userIdOf(interaction);
     const pending = this.#pending.get(token);
     if (!pending) {
       await this.#api.interactions.updateMessage(interaction.id, interaction.token, { content: "この確認はもう終わっています。", components: [] });
       return true;
     }
     if (userId !== pending.speakerId) {
-      await this.#api.interactions.reply(interaction.id, interaction.token, { content: "頼んだ本人だけが押せます。", flags: MessageFlags.Ephemeral });
+      await replyEphemeral(this.#api, interaction, "頼んだ本人だけが押せます。");
       return true;
     }
     const allowed = answer === "yes";

@@ -34,6 +34,7 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 import type { WasmRef } from "../plan/types.ts";
 import type { Rule, RuleDefinition, RuleProgram, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
 import { errorMessage } from "../errors.ts";
+import { editV2, replyEphemeral, selectedValues, updateV2, userIdOf } from "../discord/respond.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
@@ -406,7 +407,7 @@ export class RuleService {
     const member = interaction.member;
     if (!guildId || !member) return true;
     const rule = store.enabledRules(guildId, "COMMAND").find((r) => r.trigger.command?.name === name);
-    const ephemeral = (content: string) => api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+    const ephemeral = (content: string) => replyEphemeral(api, interaction, content);
     if (!rule?.trigger.command) {
       await ephemeral("このコマンドは今は使えません(ルールが止まっているか、削除されました)");
       return true;
@@ -537,13 +538,13 @@ export class RuleService {
     const parsed = parseRuleCustomId(interaction.data.custom_id);
     if (!parsed) return false;
     const { api } = this.deps;
-    const userId = interaction.member?.user.id;
+    const userId = userIdOf(interaction);
     const guildId = interaction.guild_id;
     if (!userId || !guildId) return true;
-    const ephemeral = (content: string) => api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
-    // The panel's views replace each other in place; UPDATE_MESSAGE cannot change the ephemeral flag.
-    const update = (view: Rendered) => api.interactions.updateMessage(interaction.id, interaction.token, { ...view, flags: MessageFlags.IsComponentsV2 });
-    const edit = (view: Rendered) => api.interactions.editReply(interaction.application_id, interaction.token, { ...view, flags: MessageFlags.IsComponentsV2 });
+    const ephemeral = (content: string) => replyEphemeral(api, interaction, content);
+    // The panel's views replace each other in place.
+    const update = (view: Rendered) => updateV2(api, interaction, view);
+    const edit = (view: Rendered) => editV2(api, interaction, view);
 
     try {
       switch (parsed.action) {
@@ -551,12 +552,12 @@ export class RuleService {
           await update(this.#commands(guildId, userId, interaction.member?.permissions ?? "0"));
           return true;
         case "cmd": {
-          const values = "values" in interaction.data ? interaction.data.values : [];
+          const values = selectedValues(interaction);
           await update(this.#command(guildId, userId, values[0] ?? parsed.arg));
           return true;
         }
         case "cmdvis": {
-          const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const value = selectedValues(interaction)[0];
           const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
           const label = visibilityLabel(rule.trigger.command?.visibility);
           await update(this.#command(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
@@ -575,7 +576,7 @@ export class RuleService {
           await update(this.#home(guildId, userId));
           return true;
         case "open": {
-          const values = "values" in interaction.data ? interaction.data.values : [];
+          const values = selectedValues(interaction);
           await update(this.#detail(guildId, userId, values[0] ?? parsed.arg));
           return true;
         }
@@ -585,7 +586,7 @@ export class RuleService {
           await update(this.#detail(guildId, userId, parsed.arg, { page: parsed.action }));
           return true;
         case "view": {
-          const value = "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const value = selectedValues(interaction)[0];
           if (value === DELETE_CHOICE) await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
           else await update(this.#detail(guildId, userId, parsed.arg, { page: RULE_PAGES.includes(value as RulePage) ? (value as RulePage) : "summary" }));
           return true;
@@ -612,7 +613,7 @@ export class RuleService {
           await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
           return true;
         case "visibility": {
-          const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const value = selectedValues(interaction)[0];
           const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
           const label = visibilityLabel(rule.trigger.command?.visibility);
           await update(this.#detail(guildId, userId, rule.id, { notice: `「${label}」にしました` }));

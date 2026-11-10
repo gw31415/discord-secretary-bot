@@ -27,6 +27,7 @@ import type { Targets } from "../rules/allow.ts";
 import type { RuleProposal } from "../rules/types.ts";
 import { type CheckContext, normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, stepProblems } from "./validate.ts";
 import { errorMessage } from "../errors.ts";
+import { replyEphemeral, selectedValues, userIdOf } from "../discord/respond.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
 // bot makes on someone's behalf goes through here.
@@ -529,9 +530,8 @@ export class Planner {
     const parsed = parsePlanCustomId(interaction.data.custom_id);
     if (!parsed) return false;
     const { api, store } = this.deps;
-    const userId = interaction.member?.user.id ?? interaction.user?.id;
-    const ephemeral = (content: string) =>
-      api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+    const userId = userIdOf(interaction);
+    const ephemeral = (content: string) => replyEphemeral(api, interaction, content);
 
     const row = store.getPlan(parsed.planId);
     if (!row || row.plan.hash.slice(0, 8) !== parsed.hash8) {
@@ -552,7 +552,7 @@ export class Planner {
       return api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, { status: row.status, steps, reason: row.reason }));
     };
     if (parsed.action === "view") {
-      const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+      const value = selectedValues(interaction)[0];
       if (value === FILES_CHOICE) {
         // Redrawn first so the menu goes back to the section shown.
         await redraw(undefined);
@@ -583,7 +583,7 @@ export class Planner {
 
     switch (parsed.action) {
       case "visibility": {
-        const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+        const value = selectedValues(interaction)[0];
         const target = plan.rules?.find((r) => r.key === parsed.rule && r.trigger.command);
         if (row.status !== "pending_approval" || expired() || !target || !VISIBILITIES.includes(value as CommandVisibility)) {
           await ephemeral("この変更はもう変えられません");

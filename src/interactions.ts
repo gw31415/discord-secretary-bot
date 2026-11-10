@@ -1,5 +1,5 @@
 import type { API } from "@discordjs/core";
-import { InteractionType, MessageFlags } from "discord-api-types/v10";
+import { InteractionType } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import type { Store } from "./db.ts";
 import { modalValue } from "./discord/modal.ts";
@@ -7,14 +7,13 @@ import { WEB_TOOLS, webToolAvailable } from "./agent/web.ts";
 import { findModel, judgesOnly, KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
 import { keyModal, parseCustomId, readScopeLabel, renderPanel, roleLabel, typedModelId, typedModelModal } from "./llm/panel.ts";
 import type { ModelRole, PanelPage } from "./llm/panel.ts";
+import { asUpdate, selectedValues, userIdOf } from "./discord/respond.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
 // within 3 seconds; everything here is a local DB operation, so no defer is needed.
 
 function panelUpdate(store: Store, userId: string, notice: string | undefined, page: PanelPage) {
-  // UPDATE_MESSAGE cannot change the ephemeral flag, so only Components V2 is sent.
-  const panel = renderPanel(store, userId, notice, page);
-  return { ...panel, flags: MessageFlags.IsComponentsV2 };
+  return asUpdate(renderPanel(store, userId, notice, page));
 }
 
 /** The language and judge models are the basics; the rest override them for one use. */
@@ -24,7 +23,7 @@ function pageOf(role: ModelRole): PanelPage {
 
 // LLM settings belong to the person, not the server, so the panel is the same in every server.
 export async function handleInteraction(api: API, store: Store, interaction: APIInteraction): Promise<void> {
-  const userId = interaction.member?.user.id;
+  const userId = userIdOf(interaction);
   if (!userId) return;
   const actor = { kind: "user" as const, userId, via: "panel" as const };
 
@@ -34,7 +33,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
   }
 
   if (interaction.type === InteractionType.MessageComponent) {
-    const values = "values" in interaction.data ? interaction.data.values : [];
+    const values = selectedValues(interaction);
     const action = parseCustomId(interaction.data.custom_id, values);
     if (!action) return;
     switch (action.kind) {
