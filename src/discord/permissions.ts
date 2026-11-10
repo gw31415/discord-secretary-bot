@@ -97,6 +97,15 @@ export function has(perms: bigint, ...bits: bigint[]): boolean {
   return bits.every((bit) => (perms & bit) === bit);
 }
 
+/**
+ * Whether a member's permissions, as an interaction carries them, include
+ * `needed`. Administrator counts as every permission, so a command's list and
+ * its run agree.
+ */
+export function holdsPermissions(bits: bigint, needed: bigint): boolean {
+  return (bits & PermissionFlagsBits.Administrator) !== 0n || (bits & needed) === needed;
+}
+
 export function canView(guild: GuildState, member: MemberState, channelId: string): boolean {
   return has(channelPermissions(guild, member, channelId), PermissionFlagsBits.ViewChannel);
 }

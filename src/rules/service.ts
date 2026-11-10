@@ -1,6 +1,6 @@
 import { toUploadable } from "../media.ts";
 import type { API } from "@discordjs/core";
-import { InteractionType, MessageFlags, PermissionFlagsBits } from "discord-api-types/v10";
+import { InteractionType, MessageFlags } from "discord-api-types/v10";
 import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
 import { InteractionAnswer, interactionEvent, isRuleInteraction } from "./interaction.ts";
 import type { CommandReport } from "./engine.ts";
@@ -8,6 +8,7 @@ import type { APIInteraction, APIMessage } from "discord-api-types/v10";
 import type { Store, WasmSource } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { guildCommandIds } from "../discord/commands.ts";
+import { holdsPermissions } from "../discord/permissions.ts";
 import type { GuildState } from "../discord/permissions.ts";
 import type { Reader } from "../discord/reader.ts";
 import { stepLines } from "../plan/dialog.ts";
@@ -414,7 +415,7 @@ export class RuleService {
     }
     const needed = permissionBits(rule.trigger.command.permissions);
     // Discord sends the member's permissions in this channel with the interaction.
-    if (needed && (BigInt(member.permissions) & needed) !== needed) {
+    if (needed && !holdsPermissions(BigInt(member.permissions), needed)) {
       await ephemeral(`このコマンドを使うには ${rule.trigger.command.permissions!.join(", ")} の権限が必要です`);
       return true;
     }
@@ -516,7 +517,7 @@ export class RuleService {
     const bits = BigInt(permissions);
     const canRun = (r: Rule) => {
       const needed = permissionBits(r.trigger.command!.permissions);
-      return (bits & PermissionFlagsBits.Administrator) !== 0n || (bits & needed) === needed;
+      return holdsPermissions(bits, needed);
     };
     const rules = this.deps.store
       .listRules(guildId)

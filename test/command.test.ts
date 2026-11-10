@@ -147,11 +147,14 @@ test("a command needs its permissions, an enabled rule, and a name nobody else u
   assert.match((w.calls.at(-1)![1] as { content: string }).content, /ManageChannels/);
   await w.service.handleCustomCommand(interaction({ text: "x" }, P.ManageChannels));
   assert.equal(w.runs.length, 1);
+  // Administrator counts as every permission, as in the command list.
+  await w.service.handleCustomCommand(interaction({ text: "x" }, P.Administrator));
+  assert.equal(w.runs.length, 2);
 
   assert.throws(() => w.admin.save(GUILD, "2", w.definition), /announce/);
   w.admin.setEnabled(GUILD, "1", rule.id, false);
   await w.service.handleCustomCommand(interaction({ text: "x" }, P.ManageChannels));
-  assert.equal(w.runs.length, 1);
+  assert.equal(w.runs.length, 2);
   assert.match((w.calls.at(-1)![1] as { content: string }).content, /今は使えません/);
   // Reserved names are left to the bot's own handlers.
   assert.equal(await w.service.handleCustomCommand({ ...(interaction({}) as object), data: { type: ApplicationCommandType.ChatInput, name: "settings" } } as never), false);
