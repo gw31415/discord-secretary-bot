@@ -19,7 +19,7 @@ import type { DialogState, DialogView } from "./dialog.ts";
 import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
 import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
 import { mimeOf } from "../agent/attachments.ts";
-import { isRef, maxRisk } from "./types.ts";
+import { draftOf, isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
 import type { Reader } from "../discord/reader.ts";
 import { allowProblems, allowRisk, needsChannel, needsTarget, ownerAllowProblems } from "../rules/allow.ts";
@@ -704,7 +704,7 @@ export class Planner {
         }
         await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
         try {
-          const drafts: StepDraft[] = plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) }));
+          const drafts: StepDraft[] = plan.steps.map(draftOf);
           await this.propose({
             guildId: plan.guildId, channelId: row.channelId, replyToId: null, actorId: plan.actor.userId, drafts,
             shareable: this.#shareable(plan, row.channelId), replaces: plan.id,

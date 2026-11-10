@@ -16,7 +16,7 @@ import { DEFAULT_LIMITS } from "../rules/types.ts";
 import type { Body } from "./catalog.ts";
 import { lineDiff } from "./diff.ts";
 import { dialogFileName, dialogImageIds } from "./files.ts";
-import { RISK_LABEL } from "./types.ts";
+import { draftOf, RISK_LABEL } from "./types.ts";
 import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
 
@@ -449,7 +449,7 @@ function detailsBody(plan: Plan): string[] {
   const out: string[] = [];
   if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
-    const json = JSON.stringify(plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) })));
+    const json = JSON.stringify(plan.steps.map(draftOf));
     out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fenced("json", json) : "長いため「ファイルで受け取る」で確かめてください"}`);
   }
   return out;

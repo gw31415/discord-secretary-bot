@@ -69,6 +69,11 @@ export interface Step {
   idempotencyKey: string;
 }
 
+/** A step written back in the form it was proposed in (the query is not carried over). */
+export function draftOf(step: Step): StepDraft {
+  return { id: step.id, op: step.op, path: step.pathParams, ...(step.body !== undefined ? { body: step.body } : {}) };
+}
+
 /** The state a step relies on, checked again right before execution. */
 export interface Precondition {
   resource: string;
