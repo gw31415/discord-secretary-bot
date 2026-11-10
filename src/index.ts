@@ -37,7 +37,7 @@ const store = new Store(config.dbPath, config.masterKey);
 const caches = new GuildCaches();
 const compiler = config.compilerSocket ? new CompilerClient(config.compilerSocket) : undefined;
 const wasm = new WasmRegistry(store, compiler);
-setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data) });
+setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data), touch: (key) => store.touchBytecode(key) });
 
 function served(guildId: string | undefined): guildId is string {
   return !!guildId && (config.allowedGuildIds.size === 0 || config.allowedGuildIds.has(guildId));

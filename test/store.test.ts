@@ -359,3 +359,20 @@ test("old rule runs are deleted through the started_at index, and newer ones sta
   store.deleteRuleRunsBefore(new Date("2026-02-01T00:00:00.000Z"));
   assert.deepEqual(store.db.prepare("SELECT started_at FROM rule_runs").pluck().all(), ["2026-03-01T00:00:00.000Z"]);
 });
+
+test("a kept program's used_at is written at most once a day", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-01-01T00:00:00.000Z") });
+  const store = new Store(":memory:", master);
+  const usedAt = () => store.db.prepare("SELECT used_at FROM js_bytecode WHERE key = 'k'").pluck().get();
+  store.setBytecode("k", Buffer.from("b"));
+  t.mock.timers.tick(60 * 60_000);
+  assert.deepEqual(store.getBytecode("k"), Buffer.from("b"));
+  store.touchBytecode("k");
+  assert.equal(usedAt(), "2026-01-01T00:00:00.000Z");
+  t.mock.timers.tick(24 * 60 * 60_000);
+  store.touchBytecode("k");
+  assert.equal(usedAt(), "2026-01-02T01:00:00.000Z");
+  t.mock.timers.tick(60_000);
+  store.getBytecode("k");
+  assert.equal(usedAt(), "2026-01-02T01:00:00.000Z");
+});

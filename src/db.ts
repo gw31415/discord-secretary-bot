@@ -350,11 +350,16 @@ function toRule(row: RuleDbRow): Rule {
   };
 }
 
+const BYTECODE_TOUCH_INTERVAL_MS = 24 * 60 * 60_000;
+const MAX_TOUCHED_BYTECODE = 1024;
+
 export class Store {
   readonly db: Database.Database;
   readonly #masterKey: Buffer;
   // Preparing costs about ten times a run; the SQL of each call site is fixed, so the map stays small.
   readonly #statements = new Map<string, Database.Statement>();
+  /** When this process last wrote each program's used_at. */
+  readonly #bytecodeTouched = new Map<string, number>();
 
   constructor(path: string, masterKey: Buffer) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -792,12 +797,29 @@ export class Store {
 
   getBytecode(key: string): Buffer | undefined {
     const row = this.#stmt("SELECT data FROM js_bytecode WHERE key = ?").get(key) as { data: Buffer } | undefined;
-    if (row) this.#stmt("UPDATE js_bytecode SET used_at = ? WHERE key = ?").run(new Date().toISOString(), key);
+    if (row) this.touchBytecode(key);
     return row?.data;
   }
 
   setBytecode(key: string, data: Buffer): void {
-    this.#stmt("INSERT OR REPLACE INTO js_bytecode (key, data, used_at) VALUES (?, ?, ?)").run(key, data, new Date().toISOString());
+    const now = new Date();
+    this.#stmt("INSERT OR REPLACE INTO js_bytecode (key, data, used_at) VALUES (?, ?, ?)").run(key, data, now.toISOString());
+    this.#noteTouched(key, now.getTime());
+  }
+
+  /** Marks a program as used. used_at only decides a 30-day expiry, so it is written at most once a day. */
+  touchBytecode(key: string): void {
+    const now = Date.now();
+    const last = this.#bytecodeTouched.get(key);
+    if (last !== undefined && now - last < BYTECODE_TOUCH_INTERVAL_MS) return;
+    this.#stmt("UPDATE js_bytecode SET used_at = ? WHERE key = ?").run(new Date(now).toISOString(), key);
+    this.#noteTouched(key, now);
+  }
+
+  #noteTouched(key: string, at: number): void {
+    this.#bytecodeTouched.delete(key);
+    this.#bytecodeTouched.set(key, at);
+    if (this.#bytecodeTouched.size > MAX_TOUCHED_BYTECODE) this.#bytecodeTouched.delete(this.#bytecodeTouched.keys().next().value!);
   }
 
   /** Programs no run has used since `cutoff` (old rule versions, earlier engine builds). */

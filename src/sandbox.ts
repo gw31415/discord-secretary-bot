@@ -141,11 +141,24 @@ export function precompileJsEngine(): Promise<{ module: WebAssembly.Module; sha2
 export interface BytecodeCache {
   get(key: string): Buffer | undefined;
   set(key: string, data: Buffer): void;
+  /** Marks a kept program as still in use, for one served from memory. */
+  touch?(key: string): void;
 }
 
 let bytecodeCache: BytecodeCache | null = null;
 export function setBytecodeCache(cache: BytecodeCache | null): void {
   bytecodeCache = cache;
+  recent.clear();
+}
+
+// Programs run lately, by code, so a run neither hashes its code nor reads the cache; least recently run goes first.
+const MAX_RECENT_PROGRAMS = 64;
+const recent = new Map<string, { key: string; bytecode: Buffer }>();
+
+function remember(code: string, key: string, bytecode: Buffer): void {
+  recent.delete(code);
+  recent.set(code, { key, bytecode });
+  if (recent.size > MAX_RECENT_PROGRAMS) recent.delete(recent.keys().next().value!);
 }
 
 /** The runner's stdin ahead of the run's input: a header line, then the program. */
@@ -173,6 +186,7 @@ async function cacheKey(code: string): Promise<string> {
 /** Compiles a rule's code ahead of its first run, unless it is kept already. */
 export async function precompileJs(code: string): Promise<boolean> {
   if (!bytecodeCache) return false;
+  if (recent.has(code)) return false;
   const key = await cacheKey(code);
   if (bytecodeCache.get(key)) return false;
   bytecodeCache.set(key, await compileText(ruleProgram(code)));
@@ -187,17 +201,24 @@ export async function precompileJs(code: string): Promise<boolean> {
 export async function jsProgram(code: string): Promise<Program> {
   const { module } = await precompileJsEngine();
   let bytecode: Buffer | undefined;
-  if (bytecodeCache) {
+  const cache = bytecodeCache;
+  const hit = cache ? recent.get(code) : undefined;
+  if (cache && hit) {
+    remember(code, hit.key, hit.bytecode);
+    cache.touch?.(hit.key);
+    bytecode = hit.bytecode;
+  } else if (cache) {
     const key = await cacheKey(code);
-    bytecode = bytecodeCache.get(key);
+    bytecode = cache.get(key);
     if (!bytecode) {
       try {
         bytecode = await compileText(ruleProgram(code));
-        bytecodeCache.set(key, bytecode);
+        cache.set(key, bytecode);
       } catch {
         bytecode = undefined;
       }
     }
+    if (bytecode && bytecodeCache === cache) remember(code, key, bytecode);
   }
   return { module, prefix: bytecode ? prefix("bytecode", bytecode) : prefix("source", Buffer.from(ruleProgram(code))), engine: true };
 }

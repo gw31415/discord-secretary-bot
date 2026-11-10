@@ -136,6 +136,29 @@ test("rule code compiles to bytecode once and runs from it", async () => {
   }
 });
 
+test("a rule's program run again comes from memory and only marks its bytecode as used", async () => {
+  const { jsProgram, setBytecodeCache } = await import("../src/sandbox.ts");
+  const kept = new Map<string, Buffer>();
+  const calls: string[] = [];
+  setBytecodeCache({
+    get: (k) => (calls.push("get"), kept.get(k)),
+    set: (k, v) => (calls.push("set"), void kept.set(k, v)),
+    touch: (k) => (assert.ok(kept.has(k)), void calls.push("touch")),
+  });
+  try {
+    const code = "return plan([])";
+    const first = await jsProgram(code);
+    const second = await jsProgram(code);
+    assert.deepEqual(second.prefix, first.prefix);
+    assert.deepEqual(calls, ["get", "set", "touch"]);
+    setBytecodeCache({ get: (k) => (calls.push("get2"), kept.get(k)), set: () => assert.fail("kept already") });
+    assert.deepEqual((await jsProgram(code)).prefix, first.prefix);
+    assert.equal(calls.at(-1), "get2", "a new cache starts without the old one's memory");
+  } finally {
+    setBytecodeCache(null);
+  }
+});
+
 /** A module that prints `output` and nothing else. */
 function printer(output: string): Uint8Array {
   return wasm({
