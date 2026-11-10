@@ -718,7 +718,7 @@ export class Planner {
       }
       case "revise": {
         if (row.status !== "pending_approval" || expired() || !this.deps.revise) {
-          await ephemeral(this.#closed(plan.id, true));
+          await ephemeral(row.status === "pending_approval" && !expired() ? "この変更案は修正できません" : this.#closed(plan.id, expired()));
           return true;
         }
         await api.interactions.createModal(interaction.id, interaction.token, reviseModal(plan));
@@ -727,7 +727,7 @@ export class Planner {
       case "revisetext": {
         const instruction = interaction.type === InteractionType.ModalSubmit ? modalValue(interaction, "instruction")?.trim() : undefined;
         if (row.status !== "pending_approval" || !instruction || !row.channelId || !row.messageId || !this.deps.revise) {
-          await ephemeral(this.#closed(plan.id, true));
+          await ephemeral(row.status === "pending_approval" && !expired() ? "この変更案は修正できません" : this.#closed(plan.id, expired()));
           return true;
         }
         await busy("修正中…");
@@ -1102,7 +1102,8 @@ export class Planner {
       } else {
         // The step keeps Discord's own words (the JSON and the audit log show them); the dialog says it in Japanese.
         for (const step of current) store.finishStep(plan.id, step.id, { state: "failed", error: message.slice(0, 500) });
-        const shown = sentence(truncate(discordErrorText(e), 300));
+        // One line: the dialog reads later lines of the reason as notes added after the failure.
+        const shown = sentence(truncate(discordErrorText(e).replace(/\s*\n\s*/g, " "), 300));
         const name = stepNamer(plan);
         const reason = current.length > 0
           ? `${[...new Set(current.map((step) => name(step.id, specOf(step).label)))].join("・")}ができませんでした。${shown}`
