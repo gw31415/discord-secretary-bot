@@ -1,6 +1,6 @@
-import { ButtonStyle, ComponentType, MessageFlags } from "discord-api-types/v10";
-import type { APIButtonComponent, APIComponentInContainer, APIMessageTopLevelComponent } from "discord-api-types/v10";
-import { VISIBILITY_CHOICES } from "./command.ts";
+import { ButtonStyle, ComponentType } from "discord-api-types/v10";
+import type { APIButtonComponent, APIComponentInContainer } from "discord-api-types/v10";
+import { visibilitySelect } from "./command.ts";
 import type { AuditEntry, PlanRow, WasmSource } from "../db.ts";
 import { RISK_LABEL } from "../plan/types.ts";
 import type { RuleDryRun } from "../plan/types.ts";
@@ -10,7 +10,9 @@ import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { ACTOR_EVENTS, TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 import { truncate } from "../text.ts";
-import { NS, SETTINGS_HOME_ID } from "../discord/custom-id.ts";
+import { NS } from "../discord/custom-id.ts";
+import { actionRow, button, discordTime, fence, panelTexts, settingsHomeButton, v2Message } from "../discord/ui.ts";
+import type { Rendered } from "../discord/ui.ts";
 
 const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
 
@@ -41,7 +43,7 @@ export const RULE_PAGES = Object.keys(PAGE_LABEL) as RulePage[];
 export const DELETE_CHOICE = "delete";
 
 // The rules are one of the settings panel's sections.
-export { SETTINGS_HOME_ID };
+export { SETTINGS_HOME_ID } from "../discord/custom-id.ts";
 
 export function ruleCustomId(action: RuleAction, arg = ""): string {
   return `${NS.rule}:${action}:${arg}`;
@@ -54,9 +56,8 @@ export function parseRuleCustomId(id: string): { action: RuleAction; arg: string
 }
 
 const MAX_CODE = 1500;
-const MAX_TOTAL = 3900;
 
-export type Rendered = { flags: number; components: APIMessageTopLevelComponent[] };
+export type { Rendered };
 
 /** The code fence's language for a compiled module's source. */
 export function fenceLanguage(language: string): string {
@@ -74,36 +75,17 @@ export function sourceText(source: WasmSource, max: number): string[] {
     }
     const shown = f.content.length > room ? `${f.content.slice(0, room)}\n// …(続きは「ファイルで」)` : f.content;
     room -= shown.length;
-    out.push(`\`${f.path}\`\n${fenced(fenceLanguage(source.language), shown)}`);
+    out.push(`\`${f.path}\`\n${fence(fenceLanguage(source.language), shown)}`);
   }
   return out;
 }
 
-function fenced(lang: string, body: string): string {
-  return `\`\`\`${lang}\n${body.replaceAll("```", "`​``")}\n\`\`\``;
-}
-
-function button(id: string, label: string, style: ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger = ButtonStyle.Secondary, disabled = false): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: id, label, style, disabled };
-}
-
 function row(buttons: APIButtonComponent[]): APIComponentInContainer {
-  return { type: ComponentType.ActionRow, components: buttons.slice(0, 5) };
+  return actionRow(buttons, 5);
 }
 
 function container(texts: string[], rows: APIComponentInContainer[], accent?: number): Rendered {
-  let budget = MAX_TOTAL;
-  const parts: APIComponentInContainer[] = [];
-  for (const t of texts) {
-    if (!t || budget <= 50) continue;
-    const content = truncate(t, budget);
-    budget -= content.length;
-    parts.push({ type: ComponentType.TextDisplay, content });
-  }
-  return {
-    flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
-    components: [{ type: ComponentType.Container, ...(accent !== undefined ? { accent_color: accent } : {}), components: [...parts, ...rows] }],
-  };
+  return v2Message([...panelTexts(texts), ...rows], { ephemeral: true, ...(accent !== undefined ? { accent } : {}) });
 }
 
 export function triggerLabel(trigger: Rule["trigger"]): string {
@@ -177,10 +159,6 @@ const OUTCOME_LABEL: Record<RunOutcome, string> = {
   rate_limited: "回数制限",
 };
 
-function unix(iso: string): number {
-  return Math.floor(Date.parse(iso) / 1000);
-}
-
 function ruleStatus(rule: Rule): string {
   if (rule.enabled) return "🟢 有効";
   return `⏸️ 停止中${rule.disabledReason ? `(${rule.disabledReason})` : ""}`;
@@ -198,7 +176,7 @@ export interface HomeInput {
 
 export function homeView(input: HomeInput): Rendered {
   const texts = ["## ルール"];
-  if (input.halted) texts.push(`🛑 全ルールを停止中(<@${input.halted.by}>、<t:${unix(input.halted.at)}:R>)`);
+  if (input.halted) texts.push(`🛑 全ルールを停止中(<@${input.halted.by}>、${discordTime(input.halted.at)})`);
   if (input.rules.length === 0) texts.push("まだありません。会話でBotに頼むと作れます。");
   if (input.notice) texts.push(`-# ${input.notice}`);
   const rows: APIComponentInContainer[] = [];
@@ -225,7 +203,7 @@ export function homeView(input: HomeInput): Rendered {
   if (input.canHalt) {
     buttons.push(input.halted ? button(ruleCustomId("resume"), "全ルールを再開", ButtonStyle.Primary) : button(ruleCustomId("halt"), "緊急停止", ButtonStyle.Danger));
   }
-  rows.push(row(buttons), row([button(SETTINGS_HOME_ID, "← 設定のトップへ")]));
+  rows.push(row(buttons), row([settingsHomeButton()]));
   return container(texts, rows);
 }
 
@@ -253,7 +231,7 @@ export function stateText(state: unknown, max = MAX_STATE_SHOWN): string {
 function runLine(run: RuleRun): string {
   const error = run.error ? ` — ${truncate(run.error.replaceAll("\n", " "), 120)}` : "";
   const plan = run.planId ? ` 変更 \`${run.planId}\`` : "";
-  return `<t:${unix(run.startedAt)}:R> v${run.ruleVersion} ${OUTCOME_LABEL[run.outcome]}${plan}${error}`;
+  return `${discordTime(run.startedAt)} v${run.ruleVersion} ${OUTCOME_LABEL[run.outcome]}${plan}${error}`;
 }
 
 /** Pages, and deleting, sit in one menu so the buttons stay few. */
@@ -293,14 +271,7 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
     if (input.dry) texts.push(dryRunText(input.dry));
     // The owner picks who sees a command's replies here, without a new version.
     if (input.can.owner && rule.trigger.command) {
-      rows.push({
-        type: ComponentType.ActionRow,
-        components: [{
-          type: ComponentType.StringSelect,
-          custom_id: ruleCustomId("visibility", rule.id),
-          options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (rule.trigger.command!.visibility ?? "auto") === o.value })),
-        }],
-      });
+      rows.push(visibilitySelect(ruleCustomId("visibility", rule.id), rule.trigger.command.visibility));
     }
     if (rule.enabled && input.can.disable) buttons.push(button(ruleCustomId("disable", rule.id), "止める", ButtonStyle.Danger));
     if (!rule.enabled && input.can.enable) buttons.push(button(ruleCustomId("enable", rule.id), "有効にする", ButtonStyle.Primary));
@@ -315,17 +286,17 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
     texts.push(
       `**元の依頼**\n${truncate(rule.sourcePrompt, 300)}`,
       ...(rule.program.kind === "js"
-        ? [fenced("js", rule.program.code.length > MAX_CODE ? `${rule.program.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.program.code)]
+        ? [fence("js", rule.program.code.length > MAX_CODE ? `${rule.program.code.slice(0, MAX_CODE)}\n// …(続きは「ファイルで」)` : rule.program.code)]
         : input.wasmSource
           ? [`**Wasmモジュール**(${input.wasmSource.language} のソースからBotがコンパイル、sha256 \`${rule.program.sha256.slice(0, 12)}\`)`, ...sourceText(input.wasmSource, MAX_CODE)]
-          : [`**Wasmモジュール**を動かします\n${fenced("", `sha256 ${rule.program.sha256}`)}\n-# アップロードされたモジュールなので、ソースはありません。`]),
+          : [`**Wasmモジュール**を動かします\n${fence("", `sha256 ${rule.program.sha256}`)}\n-# アップロードされたモジュールなので、ソースはありません。`]),
     );
     if (input.can.owner) texts.push(`-# 直すときは会話でBotに「ルール \`${rule.id}\`(${rule.name})を〜に直して」と頼みます。`);
     if (rule.program.kind === "js" || input.wasmSource) buttons.push(button(ruleCustomId("code", rule.id), "ファイルで"));
   } else {
     texts.push(`**最近の実行**\n${input.runs.length > 0 ? input.runs.map(runLine).join("\n") : "まだありません"}`);
     const hasState = input.state !== undefined && input.state !== null;
-    if (hasState) texts.push(`**状態**(次の実行に持ち越す値)\n${fenced("json", stateText(input.state))}`);
+    if (hasState) texts.push(`**状態**(次の実行に持ち越す値)\n${fence("json", stateText(input.state))}`);
     if (input.can.owner && hasState) buttons.push(button(ruleCustomId("clearstate", rule.id), "状態を消す"));
   }
   if (input.notice) texts.push(`-# ${input.notice}`);
@@ -346,7 +317,7 @@ export function plansView(plans: Array<PlanRow & { updatedAt?: string }>, all: b
   const lines = plans.map(({ plan, status, reason }) => {
     const who = plan.rule ? `ルール「${plan.rule.name}」` : `<@${plan.actor.userId}>`;
     const ops = [...new Set(plan.steps.map((s) => s.op))].slice(0, 3).join(", ");
-    return `<t:${unix(plan.createdAt)}:R> \`${plan.id}\` ${STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${ops}${reason ? ` — ${truncate(reason.replaceAll("\n", " "), 80)}` : ""}`;
+    return `${discordTime(plan.createdAt)} \`${plan.id}\` ${STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${ops}${reason ? ` — ${truncate(reason.replaceAll("\n", " "), 80)}` : ""}`;
   });
   return container(
     [`### 変更の履歴\n${all ? "このサーバーの最近の変更です。" : "あなたの最近の変更です(ルールによるものを含む)。"}`, lines.join("\n") || "ありません"],
@@ -363,7 +334,7 @@ function actorText(entry: AuditEntry): string {
 export function auditView(entries: AuditEntry[], all: boolean): Rendered {
   const lines = entries.map((e) => {
     const ref = e.planId ? ` 変更 \`${e.planId}\`` : e.ruleId ? ` ルール \`${e.ruleId}\`` : "";
-    return `<t:${unix(e.at)}:R> ${actorText(e)} \`${e.action}\`${ref}`;
+    return `${discordTime(e.at)} ${actorText(e)} \`${e.action}\`${ref}`;
   });
   return container(
     [`### 監査ログ\n${all ? "このサーバーの最近の記録です。" : "あなたの操作の記録です。全件を見るには監査ログ表示の権限が必要です。"}`, lines.join("\n") || "ありません"],
@@ -415,7 +386,7 @@ export function commandsView(input: CommandsInput): Rendered {
       }],
     });
   }
-  rows.push(row([button(SETTINGS_HOME_ID, "← 設定のトップへ")]));
+  rows.push(row([settingsHomeButton()]));
   return container(texts, rows);
 }
 
@@ -443,14 +414,7 @@ export function commandView(input: CommandInput): Rendered {
     return container(texts, [row([button(ruleCustomId("cmddel2", rule.id), "削除する", ButtonStyle.Danger), button(ruleCustomId("cmd", rule.id), "やめる")])]);
   }
   return container(texts, [
-    {
-      type: ComponentType.ActionRow,
-      components: [{
-        type: ComponentType.StringSelect,
-        custom_id: ruleCustomId("cmdvis", rule.id),
-        options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (c.visibility ?? "auto") === o.value })),
-      }],
-    },
+    visibilitySelect(ruleCustomId("cmdvis", rule.id), c.visibility),
     row([button(ruleCustomId("open", rule.id), "関連ルールを見る"), button(ruleCustomId("cmddel", rule.id), "コマンドを削除", ButtonStyle.Danger), button(ruleCustomId("commands"), "← コマンド一覧")]),
   ]);
 }

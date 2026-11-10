@@ -1,5 +1,5 @@
-import { ApplicationCommandOptionType, ApplicationCommandType, InteractionType, PermissionFlagsBits } from "discord-api-types/v10";
-import type { APIApplicationCommandInteractionDataBasicOption, APIInteraction, RESTPostAPIChatInputApplicationCommandsJSONBody } from "discord-api-types/v10";
+import { ApplicationCommandOptionType, ApplicationCommandType, ComponentType, InteractionType, PermissionFlagsBits } from "discord-api-types/v10";
+import type { APIActionRowComponent, APIApplicationCommandInteractionDataBasicOption, APIInteraction, APIStringSelectComponent, RESTPostAPIChatInputApplicationCommandsJSONBody } from "discord-api-types/v10";
 import type { MemberState } from "../discord/permissions.ts";
 
 // Rules that a person starts with a guild slash command. The command's options
@@ -50,6 +50,22 @@ export const VISIBILITY_CHOICES = [
   { value: "private", label: "返事は実行した人だけに見せる" },
   { value: "auto", label: "返事ごとにモデルが判定する" },
 ] as const satisfies ReadonlyArray<{ value: CommandVisibility; label: string }>;
+
+/** The select for who sees a command's replies, starting on `current` ("auto" when unset). */
+export function visibilitySelect(customId: string, current: CommandVisibility | undefined): APIActionRowComponent<APIStringSelectComponent> {
+  return {
+    type: ComponentType.ActionRow,
+    components: [{
+      type: ComponentType.StringSelect,
+      custom_id: customId,
+      options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (current ?? "auto") === o.value })),
+    }],
+  };
+}
+
+export function visibilityLabel(visibility: CommandVisibility | undefined): string {
+  return VISIBILITY_CHOICES.find((o) => o.value === visibility)?.label ?? "";
+}
 
 /** The bot's own commands; custom ones cannot take these names. */
 export const RESERVED_COMMANDS = new Set(["settings"]);

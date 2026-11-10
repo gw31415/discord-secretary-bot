@@ -1,4 +1,4 @@
-import { ButtonStyle, ComponentType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, TextInputStyle } from "discord-api-types/v10";
 import type {
   APIActionRowComponent,
   APIButtonComponent,
@@ -11,7 +11,7 @@ import type {
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
 import { fenceLanguage, limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
-import { VISIBILITY_CHOICES } from "../rules/command.ts";
+import { visibilitySelect } from "../rules/command.ts";
 import { DEFAULT_LIMITS } from "../rules/types.ts";
 import type { Body } from "./catalog.ts";
 import { lineDiff } from "./diff.ts";
@@ -20,6 +20,8 @@ import { draftOf, RISK_LABEL } from "./types.ts";
 import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
 import { NS } from "../discord/custom-id.ts";
+import { actionRow, button, discordTime, fence, textDisplay, v2Message } from "../discord/ui.ts";
+import type { Rendered } from "../discord/ui.ts";
 
 // The approval dialog, drawn only from the Plan and its step states. Nothing
 // the conversing model wrote as explanation appears here; a plan made from code
@@ -59,18 +61,7 @@ export function parsePlanCustomId(id: string): { action: PlanAction; planId: str
 /** While the plan waits, who sees a command's replies is picked under its rule; the pick is part of what is approved. */
 function visibilityRow(plan: Plan, state: DialogState, r: PlanRuleDraft): APIActionRowComponent<APIStringSelectComponent>[] {
   if (state.status !== "pending_approval" || state.actions === false || !r.trigger.command) return [];
-  return [
-    {
-      type: ComponentType.ActionRow,
-      components: [
-        {
-          type: ComponentType.StringSelect,
-          custom_id: customId("visibility", plan, r.key),
-          options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (r.trigger.command!.visibility ?? "auto") === o.value })),
-        },
-      ],
-    },
-  ];
+  return [visibilitySelect(customId("visibility", plan, r.key), r.trigger.command.visibility)];
 }
 
 const MAX_LISTED = 15;
@@ -214,15 +205,11 @@ export interface DialogState {
   actions?: boolean;
 }
 
-function unix(iso: string): number {
-  return Math.floor(Date.parse(iso) / 1000);
-}
-
 function statusLine(plan: Plan, state: DialogState): string {
   const done = state.steps?.filter((s) => s.state === "done").length ?? 0;
   switch (state.status) {
     case "pending_approval":
-      return `${needsTypedConfirm(plan) ? "戻せない操作があるので、実行時に確認の入力があります。\n" : ""}-# 期限 <t:${unix(plan.expiresAt)}:R> · \`${plan.id}\``;
+      return `${needsTypedConfirm(plan) ? "戻せない操作があるので、実行時に確認の入力があります。\n" : ""}-# 期限 ${discordTime(plan.expiresAt)} · \`${plan.id}\``;
     case "approved":
     case "executing":
       return plan.steps.length > 1 ? `実行中… ${done}/${plan.steps.length}` : "実行中…";
@@ -249,10 +236,6 @@ function color(plan: Plan, status: PlanStatus): number {
     default:
       return COLORS[plan.risk];
   }
-}
-
-function button(id: string, text: string, style: ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: id, label: text, style };
 }
 
 function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
@@ -312,11 +295,6 @@ function viewMenu(plan: Plan, current: DialogView): APIActionRowComponent<APIStr
   };
 }
 
-/** Keeps a code block from being closed by its own content. */
-function fenced(lang: string, body: string): string {
-  return `\`\`\`${lang}\n${body.replaceAll("```", "`\u200b``")}\n\`\`\``;
-}
-
 /**
  * Only the code: whoever opens this section came to read it, and the summary
  * already explains it. A new version of a rule shows its diff.
@@ -339,7 +317,7 @@ function codeBody(plan: Plan, room: number): string[] {
     const limit = Math.max(200, Math.min(MAX_CODE, share - title.length - 100));
     const cut = code.lastIndexOf("\n", limit);
     const shown = code.length > limit ? `${code.slice(0, cut > 0 ? cut : limit)}\n${lang === "diff" ? "…" : "// …"}(続きは「ファイルで受け取る」)` : code;
-    return [`**${title}**`, fenced(lang, shown)];
+    return [`**${title}**`, fence(lang, shown)];
   });
 }
 
@@ -451,7 +429,7 @@ function detailsBody(plan: Plan): string[] {
   if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
     const json = JSON.stringify(plan.steps.map(draftOf));
-    out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fenced("json", json) : "長いため「ファイルで受け取る」で確かめてください"}`);
+    out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fence("json", json) : "長いため「ファイルで受け取る」で確かめてください"}`);
   }
   return out;
 }
@@ -477,14 +455,14 @@ function header(plan: Plan): string {
  * rule with the pick that belongs to it), the menu that switches sections, and
  * last, under a divider, the dialog's own status and the buttons that act on it.
  */
-export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
+export function renderDialog(plan: Plan, state: DialogState): Rendered {
   let room = MAX_TEXT;
   const text = (content: string): APITextDisplayComponent => {
     const shown = content.slice(0, Math.max(0, room));
     room -= shown.length;
-    return { type: ComponentType.TextDisplay, content: shown || "…" };
+    return textDisplay(shown || "…");
   };
-  const row = (components: APIButtonComponent[]): APIActionRowComponent<APIButtonComponent>[] => (components.length > 0 ? [{ type: ComponentType.ActionRow, components }] : []);
+  const row = (components: APIButtonComponent[]): APIActionRowComponent<APIButtonComponent>[] => (components.length > 0 ? [actionRow(components)] : []);
   const status = statusLine(plan, state);
   room -= status.length;
   const view = viewOf(plan, state);
@@ -501,22 +479,11 @@ export function renderDialog(plan: Plan, state: DialogState): { components: APIM
           // Who sees a command's replies starts on the judge model's pick (the summary says which); it is changed here.
           ...(plan.rules ?? []).flatMap((r) => [text(ruleDetail(plan, r)), ...visibilityRow(plan, state, r)]),
         ];
-  return {
-    components: [
-      {
-        type: ComponentType.Container,
-        accent_color: color(plan, state.status),
-        components: [
-          ...section,
-          viewMenu(plan, view),
-          { type: ComponentType.Separator },
-          { type: ComponentType.TextDisplay, content: status },
-          ...row(buttons(plan, state)),
-        ],
-      },
-    ],
-    flags: MessageFlags.IsComponentsV2,
-  };
+  // Not ephemeral: the dialog stays in the channel.
+  return v2Message(
+    [...section, viewMenu(plan, view), { type: ComponentType.Separator }, textDisplay(status), ...row(buttons(plan, state))],
+    { ephemeral: false, accent: color(plan, state.status) },
+  );
 }
 
 /** The dialog's text, for tests and logs. */

@@ -26,7 +26,7 @@ import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
 import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
 import type { CommandSpec, CommandVisibility } from "./command.ts";
-import { VISIBILITY_CHOICES } from "./command.ts";
+import { visibilityLabel } from "./command.ts";
 import { defaultVisibility, showsToAll } from "../agent/judge.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
 import { ModuleRejected, sizeLabel, wasmRef } from "../wasm/registry.ts";
@@ -558,7 +558,7 @@ export class RuleService {
         case "cmdvis": {
           const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
           const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
-          const label = VISIBILITY_CHOICES.find((o) => o.value === rule.trigger.command?.visibility)?.label ?? "";
+          const label = visibilityLabel(rule.trigger.command?.visibility);
           await update(this.#command(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
           return true;
         }
@@ -614,7 +614,7 @@ export class RuleService {
         case "visibility": {
           const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
           const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
-          const label = VISIBILITY_CHOICES.find((o) => o.value === rule.trigger.command?.visibility)?.label ?? "";
+          const label = visibilityLabel(rule.trigger.command?.visibility);
           await update(this.#detail(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
           return true;
         }

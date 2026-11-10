@@ -3,8 +3,9 @@ import { ButtonStyle, ComponentType, InteractionType, MessageFlags, TextInputSty
 import type { APIButtonComponent, APIComponentInContainer, APIInteraction, APIModalInteractionResponseCallbackData, APIModalSubmitInteraction } from "discord-api-types/v10";
 import type { WasmModule, WasmSource } from "../db.ts";
 import { modalValue } from "../discord/modal.ts";
-import { NS, SETTINGS_HOME_ID } from "../discord/custom-id.ts";
-import type { Rendered } from "../rules/panel.ts";
+import { NS } from "../discord/custom-id.ts";
+import { actionRow, button, discordTime, escapeFence, panelTexts, settingsHomeButton, v2Message } from "../discord/ui.ts";
+import type { Rendered } from "../discord/ui.ts";
 import { MAX_MEMORY_PAGES, MAX_MODULE_BYTES } from "./module.ts";
 import { MAX_BYTES_PER_USER, MAX_MODULES_PER_USER, ModuleRejected, sizeLabel } from "./registry.ts";
 import type { WasmRegistry } from "./registry.ts";
@@ -28,15 +29,11 @@ function parse(id: string): { action: WasmAction; arg: string } | null {
   return m && ACTIONS.has(m[1]!) ? { action: m[1] as WasmAction, arg: m[2]! } : null;
 }
 
-function button(id: string, label: string, style: ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger = ButtonStyle.Secondary): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: id, label, style };
-}
-
 function view(texts: string[], rows: APIButtonComponent[][], select?: APIComponentInContainer): Rendered {
-  const components: APIComponentInContainer[] = texts.filter(Boolean).map((content) => ({ type: ComponentType.TextDisplay, content: content.slice(0, 3900) }));
+  const components: APIComponentInContainer[] = panelTexts(texts);
   if (select) components.push(select);
-  for (const r of rows) if (r.length) components.push({ type: ComponentType.ActionRow, components: r.slice(0, 3) });
-  return { flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2, components: [{ type: ComponentType.Container, components }] };
+  for (const r of rows) if (r.length) components.push(actionRow(r, 3));
+  return v2Message(components, { ephemeral: true });
 }
 
 const HOW_TO = [
@@ -71,7 +68,7 @@ export function homeView(modules: WasmModule[], usage: (sha: string) => number, 
         }],
       }
     : undefined;
-  return view(texts, [[button(wasmCustomId("upload"), "Wasmを登録", ButtonStyle.Primary), button(SETTINGS_HOME_ID, "← 設定のトップへ")]], select);
+  return view(texts, [[button(wasmCustomId("upload"), "Wasmを登録", ButtonStyle.Primary), settingsHomeButton()]], select);
 }
 
 export function detailView(module: WasmModule, latest: boolean, rules: Array<{ name: string; enabled: boolean; guildId: string; mine: boolean }>, confirmDelete = false, notice?: string): Rendered {
@@ -83,7 +80,7 @@ export function detailView(module: WasmModule, latest: boolean, rules: Array<{ n
       `**ビルド**: ${module.info.producers.join("、") || "記載なし"}`,
       ...(module.source ? [`**ソース**: ${module.source.language}・${module.source.files}ファイル(Botがコンパイル)`] : []),
       `**import**: ${module.info.imports.map((i) => `\`${i}\``).join(" ").slice(0, 900) || "なし"}`,
-      `**登録**: <t:${Math.floor(Date.parse(module.createdAt) / 1000)}:f>`,
+      `**登録**: ${discordTime(module.createdAt, "f")}`,
     ].join("\n"),
     rules.length
       ? `**使っているルール**\n${rules.map((r) => `${r.enabled ? "🟢" : "⏸️"} ${r.name}${r.mine ? "" : "(ほかの人のルール)"}`).join("\n")}`
@@ -108,12 +105,13 @@ export function sourceView(module: WasmModule, source: WasmSource): Rendered {
   const parts: string[] = [];
   for (const file of source.files) {
     const head = `**${file.path}**`;
-    const body = file.content.replace(/```/g, "`\u200b``");
+    const body = escapeFence(file.content);
     if (room < head.length + 40) {
       parts.push(`-# ほか ${source.files.length - parts.length}ファイル(会話で頼むと全部見せます)`);
       break;
     }
     const shown = body.length > room - head.length - 20 ? `${body.slice(0, room - head.length - 20)}\n…` : body;
+    // Escaped before cutting, so the fence is written by hand rather than escaping again.
     parts.push(`${head}\n\`\`\`\n${shown}\n\`\`\``);
     room -= head.length + shown.length + 10;
   }

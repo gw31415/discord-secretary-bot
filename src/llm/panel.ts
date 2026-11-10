@@ -1,4 +1,4 @@
-import { ButtonStyle, ComponentType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, TextInputStyle } from "discord-api-types/v10";
 import type {
   APIActionRowComponent,
   APIButtonComponent,
@@ -14,6 +14,7 @@ import { findModel, isClassifier, judgesOnly, isKeyProviderId, isProviderId, KEY
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 import { ruleCustomId } from "../rules/panel.ts";
 import { NS, WASM_HOME_ID } from "../discord/custom-id.ts";
+import { button, v2Message } from "../discord/ui.ts";
 
 export type { ModelRole };
 
@@ -111,7 +112,7 @@ export type PanelPage = "home" | "keys" | "models" | "roles" | "lookup";
 const LOOKUP_TITLE = "ハーネス";
 
 function navButton(page: PanelPage, label: string, current: PanelPage): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: CUSTOM_ID.page(page), label, style: page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, disabled: page === current };
+  return button(CUSTOM_ID.page(page), label, page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, page === current);
 }
 
 /** The settings panel: a home page with the general settings, and pages for keys and models reached by buttons. */
@@ -135,18 +136,15 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
     {
       type: ComponentType.ActionRow,
       components: [
-        { type: ComponentType.Button, custom_id: ruleCustomId("home"), label: "ルール", style: ButtonStyle.Primary },
-        { type: ComponentType.Button, custom_id: ruleCustomId("commands"), label: "コマンド", style: ButtonStyle.Primary },
-        { type: ComponentType.Button, custom_id: WASM_HOME_ID, label: "Wasm", style: ButtonStyle.Primary },
+        button(ruleCustomId("home"), "ルール", ButtonStyle.Primary),
+        button(ruleCustomId("commands"), "コマンド", ButtonStyle.Primary),
+        button(WASM_HOME_ID, "Wasm", ButtonStyle.Primary),
       ],
     },
     // From the per-use page, the モデル button above leads back to the models page.
     ...(page === "home" ? [] : [{ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] } satisfies APIActionRowComponent<APIButtonComponent>]),
   );
-  return {
-    flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
-    components: [{ type: ComponentType.Container, components: body }],
-  };
+  return v2Message(body, { ephemeral: true });
 }
 
 function modelName(ref: { provider: ProviderId; model: string } | null): string | null {
