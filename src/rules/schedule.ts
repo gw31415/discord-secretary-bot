@@ -18,11 +18,6 @@ export function parseCron(expression: string, timezone = DEFAULT_TIMEZONE): Cron
   }
 }
 
-/** Runs `fn` on every match of the schedule until stopped. The expression must have passed parseCron. */
-export function startCron(expression: string, timezone: string, fn: () => void): { stop(): void } {
-  return new Cron(expression.trim(), { timezone, protect: true }, fn);
-}
-
 export function isTimezone(tz: string): boolean {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: tz });

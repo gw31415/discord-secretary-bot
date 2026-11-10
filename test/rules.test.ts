@@ -320,21 +320,36 @@ test("trigger settings are checked together", async () => {
   assert.match(triggerProblems({ event: "CHANNEL_CREATE", debounceSeconds: 0 }).join(), /debounce_seconds/);
 });
 
-test("SCHEDULE rules run from a cron job each, kept in step with the rules, with the scheduled time as the event", async () => {
-  const jobs: Array<{ cron: string; timezone: string; fn: () => void; stopped: boolean }> = [];
-  const w = world({ t: Date.parse("2026-10-22T19:00:05Z") }, [], {
-    startCron: (cron, timezone, fn) => {
-      const job = { cron, timezone, fn, stopped: false };
-      jobs.push(job);
-      return { stop: () => void (job.stopped = true) };
+/** Timers on the test's clock: moving it forward wakes them in time order, each with the clock at its time. */
+function clockTimers(now: { t: number }) {
+  const timers: Array<{ fn: () => void; at: number; cleared: boolean }> = [];
+  const pending = () => timers.filter((t) => !t.cleared);
+  return {
+    pending,
+    setTimer: (fn: () => void, ms: number) => (timers.push({ fn, at: now.t + ms, cleared: false }), timers.at(-1)),
+    clearTimer: (handle: unknown) => void (handle && ((handle as { cleared: boolean }).cleared = true)),
+    advanceTo: (to: number) => {
+      for (let next = pending().sort((a, b) => a.at - b.at)[0]; next && next.at <= to; next = pending().sort((a, b) => a.at - b.at)[0]) {
+        next.cleared = true;
+        now.t = next.at;
+        next.fn();
+      }
+      now.t = to;
     },
-  });
+  };
+}
+
+test("SCHEDULE rules run from one timer, kept in step with the rules, with the scheduled time as the event", async () => {
+  // 03:59:30 in Tokyo.
+  const now = { t: Date.parse("2026-10-22T18:59:30Z") };
+  const clock = clockTimers(now);
+  const w = world(now, [], { setTimer: clock.setTimer, clearTimer: clock.clearTimer });
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "0 4 * * *" } });
   const other = w.admin.save(GUILD, "1", { ...w.definition, name: "別の時刻", trigger: { event: "SCHEDULE", schedule: "30 4 * * *", timezone: "UTC" } });
   w.engine.syncSchedules(GUILD);
-  w.engine.syncSchedules(GUILD); // nothing changed: the same jobs
-  assert.deepEqual(jobs.map((j) => [j.cron, j.timezone]), [["0 4 * * *", "Asia/Tokyo"], ["30 4 * * *", "UTC"]]);
-  jobs[0]!.fn();
+  w.engine.syncSchedules(GUILD); // nothing changed: still the one timer
+  assert.deepEqual(clock.pending().map((t) => new Date(t.at).toISOString()), ["2026-10-22T19:00:00.000Z"]);
+  clock.advanceTo(Date.parse("2026-10-22T19:00:30Z"));
   await w.engine.idle();
   assert.equal(w.runs.length, 1);
   assert.equal(w.runs[0].rule.id, rule.id);
@@ -344,15 +359,119 @@ test("SCHEDULE rules run from a cron job each, kept in step with the rules, with
   // The dry run makes the same kind of event without a sample.
   const { syntheticEvent } = await import("../src/rules/triggers.ts");
   assert.equal(syntheticEvent("SCHEDULE", GUILD, rule.trigger, w.now.t)!.timezone, "Asia/Tokyo");
-  // A rule switched off loses its job; a stale job that still fires does nothing.
+  // A rule switched off no longer fires at its time (04:30 UTC); the other keeps its own.
   w.store.setRuleEnabled(other.id, false, "test");
   w.engine.syncSchedules(GUILD);
-  assert.equal(jobs[1]!.stopped, true);
-  jobs[1]!.fn();
+  clock.advanceTo(Date.parse("2026-10-23T05:00:00Z"));
   await w.engine.idle();
   assert.equal(w.runs.length, 1);
+  clock.advanceTo(Date.parse("2026-10-23T19:00:00Z"));
+  await w.engine.idle();
+  assert.deepEqual(w.runs.map((r) => r.rule.id), [rule.id, rule.id]);
+  // A rule switched off before its timer hears of it does nothing when its time comes.
+  w.store.setRuleEnabled(rule.id, false, "test");
+  clock.advanceTo(Date.parse("2026-10-24T19:00:00Z"));
+  await w.engine.idle();
+  assert.equal(w.runs.length, 2);
   w.engine.stopSchedules();
-  assert.equal(jobs[0]!.stopped, true);
+  assert.deepEqual(clock.pending(), []);
+});
+
+test("a SCHEDULE rule fires once per time: never twice in a minute, and not on a timer that wakes early", async () => {
+  const now = { t: Date.parse("2026-10-22T10:00:10Z") };
+  const clock = clockTimers(now);
+  const w = world(now, [], { setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "* * * * *", timezone: "UTC" } });
+  w.engine.syncSchedules(GUILD);
+  // A timer that wakes before its time (the timers' clock and the wall clock drift apart) goes back to sleep.
+  const first = clock.pending()[0]!;
+  first.cleared = true;
+  now.t = first.at - 5;
+  first.fn();
+  assert.equal(clock.pending()[0]!.at, first.at);
+  for (let t = now.t; t <= Date.parse("2026-10-22T10:05:30Z"); t += 7_000) {
+    clock.advanceTo(t);
+    // Rules changing meanwhile re-arm the timer but fire nothing by themselves.
+    w.engine.syncSchedules(GUILD);
+  }
+  await w.engine.idle();
+  assert.deepEqual(
+    w.seen.map((b) => b.event.scheduled_at),
+    ["10:01", "10:02", "10:03", "10:04", "10:05"].map((m) => `2026-10-22T${m}:00.000Z`),
+  );
+});
+
+test("SCHEDULE times across a daylight saving change are croner's, once a day", async () => {
+  for (const [schedule, from, expected] of [
+    // 1:30 comes twice when New York falls back; it fires the first time only.
+    ["30 1 * * *", "2026-10-31T00:00:00Z", ["2026-10-31T05:30:00.000Z", "2026-11-01T05:30:00.000Z", "2026-11-02T06:30:00.000Z"]],
+    // 2:30 does not exist when it springs forward; it fires at 3:30 that day.
+    ["30 2 * * *", "2026-03-07T00:00:00Z", ["2026-03-07T07:30:00.000Z", "2026-03-08T07:30:00.000Z", "2026-03-09T06:30:00.000Z"]],
+  ] as const) {
+    const now = { t: Date.parse(from) };
+    const clock = clockTimers(now);
+    const w = world(now, [], { setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+    w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule, timezone: "America/New_York" } });
+    w.engine.syncSchedules(GUILD);
+    clock.advanceTo(Date.parse(from) + 3 * 24 * 60 * 60_000 - 60_000);
+    await w.engine.idle();
+    assert.deepEqual(w.seen.map((b) => b.event.scheduled_at), expected, schedule);
+    w.engine.stopSchedules();
+  }
+});
+
+test("when the wall clock jumps past several SCHEDULE times, the rule fires once, then keeps its schedule", async () => {
+  const now = { t: Date.parse("2026-10-22T10:00:30Z") };
+  const clock = clockTimers(now);
+  const w = world(now, [], { setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "0 * * * *", timezone: "UTC" } });
+  w.engine.syncSchedules(GUILD);
+  // The clock moves five hours on while the timer sleeps; the timer then wakes as usual.
+  const sleeping = clock.pending()[0]!;
+  now.t = Date.parse("2026-10-22T15:10:00Z");
+  sleeping.cleared = true;
+  sleeping.fn();
+  await w.engine.idle();
+  assert.deepEqual(w.seen.map((b) => b.event.scheduled_at), ["2026-10-22T15:10:00.000Z"]);
+  clock.advanceTo(Date.parse("2026-10-22T16:30:00Z"));
+  await w.engine.idle();
+  assert.deepEqual(w.seen.map((b) => b.event.scheduled_at), ["2026-10-22T15:10:00.000Z", "2026-10-22T16:00:00.000Z"]);
+});
+
+test("adding, changing, stopping and deleting SCHEDULE rules re-arms the one timer", async () => {
+  // 03:55 in Tokyo.
+  const now = { t: Date.parse("2026-10-22T18:55:00Z") };
+  const clock = clockTimers(now);
+  const w = world(now, [], { setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  const wakes = () => clock.pending().map((t) => new Date(t.at).toISOString().slice(11, 16));
+  const four = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "0 4 * * *" } });
+  w.engine.syncSchedules(GUILD);
+  assert.deepEqual(wakes(), ["19:00"]);
+  const early = w.admin.save(GUILD, "1", { ...w.definition, name: "早い", trigger: { event: "SCHEDULE", schedule: "58 3 * * *" } });
+  w.engine.syncSchedules(GUILD);
+  assert.deepEqual(wakes(), ["18:58"]);
+  w.store.updateRuleDefinition(early.id, { ...early, trigger: { event: "SCHEDULE", schedule: "57 3 * * *" } }, early.version + 1);
+  w.engine.syncSchedules(GUILD);
+  assert.deepEqual(wakes(), ["18:57"]);
+  w.store.setRuleEnabled(early.id, false, "test");
+  w.engine.syncSchedules(GUILD);
+  assert.deepEqual(wakes(), ["19:00"]);
+  w.store.deleteRule(four.id);
+  w.engine.syncSchedules(GUILD);
+  assert.deepEqual(wakes(), []);
+  clock.advanceTo(Date.parse("2026-10-22T20:00:00Z"));
+  await w.engine.idle();
+  assert.equal(w.runs.length, 0);
+});
+
+test("the SCHEDULE timer sleeps at most ten minutes at once", () => {
+  const now = { t: Date.parse("2026-10-22T10:00:00Z") };
+  const clock = clockTimers(now);
+  const w = world(now, [], { setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "SCHEDULE", schedule: "0 4 * * *", timezone: "UTC" } });
+  w.engine.syncSchedules(GUILD);
+  assert.deepEqual(clock.pending().map((t) => t.at - now.t), [10 * 60_000]);
+  w.engine.stopSchedules();
 });
 
 test("a debounced rule runs once on the whole batch, at the latest after five periods", async () => {

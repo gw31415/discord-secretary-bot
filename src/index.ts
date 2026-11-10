@@ -117,7 +117,7 @@ async function sendDm(userId: string, content: string): Promise<void> {
 // Custom slash commands follow the rules; changes close together register once.
 const commandSyncs = new Map<string, ReturnType<typeof setTimeout>>();
 function syncCommands(guildId: string): void {
-  // SCHEDULE rules' cron jobs follow the rules at once.
+  // SCHEDULE rules' timer follows the rules at once.
   try {
     engine.syncSchedules(guildId);
   } catch (e) {
@@ -288,7 +288,7 @@ client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
   } catch (e) {
     log(`${data.name}: BOT_READY のルールの振り分けに失敗`, e);
   }
-  // The SCHEDULE rules' cron jobs, and later() requests that came due while the bot was away.
+  // The SCHEDULE rules' timer, and later() requests that came due while the bot was away.
   try {
     engine.syncSchedules(data.id);
     engine.runTimers([data.id]);

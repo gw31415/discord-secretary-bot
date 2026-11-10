@@ -13,7 +13,8 @@ import { PlanRejected } from "../plan/validate.ts";
 import { jsProgram, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
 import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
-import { DEFAULT_TIMEZONE, isoNext, parseCron, startCron } from "./schedule.ts";
+import type { Cron } from "croner";
+import { DEFAULT_TIMEZONE, isoNext, parseCron } from "./schedule.ts";
 import { ACTOR_EVENTS, createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
@@ -33,7 +34,7 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // runs them without a dialog. Safety: the bot's own changes are ignored unless
 // the rule opts in, each rule is rate limited, repeated failures switch it off,
 // and anyone with Manage Server can stop every rule in the server at once.
-// SCHEDULE rules fire from a cron job each (syncSchedules); rules with a debounce wait for
+// SCHEDULE rules fire from one timer that sleeps until the next of their times (syncSchedules); rules with a debounce wait for
 // a quiet moment and run once on the batch of events. COMMAND rules run when
 // someone uses their slash command, as that person: their read scope, their
 // permissions (within the allow list) and their judge model, and the outcome
@@ -60,6 +61,8 @@ export const MAX_LATER_CHAIN = 10;
 const LATER_RETRY_MS = 60_000;
 /** The longest the timer for later() sleeps at once (timers further off are looked at again then). */
 const LATER_MAX_SLEEP_MS = 6 * 60 * 60 * 1000;
+/** The longest the SCHEDULE timer sleeps at once, so a jump of the wall clock is noticed within this. */
+const SCHEDULE_MAX_SLEEP_MS = 10 * 60 * 1000;
 /** A debounced rule runs at the latest this many debounce periods after the first event. */
 const MAX_WAIT_PERIODS = 5;
 
@@ -87,8 +90,6 @@ export interface RuleEngineDeps {
   threadMember?: (threadId: string, userId: string) => Promise<boolean>;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
-  /** Runs a cron schedule until stopped (croner; replaced in tests). */
-  startCron?: typeof startCron;
   /** The servers the bot serves now, whose later() requests may run. */
   guildIds?: () => Iterable<string>;
 }
@@ -323,33 +324,74 @@ export class RuleEngine {
     return counts;
   }
 
-  /** The cron job of each SCHEDULE rule that is on, by rule id. */
-  readonly #schedules = new Map<string, { guildId: string; version: number; job: { stop(): void } }>();
+  /** Each SCHEDULE rule that is on, by rule id, with its schedule and its next time (null: none left). */
+  readonly #schedules = new Map<string, { guildId: string; version: number; cron: Cron; next: number | null }>();
+  /** The one timer for the earliest of #schedules, and when it wakes. */
+  #scheduleSleep: { timer: unknown; at: number } | null = null;
 
   /**
-   * Starts and stops the cron jobs of a server's SCHEDULE rules to match the
-   * rules that are on now. Called when the server becomes ready and whenever
-   * its rules change; nothing checks the clock in between.
+   * Keeps a server's SCHEDULE rules in step with the rules that are on now.
+   * Called when the server becomes ready and whenever its rules change. One
+   * timer, for all rules, sleeps until the earliest next time; croner works the
+   * times out.
    */
   syncSchedules(guildId: string): void {
     const ready = !!this.deps.caches.get(guildId)?.guild;
     const wanted = new Map((ready ? this.deps.store.enabledRules(guildId, "SCHEDULE") : []).map((rule) => [rule.id, rule]));
     for (const [id, entry] of this.#schedules) {
       if (entry.guildId !== guildId || wanted.get(id)?.version === entry.version) continue;
-      entry.job.stop();
       this.#schedules.delete(id);
     }
+    const now = this.deps.now();
     for (const rule of wanted.values()) {
       if (this.#schedules.has(rule.id)) continue;
-      const timezone = rule.trigger.timezone ?? DEFAULT_TIMEZONE;
+      let cron: Cron;
       try {
-        parseCron(rule.trigger.schedule ?? "", timezone);
+        cron = parseCron(rule.trigger.schedule ?? "", rule.trigger.timezone ?? DEFAULT_TIMEZONE);
       } catch {
         continue; // Checked at approval; a schedule that no longer parses just never fires.
       }
-      const job = (this.deps.startCron ?? startCron)(rule.trigger.schedule!, timezone, () => this.#scheduled(rule.id, rule.version));
-      this.#schedules.set(rule.id, { guildId, version: rule.version, job });
+      this.#schedules.set(rule.id, { guildId, version: rule.version, cron, next: nextRunAfter(cron, now) });
     }
+    this.#armSchedules();
+  }
+
+  /** Sleeps until the earliest next time of the SCHEDULE rules, at most SCHEDULE_MAX_SLEEP_MS. */
+  #armSchedules(): void {
+    const { setTimer = defaultSetTimer, clearTimer = defaultClearTimer } = this.deps;
+    let next: number | null = null;
+    for (const entry of this.#schedules.values()) if (entry.next !== null && (next === null || entry.next < next)) next = entry.next;
+    const now = this.deps.now();
+    const at = next === null ? null : Math.min(Math.max(next, now), now + SCHEDULE_MAX_SLEEP_MS);
+    if (this.#scheduleSleep?.at === at) return;
+    if (this.#scheduleSleep) clearTimer(this.#scheduleSleep.timer);
+    this.#scheduleSleep = null;
+    if (at === null) return;
+    this.#scheduleSleep = {
+      at,
+      timer: setTimer(() => {
+        this.#scheduleSleep = null;
+        this.#runSchedules();
+      }, at - now),
+    };
+  }
+
+  /**
+   * Fires the SCHEDULE rules whose time has come, once each however many times
+   * passed meanwhile (as croner does), and counts their next time from now.
+   */
+  #runSchedules(): void {
+    const now = this.deps.now();
+    const due = [...this.#schedules].filter(([, entry]) => entry.next !== null && entry.next <= now);
+    for (const [id, entry] of due) {
+      entry.next = nextRunAfter(entry.cron, now);
+      try {
+        this.#scheduled(id, entry.version);
+      } catch (e) {
+        this.deps.log(`ルール ${id} の定時実行に失敗`, e);
+      }
+    }
+    this.#armSchedules();
   }
 
   /** A SCHEDULE rule's time came. */
@@ -359,11 +401,13 @@ export class RuleEngine {
     this.#fire(rule, "SCHEDULE", syntheticEvent("SCHEDULE", rule.guildId, rule.trigger, this.deps.now())!);
   }
 
-  /** Stops every cron job and the later() timer (shutdown and tests). */
+  /** Stops the SCHEDULE timer and the later() timer (shutdown and tests). */
   stopSchedules(): void {
-    for (const entry of this.#schedules.values()) entry.job.stop();
+    const clearTimer = this.deps.clearTimer ?? defaultClearTimer;
     this.#schedules.clear();
-    if (this.#sleep) (this.deps.clearTimer ?? defaultClearTimer)(this.#sleep.timer);
+    if (this.#scheduleSleep) clearTimer(this.#scheduleSleep.timer);
+    this.#scheduleSleep = null;
+    if (this.#sleep) clearTimer(this.#sleep.timer);
     this.#sleep = null;
   }
 
@@ -888,6 +932,11 @@ export function serialKey(rule: Pick<Rule, "id" | "trigger" | "program">, event:
   // Without a value to tell runs apart, the whole rule waits.
   if (value === undefined || value === null) return rule.id;
   return `${rule.id}\u0000${typeof value === "object" ? JSON.stringify(value) : String(value)}`;
+}
+
+/** The first time of the schedule after `now`, as croner works it out; null when none is left. */
+function nextRunAfter(cron: Cron, now: number): number | null {
+  return cron.nextRun(new Date(now))?.getTime() ?? null;
 }
 
 function defaultSetTimer(fn: () => void, ms: number): unknown {
