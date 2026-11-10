@@ -158,7 +158,7 @@ export class RuleAdmin {
     const rule = this.#rule(guildId, ruleId);
     const actor = { kind: "user" as const, userId, via: "panel" as const };
     if (enabled) {
-      if (rule.ownerId !== userId) throw new AdminDenied("ルールを有効にできるのは作成者だけです");
+      if (rule.ownerId !== userId) throw new AdminDenied("ルールを再開できるのは作成者だけです");
       const missing = missingPermissions(this.#viewer(guildId, userId).guild, this.#viewer(guildId, userId).member, rule.allow);
       if (missing.length > 0) throw new AdminDenied(`許す操作に必要な権限をあなたが持っていません: ${missing.join(", ")}`);
       const clash = this.#commandClash(guildId, userId, rule.trigger, rule.id);

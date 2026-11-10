@@ -16,7 +16,7 @@ const IN_SERVERS = { contexts: [InteractionContextType.Guild], integration_types
 export const COMMANDS: RESTPutAPIApplicationCommandsJSONBody = [
   {
     name: "settings",
-    description: "あなたの設定(APIキー・使うモデル・Webツール・読み取りの許可)とルール・コマンドの管理を開きます",
+    description: "キー・モデル・ルールなど、あなたの設定を開きます",
     type: ApplicationCommandType.ChatInput,
     ...IN_SERVERS,
   },
@@ -29,6 +29,12 @@ export function guildCommands(store: Store, guildId: string): RESTPutAPIApplicat
 
 /** Where /settings's id is kept, for messages that link to the command (</settings:id>). */
 export const SETTINGS_COMMAND_ID = "command_id:settings";
+
+/** /settings as a link that opens it, or as plain text until its id is known. */
+export function settingsLink(store: Pick<Store, "getMeta">): string {
+  const id = store.getMeta(SETTINGS_COMMAND_ID);
+  return id ? `</settings:${id}>` : "`/settings`";
+}
 
 /** /settings, the same in every server; rules are one of its sections. */
 export async function registerGlobalCommands(api: API, store: Store, applicationId: string): Promise<boolean> {

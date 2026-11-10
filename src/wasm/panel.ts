@@ -30,38 +30,38 @@ function parse(id: string): { action: WasmAction; arg: string } | null {
   return m && ACTIONS.has(m[1]!) ? { action: m[1] as WasmAction, arg: m[2]! } : null;
 }
 
-function view(texts: string[], rows: APIButtonComponent[][], select?: APIComponentInContainer): Rendered {
-  const components: APIComponentInContainer[] = panelTexts(texts);
-  if (select) components.push(select);
-  for (const r of rows) if (r.length) components.push(actionRow(r, 3));
+const MAX_TEXT = 3900;
+
+/** A screen's parts in order: texts share the message's text budget, rows of buttons hold up to three, components stand as they are. */
+function view(parts: Array<string | APIButtonComponent[] | APIComponentInContainer>): Rendered {
+  let room = MAX_TEXT;
+  const components: APIComponentInContainer[] = [];
+  for (const part of parts) {
+    if (Array.isArray(part)) {
+      if (part.length) components.push(actionRow(part, 3));
+    } else if (typeof part === "string") {
+      const [text] = panelTexts([part], room);
+      if (!text) continue;
+      room -= text.content.length;
+      components.push(text);
+    } else {
+      components.push(part);
+    }
+  }
   return v2Message(components, { ephemeral: true });
 }
 
-const HOW_TO = [
-  "WASI(preview 1)のコマンドとしてビルドした .wasm を登録できます(Rust の wasm32-wasip1、Go の GOOS=wasip1、C の wasi-sdk、Zig など)。",
-  "**登録のしかた**: Botにメンションして .wasm を添付し、何に使いたいかを相談すると、Botが登録してルールやコマンドの案を出します。下の「Wasmを登録」から登録だけしておくこともできます。",
-  "標準入力でイベントなどのJSONを受け取り、標準出力に `{ \"steps\": [...], \"reply\": \"…\", \"response\": { … }, \"state\": … }` を書きます。Discordの読み取りなどはホスト関数 `secretary.call` で呼びます。",
-  "登録しただけでは動きません。会話で「このWasmを /xxx コマンドにして」のように頼むと、ルールとして確認画面が出ます。実行はルールの作成者(コマンドでは実行した人)の権限の範囲だけです。",
-].join("\n");
-
-export function homeView(modules: WasmModule[], usage: (sha: string) => number, notice?: string, languages: string[] = []): Rendered {
+/** `busy` leaves out the button that adds a module, while one is being registered. */
+export function homeView(modules: WasmModule[], usage: (sha: string) => number, notice?: string, languages: string[] = [], busy = false): Rendered {
   const total = modules.reduce((n, m) => n + m.size, 0);
-  const texts = [
-    "## Wasm",
-    HOW_TO,
-    languages.length ? `**ソースから**: ${languages.join("・")} なら、Botにソースを渡す(書いてもらう)とコンパイルして登録できます。コンパイルは Bot とは別の、ネットワークのない箱の中で行います。` : "",
-    `-# 上限: 1個${MAX_MODULE_BYTES / 1024 / 1024}MB・一人${MAX_MODULES_PER_USER}個・合計${MAX_BYTES_PER_USER / 1024 / 1024}MB(いま ${modules.length}個・${sizeLabel(total)})。実行は1回30秒・メモリ${MAX_MEMORY_PAGES / 16}MiBまで。`,
-    modules.length ? "" : "まだ登録していません。",
-    notice ? `-# ${notice}` : "",
-  ];
   const select: APIComponentInContainer | undefined = modules.length
     ? {
         type: ComponentType.ActionRow,
         components: [{
           type: ComponentType.StringSelect,
           custom_id: wasmCustomId("open"),
-          placeholder: `モジュールを開く(${modules.length}個)`,
-          options: modules.slice(0, 25).map((m) => ({
+          placeholder: modules.length > SELECT_MAX ? `モジュールを開く(${modules.length}個中${SELECT_MAX}個)` : `モジュールを開く(${modules.length}個)`,
+          options: modules.slice(0, SELECT_MAX).map((m) => ({
             label: m.name.slice(0, 100),
             value: m.sha256,
             description: `${sizeLabel(m.size)} · ${m.sha256.slice(0, 12)} · ルール${usage(m.sha256)}件${m.info.producers[0] ? ` · ${m.info.producers[0]}` : ""}`.slice(0, 100),
@@ -69,33 +69,45 @@ export function homeView(modules: WasmModule[], usage: (sha: string) => number, 
         }],
       }
     : undefined;
-  return view(texts, [[button(wasmCustomId("upload"), "Wasmを登録", ButtonStyle.Primary), settingsHomeButton()]], select);
+  return view([
+    "## Wasm",
+    `Botに ${languages.length ? ".wasm かソースを" : ".wasm を"}渡すか、「Wasmを登録」で登録します`,
+    `-# 上限: 1個${MAX_MODULE_BYTES / 1024 / 1024}MB・一人${MAX_MODULES_PER_USER}個・合計${MAX_BYTES_PER_USER / 1024 / 1024}MB(いま ${modules.length}個・${sizeLabel(total)})。実行は1回30秒・メモリ${MAX_MEMORY_PAGES / 16}MiBまで。`,
+    modules.length ? "" : "まだ登録していません。",
+    ...(select ? [select] : []),
+    notice ? `-# ${notice}` : "",
+    busy ? [] : [button(wasmCustomId("upload"), "Wasmを登録", ButtonStyle.Primary)],
+    [settingsHomeButton()],
+  ]);
 }
 
+/** What a select holds at most. */
+const SELECT_MAX = 25;
+
+/** From the parts to the whole: the facts, the source, then under a divider the status line and the buttons. */
 export function detailView(module: WasmModule, latest: boolean, rules: Array<{ name: string; enabled: boolean; guildId: string; mine: boolean }>, confirmDelete = false, notice?: string): Rendered {
-  const texts = [
+  const parts: Array<string | APIButtonComponent[] | APIComponentInContainer> = [
     `## ${module.name}${latest ? "" : "(古い版)"}`,
     [
       `**sha256**: \`${module.sha256}\``,
       `**大きさ**: ${sizeLabel(module.size)} · **メモリ**: ${module.info.memory.min * 64}KiB から最大 ${module.info.memory.max / 16}MiB`,
       `**ビルド**: ${module.info.producers.join("、") || "記載なし"}`,
       ...(module.source ? [`**ソース**: ${module.source.language}・${module.source.files}ファイル(Botがコンパイル)`] : []),
-      `**import**: ${module.info.imports.map((i) => `\`${i}\``).join(" ").slice(0, 900) || "なし"}`,
+      `**インポート**: ${module.info.imports.map((i) => `\`${i}\``).join(" ").slice(0, 900) || "なし"}`,
       `**登録**: ${discordTime(module.createdAt, "f")}`,
     ].join("\n"),
     rules.length
-      ? `**使っているルール**\n${rules.map((r) => `${r.enabled ? "🟢" : "⏸️"} ${r.name}${r.mine ? "" : "(ほかの人のルール)"}`).join("\n")}`
+      ? `**使っているルール**\n${rules.map((r) => `${r.enabled ? "🟢 動作中" : "⏸️ 停止中"} · ${r.name}${r.mine ? "" : "(ほかの人のルール)"}`).join("\n")}`
       : "使っているルールはありません。",
-    confirmDelete ? "⚠️ 本当に削除しますか?" : "",
-    notice ? `-# ${notice}` : "",
   ];
-  const rows = confirmDelete
-    ? [[button(wasmCustomId("del2", module.sha256), "削除する", ButtonStyle.Danger), button(wasmCustomId("open", module.sha256), "やめる")]]
-    : [
-        [button(wasmCustomId("rename", module.sha256), "名前を変える"), button(wasmCustomId("del", module.sha256), "削除", ButtonStyle.Danger), button(wasmCustomId("home"), "← 一覧へ")],
-        module.source ? [button(wasmCustomId("src", module.sha256), "ソースを見る")] : [],
-      ];
-  return view(texts, rows);
+  if (confirmDelete) {
+    parts.push(`⚠️ 「${module.name}」を削除します`, notice ? `-# ${notice}` : "");
+    parts.push([button(wasmCustomId("del2", module.sha256), "削除する", ButtonStyle.Danger), button(wasmCustomId("open", module.sha256), "やめる")]);
+    return view(parts);
+  }
+  parts.push(module.source ? [button(wasmCustomId("src", module.sha256), "ソースを見る")] : [], { type: ComponentType.Separator }, notice ? `-# ${notice}` : "");
+  parts.push([button(wasmCustomId("rename", module.sha256), "名前を変える"), button(wasmCustomId("del", module.sha256), "削除", ButtonStyle.Danger)], [button(wasmCustomId("home"), "← 一覧へ")]);
+  return view(parts);
 }
 
 const MAX_SOURCE_SHOWN = 3400;
@@ -116,7 +128,7 @@ export function sourceView(module: WasmModule, source: WasmSource): Rendered {
     parts.push(`${head}\n\`\`\`\n${shown}\n\`\`\``);
     room -= head.length + shown.length + 10;
   }
-  return view([`## ${module.name} のソース(${source.language} ${source.version})`, ...parts], [[button(wasmCustomId("open", module.sha256), "← 戻る")]]);
+  return view([`## ${module.name} のソース(${source.language} ${source.version})`, ...parts, [button(wasmCustomId("open", module.sha256), `← ${module.name} へ`)]]);
 }
 
 function uploadModal(): APIModalInteractionResponseCallbackData {
@@ -175,9 +187,9 @@ export class WasmPanel {
     this.#deps = deps;
   }
 
-  #home(userId: string, notice?: string): Rendered {
+  #home(userId: string, notice?: string, busy = false): Rendered {
     const { registry } = this.#deps;
-    return homeView(registry.list(userId), (sha) => registry.rulesUsing(sha).length, notice, registry.compiler?.languages().map((l) => l.name) ?? []);
+    return homeView(registry.list(userId), (sha) => registry.rulesUsing(sha).length, notice, registry.compiler?.languages().map((l) => l.name) ?? [], busy);
   }
 
   #detail(userId: string, sha: string, extra: { confirmDelete?: boolean; notice?: string } = {}): Rendered {
@@ -231,18 +243,18 @@ export class WasmPanel {
             await update(this.#home(userId, `.wasm は${MAX_MODULE_BYTES / 1024 / 1024}MBまでです`));
             return true;
           }
-          // Downloading and checking can take longer than the 3 seconds an answer may wait.
-          await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+          // Downloading and checking can take longer than the 3 seconds an answer may wait, so the status line says it is working.
+          await update(this.#home(userId, "登録中…", true));
           const edit = (rendered: Rendered) => editV2(api, interaction, rendered);
           try {
             const res = await (this.#deps.fetch ?? fetch)(file.url);
-            if (!res.ok) throw new ModuleRejected(`ファイルを取得できませんでした(${res.status})`);
+            if (!res.ok) throw new ModuleRejected(`ファイルを取得できません(${res.status})`);
             const name = modalValue(interaction, "name")?.trim() || file.filename;
             const { module, replaced } = await registry.upload(userId, name, new Uint8Array(await res.arrayBuffer()));
             await edit(this.#detail(userId, module.sha256, { notice: `登録しました${replaced ? `(使われていない古い版${replaced}個を消しました)` : ""}。会話で「${module.name} を使って…」と頼むとルールにできます` }));
           } catch (e) {
             if (!(e instanceof ModuleRejected)) this.#deps.log("Wasmの登録に失敗", e);
-            await edit(this.#home(userId, `登録できませんでした: ${errorMessage(e)}`.slice(0, 900)));
+            await edit(this.#home(userId, (e instanceof ModuleRejected ? `登録できませんでした。${errorMessage(e)}` : "登録できませんでした。もう一度試してください。").slice(0, 900)));
           }
           return true;
         }

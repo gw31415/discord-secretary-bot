@@ -112,7 +112,7 @@ export type PanelPage = "home" | "keys" | "models" | "roles" | "lookup";
 const LOOKUP_TITLE = "ハーネス";
 
 function navButton(page: PanelPage, label: string, current: PanelPage): APIButtonComponent {
-  return button(CUSTOM_ID.page(page), label, page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, page === current);
+  return button(CUSTOM_ID.page(page), label, ButtonStyle.Secondary, page === current);
 }
 
 /** The settings panel: a home page with the general settings, and pages for keys and models reached by buttons. */
@@ -136,9 +136,9 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
     {
       type: ComponentType.ActionRow,
       components: [
-        button(ruleCustomId("home"), "ルール", ButtonStyle.Primary),
-        button(ruleCustomId("commands"), "コマンド", ButtonStyle.Primary),
-        button(WASM_HOME_ID, "Wasm", ButtonStyle.Primary),
+        button(ruleCustomId("home"), "ルール"),
+        button(ruleCustomId("commands"), "コマンド"),
+        button(WASM_HOME_ID, "Wasm"),
       ],
     },
     // From the per-use page, the モデル button above leads back to the models page.
@@ -147,28 +147,29 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
   return v2Message(body, { ephemeral: true });
 }
 
-function modelName(ref: { provider: ProviderId; model: string } | null): string | null {
-  return ref ? `${ref.model}(${PROVIDERS[ref.provider].label})` : null;
+/** A chosen model as the model's name and its provider; the id when the list has no name for it (OpenRouter). */
+function modelName(role: ModelRole, ref: { provider: ProviderId; model: string } | null): string | null {
+  return ref ? `${findModel(role, ref.provider, ref.model)?.name ?? ref.model}(${PROVIDERS[ref.provider].label})` : null;
 }
 
 function homePage(store: Store, userId: string): APIComponentInContainer[] {
   const keys = store.listKeys(userId).map((k) => KEY_PROVIDERS[k.provider]?.label ?? k.provider);
   const settings = store.getSettings(userId);
-  const language = modelName(settings.response);
+  const language = modelName("response", settings.response);
   const overrides = [
-    ...(settings.addressee ? [`宛先の判定 ${modelName(settings.addressee)}`] : []),
-    ...(settings.code ? [`コード ${modelName(settings.code)}`] : []),
-    ...(settings.reaction ? [`リアクション ${modelName(settings.reaction)}`] : []),
+    ...(settings.addressee ? [`宛先の判定 ${modelName("addressee", settings.addressee)}`] : []),
+    ...(settings.code ? [`コード ${modelName("code", settings.code)}`] : []),
+    ...(settings.reaction ? [`リアクション ${modelName("reaction", settings.reaction)}`] : []),
   ];
   return [
-    { type: ComponentType.TextDisplay, content: "## 設定\nこの画面はあなたにだけ見えています。" },
+    { type: ComponentType.TextDisplay, content: "## 設定" },
     { type: ComponentType.Separator },
     {
       type: ComponentType.TextDisplay,
       content: [
         `**APIキー**: ${keys.length > 0 ? keys.join("・") : "未登録"}`,
         `**言語モデル**: ${language ?? "未設定"}`,
-        `**判定モデル**: ${modelName(settings.judge) ?? (language ? "言語モデルと同じ" : "未設定")}`,
+        `**判定モデル**: ${modelName("judge", settings.judge) ?? (language ? "言語モデルと同じ" : "未設定")}`,
         ...(overrides.length > 0 ? [`**用途別のモデル**: ${overrides.join("、")}`] : []),
         `**Webツール**: ${WEB_TOOLS[settings.web].label}`,
         `**読み取りの範囲**: ${READ_SCOPES[settings.readScope].label}`,
@@ -195,8 +196,7 @@ function keysPage(store: Store, userId: string): APIComponentInContainer[] {
   const keys = new Map(store.listKeys(userId).map((k) => [k.provider, k.last4]));
   const keyLines = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p) => {
     const last4 = keys.get(p);
-    const note = p === "tavily" ? "(Webツール)" : "";
-    return `${KEY_PROVIDERS[p].label}${note}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
+    return `${KEY_PROVIDERS[p].label}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
   });
   const body: APIComponentInContainer[] = [
     { type: ComponentType.TextDisplay, content: "## APIキー\nキーは暗号化して保存します。表示するのは末尾4文字だけです。" },
@@ -232,7 +232,7 @@ function keysPage(store: Store, userId: string): APIComponentInContainer[] {
 
 function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## モデル\nBotがあなたのキーで使うモデルです。用途ごとに変えたいときは「用途別のモデル」で選びます。" },
+    { type: ComponentType.TextDisplay, content: "## モデル\nBotがあなたのキーで使うモデルです" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
@@ -247,7 +247,7 @@ function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
       : [{ type: ComponentType.TextDisplay, content: "-# 言語モデルに使えるモデルがありません。Claude API、GLM Coding Plan、OpenAI、OpenRouterのどれかのキーを登録してください。" } satisfies APIComponentInContainer]),
     {
       type: ComponentType.TextDisplay,
-      content: "**判定モデル**\n発言がBot宛てかどうか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めるときに使います。コードやルールの judge()・rank() もこのモデルが答えます。軽いモデルか、判定専用のJevやGPT-6 Lunaが向いています。",
+      content: "**判定モデル**\nBot宛てかの判定、返事を見せる相手、リアクション、judge()・rank() に使います。軽いモデルが向いています。",
     },
     ...roleSelects(store, userId, "judge", "判定モデル", "言語モデルと同じ"),
     { type: ComponentType.ActionRow, components: [navButton("roles", "用途別のモデル", "models")] },
@@ -274,7 +274,7 @@ function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
     ...roleSelects(store, userId, "code", "コードを書くモデル", "言語モデルと同じ"),
     {
       type: ComponentType.TextDisplay,
-      content: "**リアクション**\n文章で返すかリアクションだけで返すか、どの絵文字を付けるかを決めます。Botの発言にあなたが付けたリアクションへの応じ方も決めます。判定専用のモデルが向いています。",
+      content: "**リアクション**\n文で返すか絵文字だけで返すかを決めます",
     },
     ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", "判定モデルと同じ"),
   );
@@ -387,7 +387,7 @@ export function typedModelModal(role: ModelRole, current?: string): APIModalInte
 export function keyModal(provider: KeyProviderId): APIModalInteractionResponseCallbackData {
   return {
     custom_id: CUSTOM_ID.keyModal(provider),
-    title: `${KEY_PROVIDERS[provider].label}のAPIキー`,
+    title: `${KEY_PROVIDERS[provider].label} のキー`,
     components: [
       {
         type: ComponentType.ActionRow,
@@ -400,7 +400,6 @@ export function keyModal(provider: KeyProviderId): APIModalInteractionResponseCa
             required: true,
             min_length: 10,
             max_length: 512,
-            placeholder: "暗号化して保存し、表示は末尾4文字だけにします",
           },
         ],
       },

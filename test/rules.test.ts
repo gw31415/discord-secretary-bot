@@ -74,6 +74,7 @@ function world(now = { t: 1_000_000 }, threadMembers: string[] = [], deps: Parti
     makeReader: () => ({ get: async () => null }) as never,
     threadMember: async (threadId, userId) => threadMembers.includes(`${threadId}/${userId}`),
     notifyOwner: async (_u, content) => void notices.push(content),
+    guildName: () => "実験室",
     log: () => {},
     run: async (_code, bindings) => (seen.push(bindings), code()),
     ...deps,
@@ -200,6 +201,7 @@ test("runs are rate limited, and failures in a row switch the rule off and tell 
   assert.equal(stopped.enabled, false);
   assert.match(stopped.disabledReason!, /3回続けて失敗/);
   assert.match(w.notices[0]!, /boom/);
+  assert.equal(w.notices[0], `実験室 のルール「${rule.name}」が3回続けて失敗したので止めました。\n最後のエラー: TypeError: boom\n直したら \`/settings\` の「ルール」から再開できます。`);
 });
 
 test("the emergency stop halts every rule, and a departing owner's rules switch off", async () => {

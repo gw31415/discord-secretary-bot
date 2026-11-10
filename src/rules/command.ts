@@ -46,9 +46,9 @@ export type CommandVisibility = (typeof VISIBILITIES)[number];
 
 /** The choices on the confirmation dialog and the rules panel. */
 export const VISIBILITY_CHOICES = [
-  { value: "public", label: "返事を全員に見せる" },
-  { value: "private", label: "返事は実行した人だけに見せる" },
-  { value: "auto", label: "返事ごとにモデルが判定する" },
+  { value: "public", label: "全員に見せる" },
+  { value: "private", label: "実行した人だけに見せる" },
+  { value: "auto", label: "判定モデルが決める" },
 ] as const satisfies ReadonlyArray<{ value: CommandVisibility; label: string }>;
 
 /** The select for who sees a command's replies, starting on `current` ("auto" when unset). */

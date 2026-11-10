@@ -35,6 +35,7 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 import type { WasmRef } from "../plan/types.ts";
 import type { Rule, RuleDefinition, RuleProgram, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
 import { errorMessage } from "../errors.ts";
+import { endSentence } from "./wording.ts";
 import { editV2, replyEphemeral, selectedValues, updateV2, userIdOf } from "../discord/respond.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
@@ -121,7 +122,7 @@ export class RuleService {
     }
     // Events the bot makes itself need no sample: the dry run makes one like the real thing.
     const synthetic = syntheticEvent(event, guildId, draft.trigger, this.deps.now());
-    if (synthetic) return { event: synthetic, source: "いま発火したとしたときのイベント" };
+    if (synthetic) return { event: synthetic, source: "仮のイベント" };
     try {
       if ((event === "MESSAGE_CREATE" || event === "MESSAGE_UPDATE") && channelId) {
         const messages = (await reader.get(`/channels/${channelId}/messages`, { limit: 10 })) as APIMessage[];
@@ -130,7 +131,7 @@ export class RuleService {
       }
       if (event === "GUILD_MEMBER_ADD" || event === "GUILD_MEMBER_UPDATE") {
         const member = await reader.get(`/guilds/${guildId}/members/${ownerId}`);
-        if (member) return { event: { ...(member as object), guild_id: guildId }, source: "依頼者のメンバー情報" };
+        if (member) return { event: { ...(member as object), guild_id: guildId }, source: "あなたのメンバー情報" };
       }
     } catch {
       // Fall back to the sample below.
@@ -416,7 +417,7 @@ export class RuleService {
     const needed = permissionBits(rule.trigger.command.permissions);
     // Discord sends the member's permissions in this channel with the interaction.
     if (needed && !holdsPermissions(BigInt(member.permissions), needed)) {
-      await ephemeral(`このコマンドを使うには ${rule.trigger.command.permissions!.join(", ")} の権限が必要です`);
+      await ephemeral(`このコマンドを使うには${rule.trigger.command.permissions!.map((name) => `「${name}」`).join("")}の権限が必要です`);
       return true;
     }
     const spec = rule.trigger.command;
@@ -468,7 +469,7 @@ export class RuleService {
     const answer = new InteractionAnswer(this.deps.api, interaction, this.deps.log);
     const { fired, limited } = this.deps.engine.dispatchInteraction(guildId, interactionEvent(interaction), answer);
     if (fired === 0) {
-      await answer.note(limited ? "混み合っています。少し待ってからもう一度試してください" : "これに応えるルールは今はありません");
+      await answer.note(limited ? "混み合っています。少し待ってからもう一度押してください。" : "これに応えるルールは今はありません");
       return true;
     }
     answer.arm();
@@ -500,11 +501,11 @@ export class RuleService {
     });
   }
 
-  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean; page?: RulePage } = {}): Rendered {
+  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean; busy?: boolean; page?: RulePage } = {}): Rendered {
     const { admin } = this.deps;
     const rule = admin.get(guildId, userId, ruleId);
     return detailView(
-      { rule, userId, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), ...this.#wasmSource(rule), ...extra },
+      { rule, userId, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), halted: admin.halted(guildId) !== null, ...this.#wasmSource(rule), ...extra },
       cacheLabel(this.deps.caches.get(guildId)?.guild),
     );
   }
@@ -523,7 +524,7 @@ export class RuleService {
       .listRules(guildId)
       .filter((r) => r.trigger.command && triggerEvents(r.trigger).includes("COMMAND") && (r.ownerId === userId || (r.enabled && canRun(r))))
       .sort((a, b) => a.trigger.command!.name.localeCompare(b.trigger.command!.name));
-    return commandsView({ rules, userId, ids: guildCommandIds(this.deps.store, guildId), ...(notice ? { notice } : {}) });
+    return commandsView({ rules, userId, ids: guildCommandIds(this.deps.store, guildId), halted: this.deps.admin.halted(guildId) !== null, ...(notice ? { notice } : {}) });
   }
 
   /** Only the owner manages a command here; the rules panel covers the rest. */
@@ -595,7 +596,7 @@ export class RuleService {
         case "enable":
         case "disable": {
           const rule = this.deps.admin.setEnabled(guildId, userId, parsed.arg, parsed.action === "enable");
-          await update(this.#detail(guildId, userId, rule.id, { notice: rule.enabled ? "有効にしました" : "止めました" }));
+          await update(this.#detail(guildId, userId, rule.id, { notice: rule.enabled ? "再開しました" : "止めました" }));
           return true;
         }
         case "dry": {
@@ -604,10 +605,16 @@ export class RuleService {
             await ephemeral("ドライランは作成者だけが使えます");
             return true;
           }
-          await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
-          const channelId = interaction.channel?.id ?? "";
-          const dry = await this.dryRun(guildId, userId, channelId, rule, this.deps.engine.ownerReader(guildId, userId, channelId));
-          await edit(this.#detail(guildId, userId, rule.id, { dry }));
+          // The press answers at once: the status line says it is running and the buttons that act are left out.
+          await update(this.#detail(guildId, userId, rule.id, { busy: true, notice: "ドライラン中…" }));
+          try {
+            const channelId = interaction.channel?.id ?? "";
+            const dry = await this.dryRun(guildId, userId, channelId, rule, this.deps.engine.ownerReader(guildId, userId, channelId));
+            await edit(this.#detail(guildId, userId, rule.id, { dry }));
+          } catch (e) {
+            await edit(this.#detail(guildId, userId, rule.id));
+            throw e;
+          }
           return true;
         }
         case "delete":
@@ -628,7 +635,7 @@ export class RuleService {
           }
           this.deps.store.setRuleState(rule.id, null);
           this.deps.store.audit({ kind: "user", userId, via: "panel" }, "rule.clear_state", {}, undefined, rule.id);
-          await update(this.#detail(guildId, userId, rule.id, { page: "runs", notice: "状態を消しました。次の実行は state が null で始まります" }));
+          await update(this.#detail(guildId, userId, rule.id, { page: "runs", notice: "状態を消しました" }));
           return true;
         }
         case "delete2": {
@@ -697,11 +704,11 @@ function commandFailed(report: CommandReport): boolean {
 
 export function commandReplyText(ruleName: string, report: CommandReport): string {
   const status = commandFailed(report)
-    ? `⚠️ 実行できませんでした: ${(report.error ?? "不明なエラー").slice(0, 500)}`
+    ? `⚠️ 実行できませんでした。${endSentence((report.error ?? "不明なエラー").slice(0, 500))}`
     : report.reply || report.images.length
       ? null
       : report.outcome === "executed"
-        ? `「${ruleName}」を実行しました(${report.steps}件の変更)`
+        ? `「${ruleName}」を実行しました(操作${report.steps}件)`
         : "変更することはありませんでした";
   return [report.reply, status].filter((t): t is string => !!t).join("\n").slice(0, 2000);
 }

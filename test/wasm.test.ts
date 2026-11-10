@@ -565,3 +565,36 @@ test("get takes a query written into the route, and an explicit query wins", asy
     ["/channels/3/messages", { limit: 2 }],
   ]);
 });
+
+test("the Wasm section opens with one sentence and its limits, and each screen ends with the way back", async () => {
+  const { detailView, homeView, sourceView } = await import("../src/wasm/panel.ts");
+  const parts = (view: unknown): string[] => {
+    const c = (view as { components: Array<{ components: Array<{ type: number; content?: string; placeholder?: string; components?: Array<{ type: number; label?: string; placeholder?: string }> }> }> }).components[0]!;
+    return c.components.map((p) => (p.type === 10 ? p.content! : p.type === 14 ? "---" : p.components![0]!.type === 3 ? `[select: ${p.components![0]!.placeholder}]` : `[buttons: ${p.components!.map((b) => b.label).join(" | ")}]`));
+  };
+  const module = {
+    ownerId: "u1", sha256: "ab".repeat(32), name: "hello", size: 1234, createdAt: new Date(0).toISOString(),
+    info: { memory: { min: 1, max: 16 }, producers: ["rustc"], imports: ["wasi_snapshot_preview1.fd_write"] },
+    source: { language: "rust", files: 1 },
+  } as unknown as import("../src/db.ts").WasmModule;
+
+  const empty = parts(homeView([], () => 0));
+  assert.deepEqual([empty[0], empty[1]], ["## Wasm", "Botに .wasm を渡すか、「Wasmを登録」で登録します"]);
+  assert.match(empty[2]!, /^-# 上限: /);
+  assert.equal(empty[3], "まだ登録していません。");
+  assert.deepEqual(empty.slice(-2), ["[buttons: Wasmを登録]", "[buttons: ← 設定のトップへ]"]);
+  // The sentence names the source only where a compiler can take it.
+  assert.equal(parts(homeView([], () => 0, undefined, ["rust"]))[1], "Botに .wasm かソースを渡すか、「Wasmを登録」で登録します");
+  assert.ok(!parts(homeView([], () => 0, "登録中…", [], true)).some((p) => p.includes("Wasmを登録]")));
+  const many = Array.from({ length: 30 }, (_, i) => ({ ...module, sha256: `${i}`.padStart(64, "0"), name: `m${i}` }));
+  assert.ok(parts(homeView(many, () => 0)).includes("[select: モジュールを開く(30個中25個)]"));
+  assert.ok(parts(homeView(many.slice(0, 2), () => 0)).includes("[select: モジュールを開く(2個)]"));
+
+  const detail = parts(detailView(module, true, [{ name: "あいさつ", enabled: true, guildId: "g", mine: true }, { name: "停止", enabled: false, guildId: "g", mine: false }], false, "名前を変えました。この名前でルールに使えます"));
+  assert.match(detail[1]!, /\*\*インポート\*\*/);
+  assert.doesNotMatch(detail[1]!, /\*\*import\*\*/);
+  assert.equal(detail[2], "**使っているルール**\n🟢 動作中 · あいさつ\n⏸️ 停止中 · 停止(ほかの人のルール)");
+  assert.deepEqual(detail.slice(3), ["[buttons: ソースを見る]", "---", "-# 名前を変えました。この名前でルールに使えます", "[buttons: 名前を変える | 削除]", "[buttons: ← 一覧へ]"]);
+  assert.ok(parts(detailView(module, true, [], true)).includes("⚠️ 「hello」を削除します"));
+  assert.equal(parts(sourceView(module, { language: "rust", version: "1", files: [{ path: "src/main.rs", content: "fn main() {}" }] })).at(-1), "[buttons: ← hello へ]");
+});
