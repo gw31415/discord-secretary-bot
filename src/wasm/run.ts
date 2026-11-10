@@ -1,6 +1,6 @@
 import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";
 import { checkDecideInput, MAX_DECIDES_PER_RUN, MAX_QUESTIONS } from "../agent/decide.ts";
-import { MAX_IMAGES_PER_RUN, measureText, renderCanvas } from "../canvas.ts";
+import { MAX_IMAGES_PER_RUN } from "../canvas-prelude.ts";
 import type { SandboxBindings, SandboxLimits, SandboxResult } from "../sandbox.ts";
 import type { WorkerInput, WorkerMessage } from "./worker.ts";
 
@@ -340,14 +340,17 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits, engine 
       return items.map((item, i) => ({ item, score: answers[`item${i}`]!.score })).sort((a, b) => b.score - a.score);
     },
   };
+  // The native canvas library loads on the first drawing, not with the sandbox.
   const engineFns: typeof fns = {
     async canvas(r) {
       if (!bindings.attach) throw new Error("createCanvas・attachImage はここでは使えません");
       image("attachImage");
+      const { renderCanvas } = await import("../canvas.ts");
       return bindings.attach(renderCanvas(r.width, r.height, r.ops), name(r.name));
     },
     async measure(r) {
       if (!bindings.attach) throw new Error("measureText はここでは使えません");
+      const { measureText } = await import("../canvas.ts");
       return measureText(String(r.font ?? ""), String(r.text ?? ""));
     },
   };

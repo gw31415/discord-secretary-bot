@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { CANVAS_PRELUDE } from "./canvas.ts";
+import { CANVAS_PRELUDE } from "./canvas-prelude.ts";
 import { DECIDE_PRELUDE } from "./agent/decide.ts";
 import type { Decide } from "./agent/decide.ts";
 import { execute, hostCalls, runModule, warmUp, wasmInput } from "./wasm/run.ts";
