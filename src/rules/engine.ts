@@ -27,6 +27,7 @@ import type { InteractionResponder } from "./interaction.ts";
 import type { Program } from "../wasm/run.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 import { errorMessage } from "../errors.ts";
+import { settingsLink } from "../discord/commands.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
 // with its owner's read scope; the steps it returns go to the Planner, which
@@ -77,6 +78,8 @@ export interface RuleEngineDeps {
   onRulesChanged?: (guildId: string) => void;
   /** Tells the owner their rule switched itself off. Failures are ignored. */
   notifyOwner?: (userId: string, content: string) => Promise<void>;
+  /** A server's name, for the note that a rule switched itself off; left out when unknown. */
+  guildName?: (guildId: string) => string | undefined;
   log: (message: string, error?: unknown) => void;
   run?: typeof runModule;
   /** Compiled uploaded modules, for rules that run one instead of JS. */
@@ -645,7 +648,7 @@ export class RuleEngine {
     const shown = batch.filter((item) => this.#visible(rule, guild, item.eventName, item.event, actor));
     const members = await Promise.all(shown.map((item) => this.#inThread(guild, item.eventName, item.event, actor)));
     const visible = shown.filter((_, i) => members[i]);
-    if (visible.length === 0) return command ? { outcome: "skipped", error: "このチャンネルを見られる人として確認できないため、ここでは動きません", reply: null, images: [], steps: 0 } : null;
+    if (visible.length === 0) return command ? { outcome: "skipped", error: "このチャンネルでは使えません", reply: null, images: [], steps: 0 } : null;
     batch = visible;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
     // The owner must still hold everything the rule allows, as at approval, even when someone else ran its command.
@@ -744,11 +747,11 @@ export class RuleEngine {
   async runCommand(rule: Rule, event: Data, userId: string): Promise<CommandReport> {
     const skipped = (error: string): CommandReport => ({ outcome: "skipped", error, reply: null, images: [], steps: 0 });
     if (!rule.enabled) return skipped("このコマンドのルールは止まっています");
-    if (this.halted(rule.guildId)) return skipped("このサーバーの全ルールが止められています");
+    if (this.halted(rule.guildId)) return skipped("いまは全ルールが止まっています");
     const guild = this.deps.caches.get(rule.guildId)?.guild;
     const channelId = typeof event.channel_id === "string" ? event.channel_id : "";
-    if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event, userId)) return skipped("このチャンネルを見られる人として確認できないため、ここでは動きません");
-    if (this.#allowRun(rule) !== 0) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
+    if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event, userId)) return skipped("このチャンネルでは使えません");
+    if (this.#allowRun(rule) !== 0) return skipped("混み合っています。少し待ってからもう一度使ってください。");
     const actor = rule.trigger.runAs === "owner" ? rule.ownerId : userId;
     const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: actor, audience: "channel" });
     return new Promise((resolve) => {
@@ -780,9 +783,15 @@ export class RuleEngine {
     });
     if (count === null) return;
     this.deps.onRulesChanged?.(rule.guildId);
+    const guildName = this.deps.guildName?.(rule.guildId);
+    const lastError = (error ?? "").slice(0, 300);
     void this.deps.notifyOwner?.(
       rule.ownerId,
-      `ルール「${rule.name}」は${count}回続けて失敗したため止めました。最後のエラー: ${(error ?? "").slice(0, 300)}\n直したら \`/settings\` の「ルール」から有効にできます。`,
+      [
+        `${guildName ? `${guildName} の` : ""}ルール「${rule.name}」が${count}回続けて失敗したので止めました。`,
+        ...(lastError ? [`最後のエラー: ${lastError}`] : []),
+        `直したら ${settingsLink(this.deps.store)} の「ルール」から再開できます。`,
+      ].join("\n"),
     ).catch(() => undefined);
   }
 

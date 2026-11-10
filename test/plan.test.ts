@@ -1180,7 +1180,7 @@ test("a command's dialog starts on the judge's pick for who sees replies, and th
   assert.equal(plan.rules![0]!.trigger.command!.visibility, "auto");
   // The summary says who sees the replies; it is picked in 詳細.
   assert.equal(selectOf(t.replies.at(-1)!.body), undefined);
-  assert.match(dialogText(t.replies.at(-1)!.body), /判定用のモデルが決めます/);
+  assert.match(dialogText(t.replies.at(-1)!.body), /返事を見せる相手: 判定モデルが決める/);
   await t.planner.handleInteraction(click(plan, "details", "1"));
   assert.equal(chosen(t.replies.at(-1)!.body), "auto");
   score = 0.9;
