@@ -4,6 +4,7 @@ import { PermissionFlagsBits as P } from "discord-api-types/v10";
 import { FILE_ID_PATTERN, MAX_IMAGES_PER_REPLY } from "./types.ts";
 import type { Risk, StepDraft } from "./types.ts";
 import { truncate } from "../text.ts";
+import { fieldLabel, permissionList } from "../discord/labels.ts";
 
 // The permission table: every write the bot can make, with the Discord
 // permissions it needs, where they are evaluated, whether role hierarchy
@@ -72,7 +73,8 @@ export interface OpSpec {
   channels?: (p: Params, body: Body) => unknown[];
   /** Ids to label in the preview. */
   mentions?: (p: Params, body: Body) => Array<{ id: unknown; kind: "channel" | "role" | "user" }>;
-  describe: (p: Params, body: Body, before: Record<string, unknown> | null, label: (id: unknown) => string) => { target: string; change: string };
+  /** `guildId` makes links to the messages a step names. */
+  describe: (p: Params, body: Body, before: Record<string, unknown> | null, label: (id: unknown) => string, guildId: string) => { target: string; change: string };
   /**
    * Whether the inverse brings back everything. Defaults to "has an inverse".
    * A recreated channel lacks its messages, so deleting one is not undoable.
@@ -97,19 +99,30 @@ function short(text: unknown, max = 60): string {
   return truncate(String(text ?? "").replaceAll("\n", " "), max);
 }
 
-function show(key: string, value: unknown): string {
+/** A message a step names: a link to it when its ids are known, else its id as before. */
+export function messageRef(p: Params, l: (id: unknown) => string, guildId: string): string {
+  const ids = [guildId, p.channel, p.message];
+  return ids.every((id) => typeof id === "string" && /^\d+$/.test(id))
+    ? `${l(p.channel)} の[メッセージ](https://discord.com/channels/${ids.join("/")})`
+    : `${l(p.channel)} のメッセージ ${p.message}`;
+}
+
+/** A value as the preview shows it; `l` names the ids a field holds. */
+function show(key: string, value: unknown, l?: (id: unknown) => string): string {
   if (value === undefined) return "(なし)";
   if (value === null) return "(空)";
-  if (key === "permissions") return permissionNames(bits(value)).join(", ") || "(なし)";
+  if (key === "permissions") return permissionList(permissionNames(bits(value))) || "(なし)";
+  if ((key === "parent_id" || key === "channel_id") && l && typeof value === "string") return l(value);
+  if (key === "communication_disabled_until" && typeof value === "string" && !Number.isNaN(Date.parse(value))) return `<t:${Math.floor(Date.parse(value) / 1000)}:f>`;
   if (key === "permission_overwrites" && Array.isArray(value)) return `${value.length}件`;
   if (typeof value === "string") return `"${short(value, 40)}"`;
   return short(JSON.stringify(value), 40);
 }
 
-/** "key: before → after" for each changed field. */
-function diff(body: Body, before: Record<string, unknown> | null): string {
+/** "field: before → after" for each changed field. */
+function diff(body: Body, before: Record<string, unknown> | null, l?: (id: unknown) => string): string {
   return Object.entries(body ?? {})
-    .map(([key, value]) => `${key}: ${before ? show(key, before[key]) : "?"} → ${show(key, value)}`)
+    .map(([key, value]) => `${fieldLabel(key)}: ${before ? show(key, before[key], l) : "?"} → ${show(key, value, l)}`)
     .join(" / ");
 }
 
@@ -198,9 +211,9 @@ const ops: OpSpec[] = [
     always: P.ViewChannel | P.ReadMessageHistory | P.ManageMessages,
     target: (p) => `message:${p.channel}/${p.message}`,
     channels: (p) => [p.channel],
-    describe: (p, _b, before, l) => {
+    describe: (p, _b, before, l, g) => {
       const author = (before?.author as { username?: string } | undefined)?.username;
-      return { target: `${l(p.channel)} のメッセージ ${p.message}`, change: before ? `${author ?? "?"}「${short(before.content, 50)}」を削除` : "削除" };
+      return { target: messageRef(p, l, g), change: before ? `${author ?? "?"}「${short(before.content, 50)}」を削除` : "削除" };
     },
   },
   {
@@ -227,8 +240,8 @@ const ops: OpSpec[] = [
     target: (p) => `message:${p.channel}/${p.message}`,
     targetFields: (b) => Object.keys(b ?? {}),
     channels: (p) => [p.channel],
-    describe: (p, b, before, l) => ({
-      target: `${l(p.channel)} のメッセージ ${p.message}`,
+    describe: (p, b, before, l, g) => ({
+      target: messageRef(p, l, g),
       change: [
         b?.content !== undefined ? `${before ? `「${short(before.content, 40)}」→ ` : ""}${b.content === null ? "本文なし" : `「${short(b.content, 60)}」`}` : "",
         b?.components !== undefined ? ((b.components as unknown[]).length > 0 ? "ボタンなどを差し替え" : "ボタンなどを外す") : "",
@@ -252,7 +265,7 @@ const ops: OpSpec[] = [
     pathFormats: { emoji: EMOJI_FORMAT },
     target: (p) => `message:${p.channel}/${p.message}`,
     channels: (p) => [p.channel],
-    describe: (p, _b, before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}${before ? `「${short(before.content, 40)}」` : ""}`, change: `${p.emoji} を付ける` }),
+    describe: (p, _b, before, l, g) => ({ target: `${messageRef(p, l, g)}${before ? `「${short(before.content, 40)}」` : ""}`, change: `${p.emoji} を付ける` }),
     inverse: (p) => ({ op: `DELETE ${REACTION_PATH}/@me`, path: { channel: p.channel, message: p.message, emoji: p.emoji } }),
   },
   {
@@ -264,7 +277,7 @@ const ops: OpSpec[] = [
     pathFormats: { emoji: EMOJI_FORMAT },
     target: (p) => `message:${p.channel}/${p.message}`,
     channels: (p) => [p.channel],
-    describe: (p, _b, before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}${before ? `「${short(before.content, 40)}」` : ""}`, change: `Botの ${p.emoji} を外す` }),
+    describe: (p, _b, before, l, g) => ({ target: `${messageRef(p, l, g)}${before ? `「${short(before.content, 40)}」` : ""}`, change: `Botの ${p.emoji} を外す` }),
     inverse: (p) => ({ op: `PUT ${REACTION_PATH}/@me`, path: { channel: p.channel, message: p.message, emoji: p.emoji } }),
   },
   {
@@ -278,7 +291,7 @@ const ops: OpSpec[] = [
     target: (p) => `message:${p.channel}/${p.message}`,
     channels: (p) => [p.channel],
     mentions: (p) => [{ id: p.user, kind: "user" }],
-    describe: (p, _b, _before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}`, change: `${l(p.user)} の ${p.emoji} を外す` }),
+    describe: (p, _b, _before, l, g) => ({ target: messageRef(p, l, g), change: `${l(p.user)} の ${p.emoji} を外す` }),
   },
   {
     op: "PUT /channels/{channel}/messages/pins/{message}",
@@ -288,7 +301,7 @@ const ops: OpSpec[] = [
     always: P.ViewChannel | P.PinMessages,
     target: (p) => `message:${p.channel}/${p.message}`,
     channels: (p) => [p.channel],
-    describe: (p, _b, before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}`, change: before ? `「${short(before.content, 50)}」をピン留め` : "ピン留め" }),
+    describe: (p, _b, before, l, g) => ({ target: messageRef(p, l, g), change: before ? `「${short(before.content, 50)}」をピン留め` : "ピン留め" }),
     inverse: (p) => ({ op: "DELETE /channels/{channel}/messages/pins/{message}", path: { channel: p.channel, message: p.message } }),
   },
   {
@@ -299,7 +312,7 @@ const ops: OpSpec[] = [
     always: P.ViewChannel | P.PinMessages,
     target: (p) => `message:${p.channel}/${p.message}`,
     channels: (p) => [p.channel],
-    describe: (p, _b, _before, l) => ({ target: `${l(p.channel)} のメッセージ ${p.message}`, change: "ピン留めを外す" }),
+    describe: (p, _b, _before, l, g) => ({ target: messageRef(p, l, g), change: "ピン留めを外す" }),
     inverse: (p) => ({ op: "PUT /channels/{channel}/messages/pins/{message}", path: { channel: p.channel, message: p.message } }),
   },
   {
@@ -339,7 +352,7 @@ const ops: OpSpec[] = [
     target: (p) => `channel:${p.channel}`,
     targetFields: (b) => Object.keys(b ?? {}),
     channels: (p, b) => [p.channel, b?.parent_id],
-    describe: (p, b, before, l) => ({ target: l(p.channel), change: diff(b, before) }),
+    describe: (p, b, before, l) => ({ target: l(p.channel), change: diff(b, before, l) }),
     inverse: (p, b, snapshot) => {
       const restore = pick(snapshot, Object.keys(b ?? {}));
       return restore ? { op: "PATCH /channels/{channel}", path: { channel: p.channel }, body: restore } : null;
@@ -379,7 +392,7 @@ const ops: OpSpec[] = [
     channels: (p) => [p.channel],
     mentions: (p, b) => [{ id: p.overwrite, kind: b?.type === 0 ? "role" : "user" }],
     describe: (p, b, before, l) => {
-      const fmt = (v: unknown) => permissionNames(bits(v)).join(", ") || "なし";
+      const fmt = (v: unknown) => permissionList(permissionNames(bits(v))) || "なし";
       const was = before ? `許可 ${fmt(before.allow)} / 拒否 ${fmt(before.deny)}` : "(上書きなし)";
       return { target: `${l(p.channel)} の ${l(p.overwrite)}`, change: `${was} → 許可 ${fmt(b?.allow)} / 拒否 ${fmt(b?.deny)}` };
     },
@@ -430,7 +443,7 @@ const ops: OpSpec[] = [
     grants: (b) => bits(b?.permissions),
     body: Type.Object(ROLE_FIELDS, { additionalProperties: false }),
     describe: (_p, b) => ({
-      target: `@${b?.name ?? "new role"}`,
+      target: `@${b?.name ?? "(名前なし)"}`,
       change: b?.permissions !== undefined ? `作成(権限: ${show("permissions", b.permissions)})` : "作成",
     }),
     inverse: (_p, _b, _s, result) => (result?.id ? { op: "DELETE /guilds/{guild}/roles/{role}", path: { role: result.id } } : null),
@@ -447,7 +460,7 @@ const ops: OpSpec[] = [
     target: (p) => `role:${p.role}`,
     targetFields: (b) => Object.keys(b ?? {}),
     mentions: (p) => [{ id: p.role, kind: "role" }],
-    describe: (p, b, before, l) => ({ target: l(p.role), change: diff(b, before) }),
+    describe: (p, b, before, l) => ({ target: l(p.role), change: diff(b, before, l) }),
     inverse: (p, b, snapshot) => {
       const restore = pick(snapshot, Object.keys(b ?? {}));
       return restore ? { op: "PATCH /guilds/{guild}/roles/{role}", path: { role: p.role }, body: restore } : null;
@@ -520,7 +533,7 @@ const ops: OpSpec[] = [
     targetFields: (b) => Object.keys(b ?? {}).filter((k) => MEMBER_FIELDS.includes(k)),
     channels: (_p, b) => [b?.channel_id],
     mentions: (p) => [{ id: p.user, kind: "user" }],
-    describe: (p, b, before, l) => ({ target: l(p.user), change: diff(b, before) }),
+    describe: (p, b, before, l) => ({ target: l(p.user), change: diff(b, before, l) }),
     // The voice channel someone was in is not on the member object.
     undoable: (b) => !Object.hasOwn(b ?? {}, "channel_id"),
     inverse: (p, b, snapshot) => {

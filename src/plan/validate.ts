@@ -2,6 +2,7 @@ import { PermissionFlagsBits as P } from "discord-api-types/v10";
 import { Value } from "typebox/value";
 import { POST_OPS } from "./files.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
+import { permissionList, permissionQuoted } from "../discord/labels.ts";
 import { basePermissions, channelPermissions } from "../discord/permissions.ts";
 import { CATALOG, MAX_DMS_PER_PLAN, pathParamNames, permissionNames, resolveOp } from "./catalog.ts";
 import type { Body, OpSpec, Params } from "./catalog.ts";
@@ -178,9 +179,9 @@ export function permissionProblems(step: Step, ctx: CheckContext): string[] {
   for (const [who, member] of people) {
     const perms = channelId ? channelPermissions(guild, member, channelId) : basePermissions(guild, member);
     const missing = required & ~perms & ~(ownReply && member === actor ? P.ManageMessages : 0n);
-    if (missing) problems.push(`${where}: ${who}に権限 ${permissionNames(missing).join(", ")} がありません`);
+    if (missing) problems.push(`${where}: ${who}に${permissionQuoted(permissionNames(missing))}の権限がありません`);
     const ungrantable = grants & ~perms;
-    if (ungrantable) problems.push(`${where}: ${who}が持っていない権限は付与・設定できません(${permissionNames(ungrantable).join(", ")})`);
+    if (ungrantable) problems.push(`${where}: ${who}が持っていない権限は付与・設定できません(${permissionList(permissionNames(ungrantable))})`);
   }
 
   const roleParam = spec.hierarchy?.role;

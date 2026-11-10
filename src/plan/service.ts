@@ -12,12 +12,12 @@ import { toChannel, toMember, toRole } from "../discord/cache.ts";
 import { modalValue } from "../discord/modal.ts";
 import { canView, needsThreadMembership, shareableChannels } from "../discord/permissions.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
-import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
+import { DM_INTERVAL_MS, resolveOp, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
-import { codeFiles, confirmModal, FILES_CHOICE, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
+import { codeFiles, confirmModal, FILES_CHOICE, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, resourceName, reviseModal, stepNames } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
 import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
-import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
+import { attachmentsFor, dialogUploads, uploadsFor } from "./files.ts";
 import { mimeOf } from "../agent/attachments.ts";
 import { draftOf, isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
@@ -28,6 +28,9 @@ import type { RuleProposal } from "../rules/types.ts";
 import { type CheckContext, normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, stepProblems } from "./validate.ts";
 import { errorMessage } from "../errors.ts";
 import { replyEphemeral, selectedValues, userIdOf } from "../discord/respond.ts";
+import { discordErrorText, PLAN_STATUS_LABEL } from "../discord/labels.ts";
+import { SETTINGS_COMMAND_ID } from "../discord/commands.ts";
+import { sentence, truncate } from "../text.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
 // bot makes on someone's behalf goes through here.
@@ -167,6 +170,48 @@ function memberLabel(m: APIGuildMember): string {
 /** Thrown when the world changed between approval and execution. */
 class Aborted extends Error {}
 
+/** Why a plan that waited too long was closed; its dialog's 出し直す button is the way on. */
+const EXPIRED = "期限(5分)が切れました";
+
+/**
+ * A check's problem as people read it. Problems start with the step they are
+ * about ("s1(ロール付与): …", as the agent sees them); people see the step as
+ * `name` gives it instead.
+ */
+function renameStep(problem: string, steps: Array<{ id: string; op: string }>, name: (id: string, label: string) => string): string {
+  for (const { id, op } of steps) {
+    const spec = resolveOp(op)?.spec;
+    if (!spec) continue;
+    for (const shown of [spec.label, op]) {
+      const prefix = `${id}(${shown}): `;
+      if (problem.startsWith(prefix)) return `${name(id, spec.label)}: ${problem.slice(prefix.length)}`;
+    }
+  }
+  return problem;
+}
+
+/**
+ * How people are told which step a problem is about: by its line in the
+ * dialog ("2. ロール付与"); a rule's plan has no dialog, so by its operation.
+ */
+function stepNamer(plan: Plan): (id: string, label: string) => string {
+  if (plan.rule) return (_id, label) => label;
+  const names = stepNames(plan);
+  return (id, label) => names.get(id) ?? label;
+}
+
+/** Why a plan stopped when someone lost a permission it needs. */
+function lostPermissions(problems: string[]): string {
+  return `権限が足りなくなりました。${sentence(problems.join(" / "))}`;
+}
+
+/** Why a plan made from drafts was refused, each step named by its operation (the new plan has no numbered lines yet). */
+function draftProblems(e: unknown, drafts: StepDraft[]): string {
+  if (!(e instanceof PlanRejected)) return errorMessage(e);
+  const steps = drafts.map((d, i) => ({ id: d.id ?? `s${i + 1}`, op: d.op }));
+  return e.reasons.map((r) => renameStep(r, steps, (_id, label) => label)).join("\n");
+}
+
 /** The steps ran but a rule could not be registered (e.g. its owner lost a permission it needs). */
 class RuleNotRegistered extends Error {}
 
@@ -193,7 +238,15 @@ export class Planner {
 
   #render(plan: Plan, state: DialogState): ReturnType<typeof renderDialog> {
     const shown = this.#shown.get(plan.id);
-    return renderDialog(plan, { ...state, view: state.view ?? shown?.view, actions: state.actions ?? !shown?.closed });
+    const settingsCommandId = this.deps.store.getMeta(SETTINGS_COMMAND_ID);
+    return renderDialog(plan, { ...state, view: state.view ?? shown?.view, actions: state.actions ?? !shown?.closed, ...(settingsCommandId ? { settingsCommandId } : {}) });
+  }
+
+  /** Why a press on a plan no longer does anything: how long it waited, or where it is now. */
+  #closed(planId: string, expired: boolean): string {
+    const status = this.deps.store.getPlan(planId)?.status;
+    if (!status || (status === "pending_approval" && expired)) return EXPIRED;
+    return `この変更案はもう${PLAN_STATUS_LABEL[status]}です`;
   }
 
   get #rest() {
@@ -308,7 +361,7 @@ export class Planner {
     if (oldRow?.channelId && oldRow.messageId) {
       // Takes over the earlier dialog, so the channel keeps one message per request.
       this.deps.store.setPlanMessage(plan.id, oldRow.channelId, oldRow.messageId);
-      this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更 \`${plan.id}\` に置き換えました` });
+      this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更案 \`${plan.id}\` に置き換えました` });
       this.deps.store.audit(plan.actor, "plan.replace", { by: plan.id }, oldRow.plan.id);
       // The new version's images replace the old ones on the message.
       const uploads = await dialogUploads(plan);
@@ -533,7 +586,7 @@ export class Planner {
 
     const row = store.getPlan(parsed.planId);
     if (!row || row.plan.hash.slice(0, 8) !== parsed.hash8) {
-      await ephemeral("この変更は見つかりません");
+      await ephemeral("この変更案は見つかりません");
       return true;
     }
     const { plan } = row;
@@ -554,7 +607,7 @@ export class Planner {
       if (value === FILES_CHOICE) {
         // Redrawn first so the menu goes back to the section shown.
         await redraw(undefined);
-        await api.interactions.followUp(interaction.application_id, interaction.token, { content: `変更 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
+        await api.interactions.followUp(interaction.application_id, interaction.token, { content: `変更案 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
         return true;
       }
       await redraw(value === "code" || value === "details" ? value : "result");
@@ -562,7 +615,7 @@ export class Planner {
     }
     // Buttons on dialogs drawn before the menu.
     if (parsed.action === "json" || parsed.action === "files") {
-      await api.interactions.reply(interaction.id, interaction.token, { content: `変更 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
+      await api.interactions.reply(interaction.id, interaction.token, { content: `変更案 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
       return true;
     }
     if (parsed.action === "code" || parsed.action === "result" || parsed.action === "details") {
@@ -570,28 +623,35 @@ export class Planner {
       return true;
     }
     if (userId !== plan.actor.userId) {
-      await ephemeral("この変更を操作できるのは依頼した本人だけです");
+      await ephemeral("依頼した本人だけが押せます");
       return true;
     }
     const update = (state: DialogState) => api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, state));
     const expired = () => Date.parse(plan.expiresAt) <= this.deps.now();
     const followUp = (content: string) =>
       api.interactions.followUp(interaction.application_id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
-    const why = (e: unknown) => errorMessage(e).slice(0, 1800);
+    const closed = () => ephemeral(this.#closed(plan.id, expired()));
+    /** While a new plan is made from this one, the dialog says so and its buttons wait; on failure they come back. */
+    const busy = (text: string) => update({ status: row.status, steps: row.status === "pending_approval" ? undefined : store.getSteps(plan.id), reason: row.reason, busy: text });
+    const restored = () => this.#refresh(plan.id).catch((e) => this.deps.log(`変更 ${plan.id} の表示更新に失敗`, e));
 
     switch (parsed.action) {
       case "visibility": {
         const value = selectedValues(interaction)[0];
         const target = plan.rules?.find((r) => r.key === parsed.rule && r.trigger.command);
-        if (row.status !== "pending_approval" || expired() || !target || !VISIBILITIES.includes(value as CommandVisibility)) {
-          await ephemeral("この変更はもう変えられません");
+        if (row.status !== "pending_approval" || expired()) {
+          await closed();
+          return true;
+        }
+        if (!target || !VISIBILITIES.includes(value as CommandVisibility)) {
+          await ephemeral("この変更案はもう変えられません");
           return true;
         }
         const rules = plan.rules!.map((r) => (r === target ? { ...r, trigger: { ...r.trigger, command: { ...r.trigger.command!, visibility: value as CommandVisibility } } } : r));
         const { hash: _old, ...rest } = plan;
         const changed: Plan = { ...rest, rules, hash: planHash({ ...rest, rules }) };
         if (!store.replacePendingPlan(changed)) {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.visibility", { rule: target.key, visibility: value }, plan.id);
@@ -600,7 +660,7 @@ export class Planner {
       }
       case "cancel": {
         if (!store.transitionPlan(plan.id, ["pending_approval"], "cancelled", { reason: "依頼者が取り消しました" })) {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.cancel", {}, plan.id);
@@ -610,12 +670,12 @@ export class Planner {
       case "run":
       case "confirm": {
         if (row.status !== "pending_approval") {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         if (expired()) {
           await this.#expire(plan.id);
-          await update({ status: "cancelled", reason: "期限切れになりました(5分)。もう一度頼んでください。" });
+          await update({ status: "cancelled", reason: EXPIRED });
           return true;
         }
         if (parsed.action === "run" && needsTypedConfirm(plan)) {
@@ -630,7 +690,7 @@ export class Planner {
           }
         }
         if (!store.transitionPlan(plan.id, ["pending_approval"], "approved", { approvedBy: userId })) {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.approve", {}, plan.id);
@@ -640,7 +700,7 @@ export class Planner {
       }
       case "resume": {
         if (!store.transitionPlan(plan.id, ["failed"], "approved", { reason: null })) {
-          await ephemeral("この変更は再開できる状態ではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.resume", {}, plan.id);
@@ -650,31 +710,33 @@ export class Planner {
       }
       case "restore": {
         if (row.status !== "failed" || !row.channelId) {
-          await ephemeral("この変更は復元できる状態ではありません");
+          await closed();
           return true;
         }
-        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
         const { drafts, skipped } = this.restoreDrafts(row);
         if (drafts.length === 0) {
+          await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
           await followUp(`戻せる変更がありません。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
           return true;
         }
+        await busy("変更案を作っています…");
         try {
           const shareable = this.#shareable(plan, row.channelId);
           const restore = await this.propose({ guildId: plan.guildId, channelId: row.channelId, replyToId: row.messageId, actorId: plan.actor.userId, drafts, shareable });
           store.audit(plan.actor, "plan.restore", { restorePlan: restore.id, skipped }, plan.id);
-          const note = `復元の変更 \`${restore.id}\` を提案しました。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`;
+          const note = `復元の変更案 \`${restore.id}\` を出しました${skipped.length > 0 ? `。戻せないもの: ${skipped.join("、")}` : ""}`;
           store.transitionPlan(plan.id, ["failed"], "failed", { reason: `${row.reason ?? ""}\n${note}` });
           this.#shown.set(plan.id, { ...this.#shown.get(plan.id), closed: true });
           await this.#refresh(plan.id);
         } catch (e) {
-          await followUp(`復元の変更を作れませんでした:\n${why(e)}`);
+          await restored();
+          await followUp(`復元の変更案を作れませんでした。${sentence(truncate(draftProblems(e, drafts), 1800))}`);
         }
         return true;
       }
       case "revise": {
         if (row.status !== "pending_approval" || expired() || !this.deps.revise) {
-          await ephemeral("この変更はもう修正できません");
+          await ephemeral(this.#closed(plan.id, true));
           return true;
         }
         await api.interactions.createModal(interaction.id, interaction.token, reviseModal(plan));
@@ -683,26 +745,31 @@ export class Planner {
       case "revisetext": {
         const instruction = interaction.type === InteractionType.ModalSubmit ? modalValue(interaction, "instruction")?.trim() : undefined;
         if (row.status !== "pending_approval" || !instruction || !row.channelId || !row.messageId || !this.deps.revise) {
-          await ephemeral("この変更はもう修正できません");
+          await ephemeral(this.#closed(plan.id, true));
           return true;
         }
-        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        await busy("修正中…");
         store.audit(plan.actor, "plan.revise", { instruction: instruction.slice(0, 500) }, plan.id);
         // The agent answers in the channel; it replaces this dialog when it proposes the new version.
-        void this.deps.revise({ plan, channelId: row.channelId, messageId: row.messageId, instruction }).catch((e) => {
+        // Without a new version the plan still waits, so its status and buttons come back.
+        const unrevised = async () => {
+          if (store.getPlan(plan.id)?.status === "pending_approval") await restored();
+        };
+        void this.deps.revise({ plan, channelId: row.channelId, messageId: row.messageId, instruction }).then(unrevised, async (e) => {
           this.deps.log(`変更 ${plan.id} の修正に失敗`, e);
-          void followUp(`修正版を作れませんでした: ${why(e)}`).catch(() => undefined);
+          await unrevised();
+          await followUp(`修正版を作れませんでした。${sentence(truncate(errorMessage(e), 1800))}`).catch(() => undefined);
         });
         return true;
       }
       case "redo": {
         if ((row.status !== "cancelled" && row.status !== "aborted") || !row.channelId) {
-          await ephemeral("この変更は出し直せません");
+          await closed();
           return true;
         }
-        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        await busy("変更案を作っています…");
+        const drafts: StepDraft[] = plan.steps.map(draftOf);
         try {
-          const drafts: StepDraft[] = plan.steps.map(draftOf);
           await this.propose({
             guildId: plan.guildId, channelId: row.channelId, replyToId: null, actorId: plan.actor.userId, drafts,
             shareable: this.#shareable(plan, row.channelId), replaces: plan.id,
@@ -711,13 +778,14 @@ export class Planner {
             ...(plan.attachments ? { images: plan.attachments } : {}),
           });
         } catch (e) {
-          await followUp(`出し直せませんでした:\n${why(e)}`);
+          await restored();
+          await followUp(`出し直せませんでした。${sentence(truncate(draftProblems(e, drafts), 1800))}`);
         }
         return true;
       }
       case "keep": {
         if (row.status !== "failed") {
-          await ephemeral("この変更はもう終わっています");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.keep", {}, plan.id);
@@ -838,13 +906,15 @@ export class Planner {
     const selfId = this.deps.selfId();
     const actorId = plan.actor.userId;
     const ownReply = plan.rule?.ownReply;
-    const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId, selfId, ...(ownReply ? { ownReply } : {}) }));
+    // These go to people only, so each step is named as the dialog shows it.
+    const name = stepNamer(plan);
+    const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId, selfId, ...(ownReply ? { ownReply } : {}) }).map((p) => renameStep(p, [s], name)));
     const actor = state.members.get(actorId);
     if (plan.actor.via === "conversation" && actor) {
       // The dialog showed these channels because the actor could read them; one that is gone reveals nothing.
       for (const step of remaining) {
         for (const id of new Set(this.#namedChannels(step))) {
-          if (state.channels.has(id) && !canView(state, actor, id)) problems.push(`${step.id}(${specOf(step).label}): チャンネル ${id} を依頼者が見られなくなりました`);
+          if (state.channels.has(id) && !canView(state, actor, id)) problems.push(`${name(step.id, specOf(step).label)}: ${label(plan, id)} を依頼者が見られなくなりました`);
         }
       }
     }
@@ -878,14 +948,16 @@ export class Planner {
       // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
       ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], channels) : []),
     ];
-    if (problems.length > 0) throw new Error(problems.join(" / "));
+    if (problems.length > 0) {
+      throw new Error(problems.map((p) => renameStep(p, [step], stepNamer(plan))).join(" / "));
+    }
     if (key) this.deps.store.saveSnapshot(plan.id, step.id, key, before);
   }
 
   #reason(plan: Plan): string {
     return plan.rule
-      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更 ${plan.id})`
-      : `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
+      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更案 ${plan.id})`
+      : `${label(plan, plan.actor.userId)} の依頼(変更案 ${plan.id})`;
   }
 
   /** Several steps in the one request Discord has for them. */
@@ -968,7 +1040,7 @@ export class Planner {
       let stateAt = this.deps.now();
       if (!opts.fresh) await this.#checkPreconditions(plan, remaining, results);
       const problems = await this.#currentProblems(plan, state, remaining);
-      if (problems.length > 0) throw new Aborted(`権限が足りなくなりました: ${problems.join(" / ")}`);
+      if (problems.length > 0) throw new Aborted(lostPermissions(problems));
 
       const referenced = referencedSteps(plan.steps);
       let lastDm = 0;
@@ -979,7 +1051,7 @@ export class Planner {
           state = await this.#freshState(plan, remaining.slice(i));
           stateAt = this.deps.now();
           const lost = await this.#currentProblems(plan, state, remaining.slice(i));
-          if (lost.length > 0) throw new Error(`権限が足りなくなりました: ${lost.join(" / ")}`);
+          if (lost.length > 0) throw new Error(lostPermissions(lost));
         }
         const group = this.#nextGroup(remaining, i, results, referenced);
         i += group.length;
@@ -1037,10 +1109,13 @@ export class Planner {
         store.transitionPlan(plan.id, ["executing"], "aborted", { reason: message });
         store.audit(plan.actor, "plan.aborted", { reason: message }, plan.id);
       } else {
+        // The step keeps Discord's own words (the JSON and the audit log show them); the dialog says it in Japanese.
         for (const step of current) store.finishStep(plan.id, step.id, { state: "failed", error: message.slice(0, 500) });
+        const shown = sentence(truncate(discordErrorText(e), 300));
+        const name = stepNamer(plan);
         const reason = current.length > 0
-          ? `${current.map((step) => step.id).join("・")} で失敗: ${message.slice(0, 300)}`
-          : e instanceof RuleNotRegistered ? message.slice(0, 400) : `実行前の確認で失敗: ${message.slice(0, 300)}`;
+          ? `${[...new Set(current.map((step) => name(step.id, specOf(step).label)))].join("・")}ができませんでした。${shown}`
+          : e instanceof RuleNotRegistered ? message.slice(0, 400) : `実行前の確認ができませんでした。${shown}`;
         store.transitionPlan(plan.id, ["executing"], "failed", { reason });
         store.audit(plan.actor, "plan.failed", { step: current[0]?.id, error: message.slice(0, 500) }, plan.id);
         this.deps.log(`変更 ${plan.id} の実行に失敗`, e);
@@ -1067,7 +1142,7 @@ export class Planner {
         const ruleId = this.deps.rules!.register(plan.guildId, plan.actor.userId, resolved);
         store.setMeta(key, ruleId);
       } catch (e) {
-        throw new RuleNotRegistered(`ルール「${draft.name}」を登録できませんでした: ${errorMessage(e)}`);
+        throw new RuleNotRegistered(`ルール「${draft.name}」を登録できませんでした。${sentence(errorMessage(e))}`);
       }
     }
   }
@@ -1084,13 +1159,12 @@ export class Planner {
     for (const pre of plan.preconditions) {
       if (!needed.has(pre.resource) || touched.has(pre.resource)) continue;
       const now = fingerprint(await this.resource(plan.guildId, pre.resource), pre.fields);
-      if (now !== pre.fingerprint) throw new Aborted(`${pre.resource} の状態が提案のあとに変わりました`);
+      if (now !== pre.fingerprint) throw new Aborted(`${resourceName(plan, pre.resource)} が変更案を出したあとに変わりました`);
     }
   }
 
   async #expire(planId: string): Promise<boolean> {
-    const reason = "期限切れになりました(5分)。もう一度頼んでください。";
-    if (!this.deps.store.transitionPlan(planId, ["pending_approval"], "cancelled", { reason })) return false;
+    if (!this.deps.store.transitionPlan(planId, ["pending_approval"], "cancelled", { reason: EXPIRED })) return false;
     this.deps.store.audit({ kind: "system" }, "plan.expire", {}, planId);
     return true;
   }

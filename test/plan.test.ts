@@ -73,11 +73,11 @@ test("whoever ran a command may edit its public reply without managing messages,
   ], GUILD, "p");
   const ctx = { guild, actorId: "3", selfId: SELF, ownReply: { channelId: "10", messageId: "880" } };
   assert.deepEqual(permissionProblems(own!, ctx), []);
-  assert.match(permissionProblems(other!, ctx).join(), /依頼者に権限 ManageMessages/);
-  assert.match(permissionProblems(own!, { guild, actorId: "3", selfId: SELF }).join(), /依頼者に権限 ManageMessages/);
+  assert.match(permissionProblems(other!, ctx).join(), /依頼者に「メッセージの管理」の権限がありません/);
+  assert.match(permissionProblems(own!, { guild, actorId: "3", selfId: SELF }).join(), /依頼者に「メッセージの管理」の権限がありません/);
   // The bot still needs the permissions it always does.
   guild.roles.set(BOT_ROLE, { id: BOT_ROLE, permissions: P.ViewChannel, position: 2 });
-  assert.match(permissionProblems(own!, ctx).join(), /Botに権限/);
+  assert.match(permissionProblems(own!, ctx).join(), /Botに「メッセージの管理」の権限がありません/);
 });
 
 test("a field can raise the risk (role permissions are destructive)", () => {
@@ -89,20 +89,20 @@ test("both the actor and the bot need the permission, and hierarchy applies", ()
   const guild = makeGuild();
   const ctx = (actorId: string) => ({ guild, actorId, selfId: SELF });
   const [create] = normalizeSteps([{ op: "POST /guilds/{guild}/channels", body: { name: "x" } }], GUILD, "p");
-  assert.match(permissionProblems(create!, ctx("3")).join(), /依頼者に権限 ManageChannels/);
+  assert.match(permissionProblems(create!, ctx("3")).join(), /依頼者に「チャンネルの管理」の権限がありません/);
   assert.deepEqual(permissionProblems(create!, ctx("1")), []);
 
   // The moderator can delete messages; the bot without Administrator cannot.
   const [del] = normalizeSteps([{ op: "DELETE /channels/{channel}/messages/{message}", path: { channel: "10", message: "500" } }], GUILD, "p");
   assert.deepEqual(permissionProblems(del!, ctx("2")), []);
   guild.roles.set(BOT_ROLE, { id: BOT_ROLE, permissions: P.ViewChannel, position: 2 });
-  assert.match(permissionProblems(del!, ctx("2")).join(), /Botに権限 ManageMessages/);
+  assert.match(permissionProblems(del!, ctx("2")).join(), /Botに「メッセージの管理」の権限がありません/);
   guild.roles.set(BOT_ROLE, { id: BOT_ROLE, permissions: P.Administrator, position: 2 });
 
   // Handing out a permission the actor lacks is refused even with Manage Roles.
   guild.roles.set(MOD_ROLE, { id: MOD_ROLE, permissions: P.ManageRoles | P.ManageMessages, position: 1 });
   const [role] = normalizeSteps([{ op: "POST /guilds/{guild}/roles", body: { name: "god", permissions: String(P.Administrator) } }], GUILD, "p");
-  assert.match(permissionProblems(role!, ctx("2")).join(), /依頼者が持っていない権限.*Administrator/);
+  assert.match(permissionProblems(role!, ctx("2")).join(), /依頼者が持っていない権限は付与・設定できません\(管理者\)/);
 
   // The bot's role sits above the moderator's, so the moderator cannot grant it.
   const [grant] = normalizeSteps([{ op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: BOT_ROLE } }], GUILD, "p");
@@ -358,17 +358,18 @@ test("a few message deletions take one click; more ask for the count, since a me
 });
 
 test("a plan is aborted when its target changed after the proposal", async () => {
-  const { planner, store, calls, channels } = setup();
+  const { planner, store, calls, channels, replies } = setup();
   const plan = await planner.propose({
     guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
     drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { name: "chat" } }],
   });
-  assert.match(dialogText(renderDialog(plan, { status: "pending_approval" })), /name: "general" → "chat"/);
+  assert.match(dialogText(renderDialog(plan, { status: "pending_approval" })), /名前: "general" → "chat"/);
   channels["10"].name = "renamed";
   await planner.handleInteraction(click(plan, "run", "1"));
   await settle(() => store.getPlan(plan.id)!.status === "aborted");
   assert.equal(calls.length, 0);
-  assert.match(store.getPlan(plan.id)!.reason!, /channel:10 の状態が提案のあとに変わりました/);
+  assert.match(store.getPlan(plan.id)!.reason!, /^#general が変更案を出したあとに変わりました$/);
+  assert.match(dialogText(replies.at(-1)!.body), /\n⚠️ 中止しました。#general が変更案を出したあとに変わりました。$/);
 });
 
 test("permissions lost after approval abort the plan", async () => {
@@ -399,6 +400,11 @@ test("a failed step stops the plan; restore proposes the inverse of what was don
   await settle(() => store.getPlan(plan.id)!.status === "failed");
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "failed", "pending"]);
   assert.match(dialogText(replies.at(-1)!.body), /途中で失敗しました\(1\/3件完了\)/);
+  // Discord's words stay with the step; the dialog names the step by its line and says the error in Japanese.
+  assert.equal(store.getSteps(plan.id)[1]!.error, "Missing Permissions");
+  assert.equal(store.getPlan(plan.id)!.reason, "1. ロール付与ができませんでした。権限が足りません。");
+  assert.match(dialogText(replies.at(-1)!.body), /\n　→ 権限が足りません\n/);
+  assert.doesNotMatch(dialogText(replies.at(-1)!.body), /「復元」は/);
   assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["再開", "復元", "そのまま"]);
 
   const { drafts, skipped } = planner.restoreDrafts(store.getPlan(plan.id)!);
@@ -433,11 +439,11 @@ test("unanswered dialogs expire after five minutes", async () => {
   now.t += 2 * 60_000;
   await planner.sweep();
   assert.equal(store.getPlan(plan.id)!.status, "cancelled");
-  assert.match(dialogText(replies.at(-1)!.body), /期限切れ/);
+  assert.match(dialogText(replies.at(-1)!.body), /期限\(5分\)が切れました/);
   assert.deepEqual(dialogButtons(replies.at(-1)!.body), ["出し直す"]);
   // A late click does nothing.
   await planner.handleInteraction(click(plan, "run", "1"));
-  assert.match(replies.at(-1)!.body.content, /もう承認待ちではありません/);
+  assert.equal(replies.at(-1)!.body.content, "この変更案はもう取り消しです");
 });
 
 test("a restart marks interrupted plans failed so they can be resumed", async () => {
@@ -519,6 +525,10 @@ test("出し直す re-validates an expired plan and takes over the same dialog",
   now.t += 6 * 60_000;
   await planner.sweep();
   await planner.handleInteraction(click(plan, "redo", "1"));
+  // The pressed dialog says a new plan is being made, without buttons, until the new one takes over.
+  const busy = replies.find((r) => r.kind === "updateMessage")!;
+  assert.match(dialogText(busy.body), /\n変更案を作っています…$/);
+  assert.deepEqual(dialogButtons(busy.body), []);
   const edited = replies.at(-1)!;
   assert.equal(edited.kind, "editMessage");
   assert.match(dialogText(edited.body), /期限 <t:\d+:R>/);
@@ -549,6 +559,9 @@ test("修正 opens a modal and hands the instruction to the agent", async () => 
   } as unknown as APIInteraction);
   await settle(() => revisions.length === 1);
   assert.equal(revisions[0]!.instruction, "名前は news に");
+  const busy = replies.find((r) => r.kind === "updateMessage")!;
+  assert.match(dialogText(busy.body), /\n修正中…$/);
+  assert.deepEqual(dialogButtons(busy.body), []);
 
   // The revised proposal replaces the old one in the same message.
   const revised = await planner.propose({
@@ -632,7 +645,7 @@ test("a channel the dialog showed must still be one its actor can see when they 
   await planner.handleInteraction(click(plan, "run", "2"));
   await settle(() => store.getPlan(plan.id)!.status === "aborted");
   assert.equal(calls.length, 0);
-  assert.match(store.getPlan(plan.id)!.reason!, /チャンネル 11 を依頼者が見られなくなりました/);
+  assert.match(store.getPlan(plan.id)!.reason!, /^権限が足りなくなりました。1\. チャンネル作成: #staff を依頼者が見られなくなりました。$/);
 });
 
 const RULE = {
@@ -675,7 +688,7 @@ test("a rule's steps outside its allow list, or past its count, are rejected bef
   );
   // The owner's own permissions still apply.
   const manage = { ...RULE, allow: [{ op: "PATCH /channels/{channel}" }] };
-  await assert.rejects(planner.runForRule({ guildId: GUILD, actorId: "3", rule: manage, drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { topic: "x" } }] }), /依頼者に権限 ManageChannels/);
+  await assert.rejects(planner.runForRule({ guildId: GUILD, actorId: "3", rule: manage, drafts: [{ op: "PATCH /channels/{channel}", path: { channel: "10" }, body: { topic: "x" } }] }), /s1\(チャンネル変更\): 依頼者に「チャンネルの管理」の権限がありません/);
   assert.equal(calls.length, 0);
 });
 
@@ -783,6 +796,7 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.equal(t.store.listRules(GUILD).length, 0); // nothing is registered before the approval
 
   // One click: the lobby is made, then both rules are registered.
+  t.store.setMeta("command_id:settings", "99");
   await t.planner.handleInteraction(click(plan, "run", "1"));
   await settle(() => t.store.getPlan(plan.id)!.status === "succeeded");
   const lobby = t.store.getSteps(plan.id)[0]!.resultId!;
@@ -794,7 +808,7 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.equal(made.summary, "説明です。");
   assert.equal(made.sourcePrompt, "vcを動的に作成削除する仕組みを作りたい");
   assert.equal(rules.find((r) => r.name === "空き部屋を消す")!.trigger.includeBotOrigin, true);
-  assert.match(dialogText(t.replies.at(-1)!.body), /ルール2件を登録しました/);
+  assert.match(dialogText(t.replies.at(-1)!.body), /\n✅ 実行しました。ルール2件を登録しました。止めるときは <\/settings:99> の「ルール」から。$/);
 });
 
 test("the rules a plan registers are checked against the actor's permissions again at approval, before any step runs", async () => {
@@ -1068,7 +1082,7 @@ test("emojis and stickers are registered from an image made in the reply, edited
 
   // Editing shows the name it has now, and can be undone; deleting is destructive.
   const edit = await planner.propose({ ...base, drafts: [{ op: "PATCH /guilds/{guild}/emojis/{emoji}", path: { emoji: "700" }, body: { name: "new_cat" } }] });
-  assert.match(dialogText(replies.filter((r) => r.kind === "createMessage").at(-1)!.body), /:old_cat:.*name: "old_cat" → "new_cat"/);
+  assert.match(dialogText(replies.filter((r) => r.kind === "createMessage").at(-1)!.body), /:old_cat:.*名前: "old_cat" → "new_cat"/);
   assert.equal(edit.risk, "write");
   const del = await planner.propose({ ...base, drafts: [{ op: "DELETE /guilds/{guild}/stickers/{sticker}", path: { sticker: "800" } }] });
   assert.equal(del.risk, "destructive");
@@ -1135,10 +1149,10 @@ test("registering needs Create Expressions; changing or deleting needs Manage Ex
   const ctx = (actorId: string) => ({ guild, actorId, selfId: SELF });
   const [create] = normalizeSteps([{ op: "POST /guilds/{guild}/emojis", body: { name: "cat", image: "img1" } }], GUILD, "p");
   const [remove] = normalizeSteps([{ op: "DELETE /guilds/{guild}/emojis/{emoji}", path: { emoji: "700" } }], GUILD, "p");
-  assert.match(permissionProblems(create!, ctx("3")).join(), /依頼者に権限 CreateGuildExpressions/);
+  assert.match(permissionProblems(create!, ctx("3")).join(), /依頼者に「エクスプレッションを作成」の権限がありません/);
   guild.roles.set(MOD_ROLE, { id: MOD_ROLE, permissions: P.CreateGuildExpressions, position: 1 });
   assert.deepEqual(permissionProblems(create!, ctx("2")), []);
-  assert.match(permissionProblems(remove!, ctx("2")).join(), /依頼者に権限 ManageGuildExpressions/);
+  assert.match(permissionProblems(remove!, ctx("2")).join(), /依頼者に「エクスプレッションを管理」の権限がありません/);
   assert.deepEqual(permissionProblems(remove!, ctx("1")), []);
 });
 
@@ -1270,7 +1284,7 @@ test("bans with the same message deletion go in one bulk ban, and a user it coul
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`POST /guilds/${GUILD}/bulk-ban`]);
   assert.deepEqual(calls[0]!.options!.body, { user_ids: ["3", "2"], delete_message_seconds: 0 });
   assert.deepEqual(store.getSteps(plan.id).map((s) => s.state), ["done", "failed", "pending"]);
-  assert.match(store.getPlan(plan.id)!.reason!, /s2 で失敗: BANできませんでした/);
+  assert.match(store.getPlan(plan.id)!.reason!, /^1\. BANができませんでした。BANできませんでした。$/);
 });
 
 test("a step whose result a later step uses is never merged", () => {
@@ -1356,4 +1370,69 @@ test("lineDiff marks added and removed lines with a little context", async () =>
   assert.equal(lineDiff("a\nb", "a\nb"), "");
   assert.equal(lineDiff("1\n2\n3\n4\n5\n6\n7", "1\n2\n3\nX\n5\n6\n7", 1), "  3\n- 4\n+ X\n  5\n…");
   assert.equal(lineDiff("a", "a\nb"), "  a\n+ b");
+});
+
+/** The 修正 form sent with an instruction. */
+function reviseText(plan: Plan, value: string): APIInteraction {
+  return {
+    id: "i", token: "t", application_id: "app", type: InteractionType.ModalSubmit, member: { user: { id: "1" } },
+    data: {
+      custom_id: `plan:revisetext:${plan.id}:${plan.hash.slice(0, 8)}`,
+      components: [{ type: ComponentType.ActionRow, components: [{ type: ComponentType.TextInput, custom_id: "instruction", value }] }],
+    },
+  } as unknown as APIInteraction;
+}
+
+test("a revision that cannot be made brings the dialog's status and buttons back", async () => {
+  const { planner, replies } = setup();
+  (planner.deps as { revise?: unknown }).revise = async () => {
+    throw new Error("/settings の設定が済んでいません");
+  };
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [{ op: "POST /guilds/{guild}/channels", body: { name: "new" } }],
+  });
+  await planner.handleInteraction(reviseText(plan, "名前は news に"));
+  await settle(() => replies.some((r) => r.kind === "followUp"));
+  assert.deepEqual(replies.slice(-3).map((r) => r.kind), ["updateMessage", "editMessage", "followUp"]);
+  assert.deepEqual(dialogButtons(replies.at(-2)!.body), ["実行", "修正", "取り消し"]);
+  assert.equal(replies.at(-1)!.body.content, "修正版を作れませんでした。/settings の設定が済んでいません。");
+});
+
+test("a dialog names messages by link, fields and permissions in Japanese, and warns of what cannot be undone", async () => {
+  const { planner } = setup();
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [
+      { op: "DELETE /channels/{channel}/messages/{message}", path: { channel: "10", message: "500" } },
+      { op: "PATCH /guilds/{guild}/members/{user}", path: { user: "3" }, body: { communication_disabled_until: "2026-10-21T01:00:00.000Z" } },
+      { op: "POST /guilds/{guild}/roles", body: { permissions: String(P.ManageChannels | P.ManageRoles) } },
+      { op: "PUT /guilds/{guild}/bans/{user}", path: { user: "3" }, body: { delete_message_seconds: 3600 } },
+    ],
+  });
+  const text = dialogText(renderDialog(plan, { status: "pending_approval" }));
+  assert.match(text, new RegExp(`#general の\\[メッセージ\\]\\(https://discord\\.com/channels/${GUILD}/10/500\\)`));
+  assert.match(text, /タイムアウトの終了時刻: \(空\) → <t:1792544400:f>/);
+  assert.match(text, /@\(名前なし\) — 作成\(権限: チャンネルの管理・ロールの管理\)/);
+  assert.match(text, /\n⚠️ 戻せない操作を含みます\n-# 期限 <t:\d+:R> · `[0-9a-f]{12}`$/);
+});
+
+test("a Discord error is said by its code in the dialog, and the step keeps Discord's words", async () => {
+  const { planner, store, failures, replies } = setup();
+  const plan = await planner.propose({
+    guildId: GUILD, channelId: "10", replyToId: null, actorId: "1", shareable: new Set(["10"]),
+    drafts: [
+      { op: "POST /channels/{channel}/messages", path: { channel: "10" }, body: { content: "a" } },
+      { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { user: "3", role: MOD_ROLE } },
+    ],
+  });
+  failures.add(`/guilds/${GUILD}/members/3/roles/${MOD_ROLE}`);
+  (planner.deps.api.rest as { put: unknown }).put = async () => {
+    throw new DiscordAPIError({ code: 30005, message: "Maximum number of guild roles reached (250)" }, 30005, 400, "PUT", "/x", {});
+  };
+  await planner.handleInteraction(click(plan, "run", "1"));
+  await settle(() => store.getPlan(plan.id)!.status === "failed");
+  assert.equal(store.getPlan(plan.id)!.reason, "2. ロール付与ができませんでした。Discord の上限に達しました。");
+  assert.equal(store.getSteps(plan.id)[1]!.error, "Maximum number of guild roles reached (250)");
+  assert.match(dialogText(replies.at(-1)!.body), /\n⚠️ 途中で失敗しました\(1\/2件完了\)。2\. ロール付与ができませんでした。Discord の上限に達しました。$/);
 });
