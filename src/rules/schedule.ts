@@ -1,5 +1,6 @@
 import { Cron } from "croner";
 import { DateTime, Duration } from "luxon";
+import { errorMessage } from "../errors.ts";
 
 // Cron schedules for SCHEDULE rules and later(), read in a time zone with
 // croner. Only the usual five fields (minute hour day month weekday) and the @
@@ -14,7 +15,7 @@ export function parseCron(expression: string, timezone = DEFAULT_TIMEZONE): Cron
   try {
     return new Cron(text, { timezone, paused: true });
   } catch (e) {
-    throw new Error(`cron の「${text}」が読めません(${e instanceof Error ? e.message : String(e)})`);
+    throw new Error(`cron の「${text}」が読めません(${errorMessage(e)})`);
   }
 }
 
@@ -35,7 +36,7 @@ export function scheduleProblems(cron: string | undefined, tz: string | undefine
   try {
     if (!parseCron(cron, tz).nextRun()) problems.push(`きっかけの schedule: cron の「${cron}」に当てはまる日時がありません`);
   } catch (e) {
-    problems.push(`きっかけの schedule: ${e instanceof Error ? e.message : String(e)}`);
+    problems.push(`きっかけの schedule: ${errorMessage(e)}`);
   }
   return problems;
 }
