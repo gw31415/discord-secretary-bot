@@ -246,7 +246,7 @@ test("who may see, switch off and delete rules follows Discord permissions", () 
   assert.equal(w.store.getRule(own.id), undefined);
 
   // Owning a rule needs its permissions: a regular member cannot own one that kicks.
-  assert.throws(() => w.admin.save(GUILD, "3", { ...w.definition, allow: [{ op: "DELETE /guilds/{guild}/members/{user}" }] }), /KickMembers/);
+  assert.throws(() => w.admin.save(GUILD, "3", { ...w.definition, allow: [{ op: "DELETE /guilds/{guild}/members/{user}" }] }), /メンバーをキック/);
   // A new version replaces the definition and is counted.
   const v2 = w.admin.save(GUILD, "1", { ...w.definition, name: "挨拶2" }, ownerRule.id);
   assert.equal(v2.version, 2);
@@ -650,7 +650,7 @@ test("a run checks again that its owner holds what the rule allows, before the c
   assert.equal(w.runs.length, 0);
   const run = w.store.recentRuleRuns(rule.id, 1)[0]!;
   assert.equal(run.outcome, "rejected");
-  assert.match(run.error!, /ルールの作成者が持っていません: ManageMessages/);
+  assert.match(run.error!, /ルールの作成者が持っていません: メッセージの管理/);
   // It counts toward switching the rule off: the problem is the rule's own.
   assert.equal(w.store.getRule(rule.id)!.consecutiveFailures, 1);
 });

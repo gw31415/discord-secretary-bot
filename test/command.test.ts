@@ -144,7 +144,7 @@ test("a command needs its permissions, an enabled rule, and a name nobody else u
   const rule = w.admin.save(GUILD, "1", { ...w.definition, trigger: { event: "COMMAND", command: { ...SPEC, permissions: ["ManageChannels"] } } });
   await w.service.handleCustomCommand(interaction({ text: "x" }));
   assert.equal(w.runs.length, 0);
-  assert.match((w.calls.at(-1)![1] as { content: string }).content, /ManageChannels/);
+  assert.match((w.calls.at(-1)![1] as { content: string }).content, /このコマンドを使うには「チャンネルの管理」の権限が必要です/);
   await w.service.handleCustomCommand(interaction({ text: "x" }, P.ManageChannels));
   assert.equal(w.runs.length, 1);
   // Administrator counts as every permission, as in the command list.
@@ -552,7 +552,8 @@ test("the history and audit screens count their lines, name the operations, and 
   assert.equal(layout(plansView([], true))[0], "### 変更案の履歴(0件)");
   const audit = layout(auditView([{ at: new Date(1_000_000).toISOString(), actor: { kind: "user", userId: "1", via: "panel" }, action: "plan.approve", planId: "p1" } as never], false));
   assert.equal(audit[0], "### 監査ログ(1件)\n-# あなたの分だけです。全件は「監査ログを表示」の権限で見られます。");
-  assert.match(audit[1]!, /変更案 `p1`/);
+  assert.match(audit[1]!, /<@1> 実行 変更案 `p1`/);
+  assert.doesNotMatch(audit[1]!, /plan\.approve/);
   assert.equal(audit[2], "[buttons: ← 一覧へ]");
 });
 
@@ -572,6 +573,7 @@ test("a failed command reply says what happened, then why, and a successful one 
   const failed = { outcome: "failed", error: "実行中にエラーが起きました", reply: null, images: [], steps: 0 } as never;
   assert.equal(commandReplyText("x", failed), "⚠️ 実行できませんでした。実行中にエラーが起きました。");
   assert.equal(commandReplyText("x", { ...(failed as object), error: "混み合っています。少し待ってからもう一度使ってください。" } as never), "⚠️ 実行できませんでした。混み合っています。少し待ってからもう一度使ってください。");
+  assert.equal(commandReplyText("x", { ...(failed as object), error: "Missing Permissions" } as never), "⚠️ 実行できませんでした。権限が足りません。");
   assert.equal(commandReplyText("x", { outcome: "executed", error: null, reply: null, images: [], steps: 2 } as never), "「x」を実行しました(操作2件)");
 });
 

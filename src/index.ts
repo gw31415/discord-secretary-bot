@@ -20,6 +20,7 @@ import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
+import { replyEphemeral } from "./discord/respond.ts";
 import { chatModelFor, judgeModelFor } from "./llm/models.ts";
 import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
 import { RuleAdmin } from "./rules/admin.ts";
@@ -148,6 +149,7 @@ const engine = new RuleEngine({
   decide: (userId) => decideFor(store, userId),
   wasm,
   onRulesChanged: syncCommands,
+  guildName: (guildId) => caches.get(guildId)?.name ?? undefined,
   log,
 });
 const admin = new RuleAdmin({ store, caches, selfId: () => selfId, now: () => Date.now(), onChange: syncCommands });
@@ -300,6 +302,7 @@ client.on(GatewayDispatchEvents.GuildDelete, ({ data }) => {
 client.on(GatewayDispatchEvents.GuildUpdate, ({ data }) => {
   const cache = caches.get(data.id);
   cache?.setOwner(data.owner_id);
+  cache?.setName(data.name);
   for (const role of data.roles) cache?.upsertRole(role);
 });
 client.on(GatewayDispatchEvents.GuildRoleCreate, ({ data }) => caches.get(data.guild_id)?.upsertRole(data.role));
@@ -364,7 +367,11 @@ client.on(GatewayDispatchEvents.MessageUpdate, ({ data }) => {
 });
 
 client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
-  if (!caches.get(data.guild_id)) return;
+  if (!caches.get(data.guild_id)) {
+    // A served server whose GUILD_CREATE has not arrived yet: the bot is still starting.
+    if (served(data.guild_id)) await replyEphemeral(api, data, "起動中です。少し待ってから押してください。").catch(() => undefined);
+    return;
+  }
   try {
     if (await widenPrompts.handleInteraction(data)) return;
     if (await planner.handleInteraction(data)) return;
@@ -375,6 +382,8 @@ client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
     await handleInteraction(api, store, data);
   } catch (e) {
     log("インタラクションの処理に失敗", e);
+    // Discord refuses a second answer, so this reaches the presser only when nothing answered yet.
+    await replyEphemeral(api, data, "処理できませんでした。もう一度試してください。").catch(() => undefined);
   }
 });
 

@@ -12,6 +12,7 @@ import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { ACTOR_EVENTS, TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 import { truncate } from "../text.ts";
+import { auditActionLabel, permissionList, PLAN_STATUS_LABEL } from "../discord/labels.ts";
 import { NS } from "../discord/custom-id.ts";
 import { actionRow, button, discordTime, fence, panelTexts, settingsHomeButton, v2Message } from "../discord/ui.ts";
 import type { Rendered } from "../discord/ui.ts";
@@ -377,16 +378,6 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   return container(parts);
 }
 
-const STATUS_LABEL: Record<PlanRow["status"], string> = {
-  pending_approval: "実行待ち",
-  approved: "実行中",
-  executing: "実行中",
-  succeeded: "成功",
-  cancelled: "取り消し",
-  aborted: "中止",
-  failed: "失敗",
-};
-
 /** Up to three operation names of a plan, each once. */
 function opNames(plan: PlanRow["plan"]): string {
   return [...new Set(plan.steps.map((s) => CATALOG.get(s.op)?.label ?? s.op))].slice(0, 3).join("・");
@@ -395,7 +386,7 @@ function opNames(plan: PlanRow["plan"]): string {
 export function plansView(plans: Array<PlanRow & { updatedAt?: string }>, all: boolean): Rendered {
   const lines = plans.map(({ plan, status, reason }) => {
     const who = plan.rule ? `ルール「${plan.rule.name}」` : `<@${plan.actor.userId}>`;
-    return `${discordTime(plan.createdAt)} \`${plan.id}\` ${STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${opNames(plan)}${reason ? ` — ${truncate(reason.replaceAll("\n", " "), 80)}` : ""}`;
+    return `${discordTime(plan.createdAt)} \`${plan.id}\` ${PLAN_STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${opNames(plan)}${reason ? ` — ${truncate(reason.replaceAll("\n", " "), 80)}` : ""}`;
   });
   return container([
     `### 変更案の履歴(${plans.length}件)${all ? "" : "\n-# あなたの分だけです(ルールによるものを含む)"}`,
@@ -413,7 +404,7 @@ function actorText(entry: AuditEntry): string {
 export function auditView(entries: AuditEntry[], all: boolean): Rendered {
   const lines = entries.map((e) => {
     const ref = e.planId ? ` 変更案 \`${e.planId}\`` : e.ruleId ? ` ルール \`${e.ruleId}\`` : "";
-    return `${discordTime(e.at)} ${actorText(e)} \`${e.action}\`${ref}`;
+    return `${discordTime(e.at)} ${actorText(e)} ${auditActionLabel(e.action)}${ref}`;
   });
   return container([
     `### 監査ログ(${entries.length}件)${all ? "" : "\n-# あなたの分だけです。全件は「監査ログを表示」の権限で見られます。"}`,
@@ -447,7 +438,7 @@ export function commandsView(input: CommandsInput): Rendered {
     const c = r.trigger.command!;
     const status = r.enabled ? commandLink(c.name, input.ids) : `\`/${c.name}\` ⏸️ 停止中`;
     const owner = r.ownerId === input.userId ? "あなた" : `<@${r.ownerId}>`;
-    return `${status} ${c.description}\n-# 作成: ${owner}${c.permissions?.length ? ` · 必要な権限: ${c.permissions.join(", ")}` : ""}`;
+    return `${status} ${c.description}\n-# 作成: ${owner}${c.permissions?.length ? ` · 必要な権限: ${permissionList(c.permissions)}` : ""}`;
   });
   const parts: Array<string | APIComponentInContainer> = [
     "## コマンド",
@@ -489,7 +480,7 @@ export function commandView(input: CommandInput): Rendered {
   const options = (c.options ?? []).map((o) => `- \`${o.name}\`${o.required ? "(必須)" : ""}: ${o.description}`);
   const parts: Array<string | APIComponentInContainer> = [
     `## ${rule.enabled ? commandLink(c.name, input.ids) : `/${c.name}`}`,
-    [c.description, rule.enabled ? "" : "⏸️ 停止中(ルールを再開すると使えます)", c.permissions?.length ? `必要な権限: ${c.permissions.join(", ")}` : ""].filter(Boolean).join("\n"),
+    [c.description, rule.enabled ? "" : "⏸️ 停止中(ルールを再開すると使えます)", c.permissions?.length ? `必要な権限: ${permissionList(c.permissions)}` : ""].filter(Boolean).join("\n"),
     options.length ? `**オプション**\n${options.join("\n")}` : "",
     `関連ルール: 「${rule.name}」`,
   ];

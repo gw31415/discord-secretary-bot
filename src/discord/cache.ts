@@ -39,6 +39,8 @@ export function toMember(member: Pick<APIGuildMember, "roles"> & { user: { id: s
 export class GuildCache {
   guild: GuildState | null = null;
   readonly guildId: string;
+  /** The server's name, for messages sent outside it (a DM saying which server's rule stopped). */
+  name: string | null = null;
   /** Who is in which voice channel: user id -> channel id. */
   readonly voice = new Map<string, string>();
   /**
@@ -58,6 +60,7 @@ export class GuildCache {
 
   loadGuild(data: GatewayGuildCreateDispatchData): void {
     if (data.id !== this.guildId) return;
+    this.name = data.name;
     this.guild = {
       id: data.id,
       ownerId: data.owner_id,
@@ -79,6 +82,10 @@ export class GuildCache {
     if (channelId) this.voice.set(userId, channelId);
     else this.voice.delete(userId);
     return before;
+  }
+
+  setName(name: string): void {
+    this.name = name;
   }
 
   setOwner(ownerId: string): void {

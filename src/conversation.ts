@@ -8,7 +8,7 @@ import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
 import { resolveWebAccess } from "./agent/web.ts";
 import { Inbox, ReplyFailed } from "./agent/respond.ts";
-import { isTransient } from "./agent/retry.ts";
+import { CLIENT_ERROR, isTransient } from "./agent/retry.ts";
 import { ImageBox } from "./agent/attachments.ts";
 import type { ImageTools } from "./agent/attachments.ts";
 import type { Attachment } from "./plan/types.ts";
@@ -127,9 +127,6 @@ export type Decision =
 export function setupNotice(settingsCommandId?: string): string {
   return `このBotと話すには、サーバーで ${settingsCommand(settingsCommandId)} を実行して、APIキーと言語モデルを設定してください。`;
 }
-
-/** A provider's 4xx starts its message with the status (the same test as retry.ts's CLIENT_ERROR). */
-const CLIENT_ERROR = /^\s*(4\d\d)\b/;
 
 /** Why a reply could not be made: a 4xx is the key's or the model's, which /settings fixes; anything else in short. */
 export function replyFailure(reason: string, settingsCommandId?: string): string {

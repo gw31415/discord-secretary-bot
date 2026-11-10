@@ -15,7 +15,7 @@
 | メンションで会話 | 質問・検索・Web・画像・コード実行。変更が必要なら変更案を出し、本人が承認すると実行 |
 | 会話で「〜したら〜して」 | イベントルール(自動化)やギルドコマンドを作る。必要な変更と一緒に1回の承認で登録 |
 | `/settings` | APIキー、モデル(言語モデル・判定モデルと用途別のモデル)、Webツール、読み取りの範囲 |
-| `/settings` の「ルール」 | ルールの一覧・有効化・停止・削除・ドライラン・実行履歴・監査ログ・緊急停止 |
+| `/settings` の「ルール」 | ルールの一覧・停止・再開・削除・ドライラン・実行履歴・監査ログ・緊急停止 |
 | 会話に `.wasm` を添付 | 自分でビルドした Wasm モジュール(Go・Rust など)を一度だけ動かす、またはBotと相談しながら登録してルールやコマンドのコードとして使う。`/settings` の「Wasm」からも登録でき、一覧・名前変更・削除もそこで([docs/wasm.md](docs/wasm.md)) |
 | 会話で「C で書いて」 | C/C++・Rust・Go・MoonBit・Zig・Nim・Python(MicroPython)のソースを Bot が別サービスのコンパイラで Wasm にし、試したりルールにしたりする([docs/languages.md](docs/languages.md)) |
 
@@ -73,13 +73,13 @@ flowchart TB
 
 ### Planの状態
 
-承認されたあとも、実行直前に前提と権限を取り直して再検証します。ルールのPlanは登録時の承認で承認待ちを飛ばします。
+本人が「実行」を押したあとも、実行直前に前提と権限を取り直して再検証します。ルールのPlanは登録時の確認で実行待ちを飛ばします。
 
 ```mermaid
 stateDiagram-v2
   [*] --> pending_approval: 検証通過
-  [*] --> approved: ルール(登録時に承認済み)
-  pending_approval --> approved: 本人が承認
+  [*] --> approved: ルール(登録時に確認済み)
+  pending_approval --> approved: 本人が「実行」を押す
   pending_approval --> cancelled: 取り消し・期限切れ
   approved --> executing: 前提と権限を再検証
   approved --> aborted: 前提が変化

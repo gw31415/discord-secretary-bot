@@ -35,7 +35,8 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 import type { WasmRef } from "../plan/types.ts";
 import type { Rule, RuleDefinition, RuleProgram, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
 import { errorMessage } from "../errors.ts";
-import { endSentence } from "./wording.ts";
+import { sentence } from "../text.ts";
+import { discordErrorText, permissionQuoted } from "../discord/labels.ts";
 import { editV2, replyEphemeral, selectedValues, updateV2, userIdOf } from "../discord/respond.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
@@ -417,7 +418,7 @@ export class RuleService {
     const needed = permissionBits(rule.trigger.command.permissions);
     // Discord sends the member's permissions in this channel with the interaction.
     if (needed && !holdsPermissions(BigInt(member.permissions), needed)) {
-      await ephemeral(`このコマンドを使うには${rule.trigger.command.permissions!.map((name) => `「${name}」`).join("")}の権限が必要です`);
+      await ephemeral(`このコマンドを使うには${permissionQuoted(rule.trigger.command.permissions!)}の権限が必要です`);
       return true;
     }
     const spec = rule.trigger.command;
@@ -704,7 +705,7 @@ function commandFailed(report: CommandReport): boolean {
 
 export function commandReplyText(ruleName: string, report: CommandReport): string {
   const status = commandFailed(report)
-    ? `⚠️ 実行できませんでした。${endSentence((report.error ?? "不明なエラー").slice(0, 500))}`
+    ? `⚠️ 実行できませんでした。${sentence(discordErrorText(report.error ?? "不明なエラー").slice(0, 500))}`
     : report.reply || report.images.length
       ? null
       : report.outcome === "executed"

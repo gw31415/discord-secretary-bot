@@ -27,7 +27,8 @@ import type { InteractionResponder } from "./interaction.ts";
 import type { Program } from "../wasm/run.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 import { errorMessage } from "../errors.ts";
-import { settingsLink } from "../discord/commands.ts";
+import { SETTINGS_COMMAND_ID } from "../discord/commands.ts";
+import { settingsCommand } from "../discord/labels.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
 // with its owner's read scope; the steps it returns go to the Planner, which
@@ -790,7 +791,7 @@ export class RuleEngine {
       [
         `${guildName ? `${guildName} の` : ""}ルール「${rule.name}」が${count}回続けて失敗したので止めました。`,
         ...(lastError ? [`最後のエラー: ${lastError}`] : []),
-        `直したら ${settingsLink(this.deps.store)} の「ルール」から再開できます。`,
+        `直したら ${settingsCommand(this.deps.store.getMeta(SETTINGS_COMMAND_ID))} の「ルール」から再開できます。`,
       ].join("\n"),
     ).catch(() => undefined);
   }

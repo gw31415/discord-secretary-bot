@@ -2,7 +2,8 @@ import type { API } from "@discordjs/core";
 import { InteractionResponseType, InteractionType, MessageFlags, Routes } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import { errorMessage } from "../errors.ts";
-import { endSentence } from "./wording.ts";
+import { sentence } from "../text.ts";
+import { discordErrorText } from "../discord/labels.ts";
 import { BOT_NAMESPACES } from "../discord/custom-id.ts";
 
 // Presses of buttons and selects on the bot's messages, and forms sent from
@@ -120,7 +121,8 @@ export class InteractionAnswer implements InteractionResponder {
   }
 
   async failed(ruleName: string, reason?: string): Promise<void> {
-    const content = `⚠️ 実行できませんでした${reason ? `。${endSentence(reason)}` : ""}`.slice(0, 2000);
+    const why = reason ? sentence(discordErrorText(reason)) : "";
+    const content = `⚠️ 実行できませんでした${why ? `。${why}` : ""}`.slice(0, 2000);
     const error = await this.send({ type: InteractionResponseType.ChannelMessageWithSource, data: { content, flags: MessageFlags.Ephemeral } });
     if (error) this.#log(`ルール「${ruleName}」の失敗を伝えられませんでした: ${error}`);
   }

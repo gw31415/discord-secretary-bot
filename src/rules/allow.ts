@@ -7,6 +7,7 @@ import type { AllowEntry, Risk, Step } from "../plan/types.ts";
 import { MAX_STEPS } from "../plan/validate.ts";
 import { errorMessage } from "../errors.ts";
 import { truncate } from "../text.ts";
+import { permissionList } from "../discord/labels.ts";
 
 // The allow list a rule's owner approves: which operations the rule may make,
 // with JSON Schemas on path parameters and the body. Every step a rule
@@ -226,10 +227,10 @@ export function ownerAllowProblems(guild: GuildState, ownerId: string, selfId: s
   if (!owner) return [`${who}がサーバーのメンバーとして見つかりません`];
   const problems: string[] = [];
   const missing = missingPermissions(guild, owner, allow);
-  if (missing.length > 0) problems.push(`許す操作に必要な権限を${who}が持っていません: ${missing.join(", ")}`);
+  if (missing.length > 0) problems.push(`許す操作に必要な権限を${who}が持っていません: ${permissionList(missing)}`);
   const bot = guild.members.get(selfId);
   const botMissing = bot ? missingPermissions(guild, bot, allow) : ["(Botの情報がありません)"];
-  if (botMissing.length > 0) problems.push(`許す操作に必要な権限をBotが持っていません: ${botMissing.join(", ")}`);
+  if (botMissing.length > 0) problems.push(`許す操作に必要な権限をBotが持っていません: ${permissionList(botMissing)}`);
   return problems;
 }
 

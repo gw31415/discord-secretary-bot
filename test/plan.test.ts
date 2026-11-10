@@ -827,7 +827,7 @@ test("the rules a plan registers are checked against the actor's permissions aga
   await settle(() => t.store.getPlan(plan.id)!.status === "aborted");
   assert.equal(t.calls.length, 0);
   assert.equal(t.store.listRules(GUILD).length, 0);
-  assert.match(t.store.getPlan(plan.id)!.reason!, /ルール「空き部屋を消す」: 許す操作に必要な権限をあなたが持っていません: ManageChannels/);
+  assert.match(t.store.getPlan(plan.id)!.reason!, /ルール「空き部屋を消す」: 許す操作に必要な権限をあなたが持っていません: チャンネルの管理/);
 });
 
 test("a command's plan needs its rule's owner to still hold what the rule allows, even when someone else ran it", async () => {
@@ -841,7 +841,7 @@ test("a command's plan needs its rule's owner to still hold what the rule allows
   members["2"].roles = [];
   const done = await run();
   assert.equal(done.status, "aborted");
-  assert.match(done.reason!, /ルールの作成者が持っていません: ManageChannels/);
+  assert.match(done.reason!, /ルールの作成者が持っていません: チャンネルの管理/);
   assert.equal(calls.length, 1);
   assert.equal(store.getPlan(done.plan.id)!.plan.rule!.ownerId, "2");
 });
@@ -855,7 +855,7 @@ test("rules are checked at proposal: refs must point to the plan's steps, and a 
     (e: unknown) => e instanceof PlanRejected && /指していません/.test(e.reasons.join()),
   );
   // A regular member cannot own a rule that deletes channels.
-  await assert.rejects(t.planner.propose({ ...base, actorId: "3", drafts: [], rules: [CLEANUP_RULE] }), /ManageChannels/);
+  await assert.rejects(t.planner.propose({ ...base, actorId: "3", drafts: [], rules: [CLEANUP_RULE] }), /チャンネルの管理/);
   // Without a real event or a sample, the agent is asked for one.
   const { sampleEvent: _, ...unsampled } = CLEANUP_RULE;
   await assert.rejects(t.planner.propose({ ...base, drafts: [], rules: [unsampled] }), /sample_event/);
