@@ -3,6 +3,7 @@ import { checkDecideInput, MAX_DECIDES_PER_RUN, MAX_QUESTIONS } from "../agent/d
 import { MAX_IMAGES_PER_RUN, measureText, renderCanvas } from "../canvas.ts";
 import type { SandboxBindings, SandboxLimits, SandboxResult } from "../sandbox.ts";
 import type { WorkerInput, WorkerMessage } from "./worker.ts";
+import { errorMessage } from "../errors.ts";
 
 // The one sandbox every piece of code runs in: a Wasm module in its own worker
 // thread, killed when its time is up, with a 64 MiB memory cap written into
@@ -219,7 +220,7 @@ export async function runModule(program: Program, bindings: WasmBindings, limits
   try {
     run = await execute(program.module, stdin, hostCalls(bindings, limits, program.engine), limits.wallTimeMs);
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e), logs: [] };
+    return { ok: false, error: errorMessage(e), logs: [] };
   }
   const { logs } = run;
   // A failed run's last line on stderr is its error.
@@ -249,7 +250,7 @@ export async function runModule(program: Program, bindings: WasmBindings, limits
     try {
       for (const when of o.later as unknown[]) bindings.later(typeof when === "string" ? when : Number(when));
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
+      return { ok: false, error: errorMessage(e), logs };
     }
   }
   return {
@@ -348,7 +349,7 @@ export function hostCalls(bindings: WasmBindings, limits: SandboxLimits, engine 
       if (!fn) throw new Error(`fn は ${Object.keys(own).join("・")} のどれかです`);
       return JSON.stringify({ value: (await fn(r)) ?? null });
     } catch (e) {
-      return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+      return JSON.stringify({ error: errorMessage(e) });
     }
   };
   // The module it runs reads what run_wasm's would and has the time left.

@@ -5,6 +5,7 @@ import { DECIDE_PRELUDE } from "./agent/decide.ts";
 import type { Decide } from "./agent/decide.ts";
 import { execute, hostCalls, runModule, warmUp, wasmInput } from "./wasm/run.ts";
 import type { Program } from "./wasm/run.ts";
+import { errorMessage } from "./errors.ts";
 
 // Read-only code execution. JavaScript is one more Wasm module: QuickJS built
 // for WASI (wasm/js-runner), run in the same sandbox and with the same ABI as
@@ -242,7 +243,7 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     if (run.exitCode !== 0) return { ok: false, error: logs.at(-1) ?? `JSの実行が止まりました(${run.exitCode})`, logs: logs.slice(0, -1) };
     output = run.stdout.toString("utf8");
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
+    return { ok: false, error: errorMessage(e), logs };
   }
   try {
     return { ok: true, value: (JSON.parse(output) as { value?: unknown }).value, logs };

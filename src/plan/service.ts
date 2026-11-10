@@ -25,6 +25,7 @@ import { allowProblems, allowRisk, needsChannel, needsTarget, ownerAllowProblems
 import type { Targets } from "../rules/allow.ts";
 import type { RuleProposal } from "../rules/types.ts";
 import { type CheckContext, normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, stepProblems } from "./validate.ts";
+import { errorMessage } from "../errors.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
 // bot makes on someone's behalf goes through here.
@@ -581,7 +582,7 @@ export class Planner {
     const expired = () => Date.parse(plan.expiresAt) <= this.deps.now();
     const followUp = (content: string) =>
       api.interactions.followUp(interaction.application_id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
-    const why = (e: unknown) => (e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e)).slice(0, 1800);
+    const why = (e: unknown) => errorMessage(e).slice(0, 1800);
 
     switch (parsed.action) {
       case "visibility": {
@@ -1037,7 +1038,7 @@ export class Planner {
         store.transitionPlan(plan.id, ["executing"], "succeeded", { reason: null });
         store.audit(plan.actor, "plan.succeeded", { steps: plan.steps.length }, plan.id);
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = errorMessage(e);
         if (e instanceof Aborted) {
           store.transitionPlan(plan.id, ["executing"], "aborted", { reason: message });
           store.audit(plan.actor, "plan.aborted", { reason: message }, plan.id);
@@ -1073,7 +1074,7 @@ export class Planner {
         const ruleId = this.deps.rules!.register(plan.guildId, plan.actor.userId, resolved);
         store.setMeta(key, ruleId);
       } catch (e) {
-        throw new RuleNotRegistered(`ルール「${draft.name}」を登録できませんでした: ${e instanceof Error ? e.message : String(e)}`);
+        throw new RuleNotRegistered(`ルール「${draft.name}」を登録できませんでした: ${errorMessage(e)}`);
       }
     }
   }

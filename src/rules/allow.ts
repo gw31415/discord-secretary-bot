@@ -5,6 +5,7 @@ import { CATALOG, pathParamNames, permissionNames } from "../plan/catalog.ts";
 import { isRef, maxRisk } from "../plan/types.ts";
 import type { AllowEntry, Risk, Step } from "../plan/types.ts";
 import { MAX_STEPS } from "../plan/validate.ts";
+import { errorMessage } from "../errors.ts";
 
 // The allow list a rule's owner approves: which operations the rule may make,
 // with JSON Schemas on path parameters and the body. Every step a rule
@@ -20,7 +21,7 @@ function schemaProblem(schema: unknown, where: string): string | null {
     Value.Check(schema as never, null);
     return null;
   } catch (e) {
-    return `${where}: JSON Schemaとして読めません(${e instanceof Error ? e.message : String(e)})`;
+    return `${where}: JSON Schemaとして読めません(${errorMessage(e)})`;
   }
 }
 

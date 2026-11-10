@@ -34,6 +34,7 @@ import { ModuleRejected, sizeLabel, wasmRef } from "../wasm/registry.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 import type { WasmRef } from "../plan/types.ts";
 import type { Rule, RuleDefinition, RuleProgram, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
+import { errorMessage } from "../errors.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
@@ -213,7 +214,7 @@ export class RuleService {
           const found = this.deps.wasm.resolve(input.ownerId, this.deps.caches.get(input.guildId)?.guild, proposed.program.module);
           wasm = wasmRef(found, this.deps.wasm.source(found.sha256));
         } catch (e) {
-          own.push(e instanceof Error ? e.message : String(e));
+          own.push(errorMessage(e));
         }
       } else if (!code?.trim()) own.push("code(または wasm)がありません");
       const program: RuleProgram = code !== null ? { kind: "js", code } : { kind: "wasm", sha256: wasm?.sha256 ?? "" };

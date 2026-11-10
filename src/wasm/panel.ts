@@ -8,6 +8,7 @@ import type { Rendered } from "../rules/panel.ts";
 import { MAX_MEMORY_PAGES, MAX_MODULE_BYTES } from "./module.ts";
 import { MAX_BYTES_PER_USER, MAX_MODULES_PER_USER, ModuleRejected, sizeLabel } from "./registry.ts";
 import type { WasmRegistry } from "./registry.ts";
+import { errorMessage } from "../errors.ts";
 
 // The "Wasm" section of /settings: the presser's own modules. A module is
 // usually added in conversation (attached, or compiled from source, and
@@ -243,7 +244,7 @@ export class WasmPanel {
             await edit(this.#detail(userId, module.sha256, { notice: `登録しました${replaced ? `(使われていない古い版${replaced}個を消しました)` : ""}。会話で「${module.name} を使って…」と頼むとルールにできます` }));
           } catch (e) {
             if (!(e instanceof ModuleRejected)) this.#deps.log("Wasmの登録に失敗", e);
-            await edit(this.#home(userId, `登録できませんでした: ${e instanceof Error ? e.message : String(e)}`.slice(0, 900)));
+            await edit(this.#home(userId, `登録できませんでした: ${errorMessage(e)}`.slice(0, 900)));
           }
           return true;
         }

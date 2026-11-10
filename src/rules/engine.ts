@@ -26,6 +26,7 @@ import { ANSWER_TTL_MS, isModalResponse } from "./interaction.ts";
 import type { InteractionResponder } from "./interaction.ts";
 import type { Program } from "../wasm/run.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
+import { errorMessage } from "../errors.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
 // with its owner's read scope; the steps it returns go to the Planner, which
@@ -664,7 +665,7 @@ export class RuleEngine {
       if (outcome === "failed") error = done.reason ?? done.status;
     } catch (e) {
       outcome = e instanceof PlanRejected ? "rejected" : "failed";
-      error = e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e);
+      error = errorMessage(e);
     }
     if (response !== undefined && !isModalResponse(response)) {
       if (outcome === "executed") answerError = await responder!.send(response);
@@ -707,7 +708,7 @@ export class RuleEngine {
         try {
           resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader, actor)) ?? skipped("このコマンドのルールは止まっています"));
         } catch (e) {
-          resolve(skipped(e instanceof Error ? e.message : String(e)));
+          resolve(skipped(errorMessage(e)));
           throw e;
         }
       });
@@ -811,7 +812,7 @@ export class RuleEngine {
       };
       result = await (this.deps.run ?? runModule)(program, { ...bindings, image }, SANDBOX_LIMITS);
     } catch (e) {
-      return { kind: "error", error: (e instanceof Error ? e.message : String(e)).slice(0, MAX_ERROR), logs: [] };
+      return { kind: "error", error: errorMessage(e).slice(0, MAX_ERROR), logs: [] };
     }
     if (!result.ok) return { kind: "error", error: (result.error ?? "不明なエラー").slice(0, MAX_ERROR), logs: result.logs };
     if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {

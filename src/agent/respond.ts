@@ -16,6 +16,7 @@ import type { ImageBox, ImageTools } from "./attachments.ts";
 import { retryFailedCall } from "./retry.ts";
 import { HOSTED_WEB_TOOLS, isHostedWeb, webTools } from "./web.ts";
 import type { WebAccess } from "./web.ts";
+import { errorMessage } from "../errors.ts";
 
 export interface RespondInput {
   model: Model<Api>;
@@ -435,7 +436,7 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
     text = stripWrittenToolCalls(lastAssistantText(agent.state.messages), toolNames());
   } catch (e) {
     // Stopping at the turn limit aborts the call in flight; that is the limit, not a lost connection.
-    if (!capped) throw new ReplyFailed(e instanceof Error ? e.message : String(e), { turns, toolCalls, retries });
+    if (!capped) throw new ReplyFailed(errorMessage(e), { turns, toolCalls, retries });
     text = "";
   }
   const extra = retries > 0 ? { retries } : {};

@@ -1,6 +1,7 @@
 import type { API } from "@discordjs/core";
 import { InteractionResponseType, InteractionType, MessageFlags, Routes } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
+import { errorMessage } from "../errors.ts";
 
 // Presses of buttons and selects on the bot's messages, and forms sent from
 // them, that are not the bot's own panels go to INTERACTION_CREATE rules. The
@@ -119,7 +120,7 @@ export class InteractionAnswer implements InteractionResponder {
         if (r.type === InteractionResponseType.UpdateMessage) return "もう応答済みのため、メッセージを書き換えられませんでした";
         return null; // A later "wait" changes nothing.
       } catch (e) {
-        return `応答をDiscordが受け付けませんでした: ${e instanceof Error ? e.message : String(e)}`.slice(0, 500);
+        return `応答をDiscordが受け付けませんでした: ${errorMessage(e)}`.slice(0, 500);
       }
     });
   }

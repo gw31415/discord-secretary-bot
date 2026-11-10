@@ -31,6 +31,7 @@ import type { WasmModule } from "../db.ts";
 import { MAX_MODULE_BYTES, prepareModule } from "../wasm/module.ts";
 import { execute, hostCalls, wasmInput } from "../wasm/run.ts";
 import type { WasmBindings } from "../wasm/run.ts";
+import { errorMessage } from "../errors.ts";
 
 /** How much of a one-shot module's stdout the model sees. */
 const MAX_WASM_OUTPUT = 20_000;
@@ -674,7 +675,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         });
         return { ...rest, code };
       } catch (e) {
-        throw new Error(`rules[${i}](${r.name}): ${e instanceof Error ? e.message : String(e)}`);
+        throw new Error(`rules[${i}](${r.name}): ${errorMessage(e)}`);
       }
     }),
   );
@@ -1110,7 +1111,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
           planned = { drafts: value.steps as StepDraft[], rules: fromCode };
           return null;
         } catch (e) {
-          return e instanceof Error ? e.message : String(e);
+          return errorMessage(e);
         }
       };
 
