@@ -378,7 +378,7 @@ test("stopping at the turn limit gives the limit's message, not a failed reply",
       model: faux.getModel(), apiKey: "k", reader: listOnlyReader(), botName: "bot",
       transcript: [], target: "[1] user: チャンネルを教えて", web: null,
     });
-    assert.match(result.text, /手順が多くなりすぎた/);
+    assert.equal(result.text, "手順の上限で止めました。質問を絞ってください。");
     assert.ok(result.turns >= 12 && result.turns <= 13);
   } finally {
     llm.deleteProvider(faux.provider.id);
@@ -405,7 +405,7 @@ test("at the turn limit the speaker can let the reply go on from where it stoppe
   }
 });
 
-test("a speaker who says stop at the turn limit gets the limit's message", async () => {
+test("a speaker who says stop at the turn limit is told only that it stopped there", async () => {
   const faux = fauxProvider();
   llm.setProvider(faux.provider);
   try {
@@ -417,7 +417,7 @@ test("a speaker who says stop at the turn limit gets the limit's message", async
       askContinue: async () => (asked++, false),
     });
     assert.equal(asked, 1);
-    assert.match(result.text, /手順が多くなりすぎた/);
+    assert.equal(result.text, "ここまでで止めました");
   } finally {
     llm.deleteProvider(faux.provider.id);
   }

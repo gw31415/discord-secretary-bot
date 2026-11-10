@@ -396,6 +396,8 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   });
   input.signal?.addEventListener("abort", () => agent.abort(), { once: true });
 
+  /** The speaker answered ここで終える (or nothing) when asked to go on past the limit. */
+  let declined = false;
   const steer = (text: string) => agent.steer({ role: "user", content: text, timestamp: Date.now() });
   try {
     const images = seesImages && input.images?.length ? await downloadImages(input.images, input.fetch) : [];
@@ -415,7 +417,10 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
     await drain();
     // At the limit with no answer yet, the speaker may let it go on from where it stopped.
     for (let asked = 0; asked < MAX_CONTINUES && atLimit() && unanswered(agent.state.messages) && input.askContinue && !input.signal?.aborted; asked++) {
-      if (!(await input.askContinue(turns))) break;
+      if (!(await input.askContinue(turns))) {
+        declined = true;
+        break;
+      }
       const last = agent.state.messages.at(-1) as AssistantMessage | undefined;
       if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) agent.state.messages = agent.state.messages.slice(0, -1);
       roundStart = turns;
@@ -441,7 +446,9 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   }
   const extra = retries > 0 ? { retries } : {};
   if (!text && capped) {
-    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors, reactions, ...extra };
+    // The speaker chose to end (or did not answer), and the question already said why it stopped.
+    const stopped = declined ? "ここまでで止めました" : "手順の上限で止めました。質問を絞ってください。";
+    return { text: stopped, progress, turns, toolCalls, toolErrors, reactions, ...extra };
   }
   return { text, progress, turns, toolCalls, toolErrors, reactions, ...extra };
 }

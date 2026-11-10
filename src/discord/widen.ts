@@ -57,17 +57,20 @@ export class WidenPrompts {
 
   /** Resolves true when the speaker pressed 許可, false on 許可しない or no answer in time. */
   ask(input: WidenRequest): Promise<boolean> {
+    // The question is taken back after the timeout; it says when, as the plan dialog does.
+    const deadline = Math.floor((Date.now() + this.#timeoutMs) / 1000);
     return this.#ask({
       ...input,
       content: [
-        `🔓 <@${input.speakerId}> さん、あなたが見られる範囲まで読み取りを広げてよいですか?`,
+        `<@${input.speakerId}> 読み取りをあなたが見られる範囲まで広げてよいですか?`,
         `理由: ${input.reason.slice(0, 300)}`,
         "-# この返答のあいだだけです。全員は見られない内容が返答に入ることがあります。",
+        `-# 期限 <t:${deadline}:R>`,
       ].join("\n"),
       yes: "許可する",
       no: "許可しない",
-      answered: (allowed, speakerId) => (allowed ? `🔓 <@${speakerId}> さんが見られる範囲まで読み取ります。` : "🔒 読み取りは広げずに答えます。"),
-      expired: "🔒 返事がなかったので、読み取りは広げません。",
+      answered: (allowed, speakerId) => (allowed ? `🔓 <@${speakerId}> が見られる範囲まで読み取ります` : "🔒 読み取りは広げずに答えます"),
+      expired: "🔒 返事がなかったので、読み取りは広げません",
     });
   }
 
@@ -75,11 +78,11 @@ export class WidenPrompts {
   askContinue(input: ContinueRequest): Promise<boolean> {
     return this.#ask({
       ...input,
-      content: `⏸️ <@${input.speakerId}> さん、手順が${input.turns}回に達したので止めています。続けますか?`,
+      content: `⏸️ <@${input.speakerId}> 手順が${input.turns}回に達したので止めています。続けますか?`,
       yes: "続ける",
       no: "ここで終える",
-      answered: (go) => (go ? "▶️ 続けます。" : "⏹️ ここで終えました。"),
-      expired: "⏹️ 返事がなかったので終えました。",
+      answered: (go) => (go ? "▶️ 続けます" : "⏹️ ここで終えました"),
+      expired: "⏹️ 返事がなかったので終えました",
     });
   }
 
@@ -129,11 +132,11 @@ export class WidenPrompts {
     const userId = userIdOf(interaction);
     const pending = this.#pending.get(token);
     if (!pending) {
-      await this.#api.interactions.updateMessage(interaction.id, interaction.token, { content: "この確認はもう終わっています。", components: [] });
+      await this.#api.interactions.updateMessage(interaction.id, interaction.token, { content: "この確認はもう終わっています", components: [] });
       return true;
     }
     if (userId !== pending.speakerId) {
-      await replyEphemeral(this.#api, interaction, "頼んだ本人だけが押せます。");
+      await replyEphemeral(this.#api, interaction, "依頼した本人だけが押せます");
       return true;
     }
     const allowed = answer === "yes";

@@ -7,13 +7,22 @@ import { WEB_TOOLS, webToolAvailable } from "./agent/web.ts";
 import { findModel, judgesOnly, KEY_PROVIDERS, PROVIDERS } from "./llm/models.ts";
 import { keyModal, parseCustomId, readScopeLabel, renderPanel, roleLabel, typedModelId, typedModelModal } from "./llm/panel.ts";
 import type { ModelRole, PanelPage } from "./llm/panel.ts";
-import { asUpdate, selectedValues, userIdOf } from "./discord/respond.ts";
+import { asUpdate, replyEphemeral, selectedValues, userIdOf } from "./discord/respond.ts";
+import type { ProviderId } from "./llm/models.ts";
 
 // Interactions arrive over the Gateway (no HTTP endpoint). Each must be answered
 // within 3 seconds; everything here is a local DB operation, so no defer is needed.
 
 function panelUpdate(store: Store, userId: string, notice: string | undefined, page: PanelPage) {
   return asUpdate(renderPanel(store, userId, notice, page));
+}
+
+/** A press on a control this bot no longer draws: the screen is older than the bot. */
+const STALE = "この画面は古くなっています。開き直してください。";
+
+/** A model by the name the panel's menus show; one without a name (as on OpenRouter) by its id. */
+function modelName(role: ModelRole, provider: ProviderId, model: string): string {
+  return findModel(role, provider, model)?.name || model;
 }
 
 /** The language and judge models are the basics; the rest override them for one use. */
@@ -35,7 +44,10 @@ export async function handleInteraction(api: API, store: Store, interaction: API
   if (interaction.type === InteractionType.MessageComponent) {
     const values = selectedValues(interaction);
     const action = parseCustomId(interaction.data.custom_id, values);
-    if (!action) return;
+    if (!action) {
+      await replyEphemeral(api, interaction, STALE);
+      return;
+    }
     switch (action.kind) {
       case "page":
         await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, undefined, action.page));
@@ -59,7 +71,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
         if (hasKey) {
           store.setModel(userId, action.role, { provider: action.provider, model: action.model });
           store.audit(actor, "llm.model.set", { role: action.role, provider: action.provider, model: action.model });
-          notice = `${roleLabel(action.role)}モデルを ${action.model} にしました`;
+          notice = `${roleLabel(action.role)}モデルを ${modelName(action.role, action.provider, action.model)} にしました`;
         } else {
           notice = `${PROVIDERS[action.provider].label}のキーが登録されていません`;
         }
@@ -80,7 +92,7 @@ export async function handleInteraction(api: API, store: Store, interaction: API
       }
       case "selectWeb": {
         if (!webToolAvailable(action.tool, userId)) {
-          await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, "そのWebツールは選べません", "lookup"));
+          await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, "このWebツールは使えません", "lookup"));
           return;
         }
         store.setWebTool(userId, action.tool);
@@ -119,14 +131,20 @@ export async function handleInteraction(api: API, store: Store, interaction: API
       } else {
         store.setModel(userId, action.role, { provider: "openrouter", model });
         store.audit(actor, "llm.model.set", { role: action.role, provider: "openrouter", model });
-        notice = `${roleLabel(action.role)}モデルを ${model} にしました`;
+        notice = `${roleLabel(action.role)}モデルを ${modelName(action.role, "openrouter", model)} にしました`;
       }
       await api.interactions.updateMessage(interaction.id, interaction.token, panelUpdate(store, userId, notice, pageOf(action.role)));
       return;
     }
-    if (action?.kind !== "submitKey") return;
+    if (action?.kind !== "submitKey") {
+      await replyEphemeral(api, interaction, STALE);
+      return;
+    }
     const key = modalValue(interaction, "key")?.trim();
-    if (!key) return;
+    if (!key) {
+      await replyEphemeral(api, interaction, "処理できませんでした。もう一度試してください。");
+      return;
+    }
     store.setApiKey(userId, action.provider, key);
     store.audit(actor, "llm.key.set", { provider: action.provider }); // never the key itself
     await api.interactions.updateMessage(

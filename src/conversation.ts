@@ -26,8 +26,12 @@ import type { Reader, ReadScope } from "./discord/reader.ts";
 import type { ContinueRequest, WidenRequest } from "./discord/widen.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
+import { draftOf } from "./plan/types.ts";
 import type { Rule, RuleRun } from "./rules/types.ts";
 import { SETTINGS_COMMAND_ID } from "./discord/commands.ts";
+import { settingsCommand } from "./discord/labels.ts";
+import { errorMessage } from "./errors.ts";
+import { sentence, truncate } from "./text.ts";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -121,8 +125,18 @@ export type Decision =
 
 /** The DM to someone who has not set up; with the command's id, /settings is a link that opens it. */
 export function setupNotice(settingsCommandId?: string): string {
-  const command = settingsCommandId ? `</settings:${settingsCommandId}>` : "`/settings`";
-  return `このBotと話すには、サーバーで ${command} を実行して、APIキーと言語モデルを設定してください。`;
+  return `このBotと話すには、サーバーで ${settingsCommand(settingsCommandId)} を実行して、APIキーと言語モデルを設定してください。`;
+}
+
+/** A provider's 4xx starts its message with the status (the same test as retry.ts's CLIENT_ERROR). */
+const CLIENT_ERROR = /^\s*(4\d\d)\b/;
+
+/** Why a reply could not be made: a 4xx is the key's or the model's, which /settings fixes; anything else in short. */
+export function replyFailure(reason: string, settingsCommandId?: string): string {
+  if (isTransient(reason)) return "LLMとの通信が切れて答えられませんでした。少し待ってから話しかけてください。";
+  const status = CLIENT_ERROR.exec(reason)?.[1];
+  if (status) return `応答を作れませんでした(LLMのエラー ${status})。${settingsCommand(settingsCommandId)} のキーとモデルを確かめてください。`;
+  return `応答を作れませんでした。${sentence(truncate(reason.trim(), 100))}`;
 }
 
 interface ChannelContext {
@@ -431,11 +445,11 @@ export class Conversations {
     const { plan } = input;
     const speaker = plan.actor.userId;
     if (!setupStatus(this.deps.store, speaker).complete) {
-      return Promise.reject(new Error("/settings の設定が終わっていないため修正できません"));
+      return Promise.reject(new Error("/settings の設定が済んでいません"));
     }
     const run = async () => {
       const context = contextOf(await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES));
-      const current = plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) }));
+      const current = plan.steps.map(draftOf);
       const name = plan.labels[speaker] ?? speaker;
       await this.#answer({
         guildId: plan.guildId,
@@ -590,11 +604,9 @@ export class Conversations {
       text = result.text || (progress > 0 || result.reactions?.length || images.forReply().length > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
       detail = { ...detail, ...(result.reactions?.length ? { reactions: result.reactions } : {}), progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), ...(result.retries ? { retries: result.retries } : {}), messagesRead: reader.messagesRead };
     } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
+      const reason = errorMessage(e);
       this.deps.log(`応答の生成に失敗 (${input.replyToId})`, e);
-      text = isTransient(reason)
-        ? "LLMとの通信が途中で切れたため、応答を作れませんでした(やり直しても切れました)。少し待ってからもう一度話しかけてください。"
-        : `応答の生成に失敗しました: ${reason.slice(0, 300)}`;
+      text = replyFailure(reason, store.getMeta(SETTINGS_COMMAND_ID));
       detail = {
         ...detail,
         error: reason.slice(0, 500),
