@@ -15,7 +15,7 @@ import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import type { ChooseInput, ReactionChoice } from "./agent/react.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
-import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
+import { chatModelFor, findChatModel, judgeModelFor, judgeRef } from "./llm/models.ts";
 import { llmCoder } from "./agent/coder.ts";
 import { decideFor } from "./agent/decide.ts";
 import { toUploadable } from "./media.ts";
@@ -264,14 +264,11 @@ export class Conversations {
   async #addressed(transcript: string[], message: GuildMessage): Promise<boolean> {
     const { store } = this.deps;
     const speaker = message.author.id;
-    const settings = store.getSettings(speaker);
-    const ref = settings.addressee ?? judgeRef(settings);
-    const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(speaker, ref.provider);
-    if (!model || !apiKey) return false; // The speaker's setup broke; stay quiet rather than guess.
+    const found = judgeModelFor(store, speaker, (s) => s.addressee ?? judgeRef(s));
+    if (!found) return false; // The speaker's setup broke; stay quiet rather than guess.
     const verdict = await this.deps.judge({
-      model,
-      apiKey,
+      model: found.model,
+      apiKey: found.apiKey,
       botName: this.deps.botName(),
       transcript,
       // The bot's message may be older than the transcript; show what is being answered.
@@ -320,11 +317,8 @@ export class Conversations {
   /** The speaker's reaction model, or without one their judge model (or language model). */
   #reactionModel(userId: string): { model: JudgeModel; apiKey: string; label: string } | null {
     const { store } = this.deps;
-    const settings = store.getSettings(userId);
-    const ref = settings.reaction ?? judgeRef(settings);
-    const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(userId, ref.provider);
-    return model && apiKey ? { model, apiKey, label: `${ref.provider}/${ref.model}` } : null;
+    const found = judgeModelFor(store, userId, (s) => s.reaction ?? judgeRef(s));
+    return found && { model: found.model, apiKey: found.apiKey, label: `${found.ref.provider}/${found.ref.model}` };
   }
 
   /** With a reaction model, a message that only needs a reaction gets one instead of words. */
@@ -465,11 +459,10 @@ export class Conversations {
     const ref = store.getSettings(speaker).response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
-    const codeRef = store.getSettings(speaker).code;
-    const codeModel = codeRef && findChatModel(codeRef.provider, codeRef.model);
-    const codeKey = codeRef && store.getApiKey(speaker, codeRef.provider);
+    const code = chatModelFor(store, speaker, (s) => s.code);
+    const codeRef = code?.ref;
     // A coding model whose key was removed falls back to the response model.
-    const coder = codeModel && codeKey ? llmCoder(codeModel, codeKey) : undefined;
+    const coder = code ? llmCoder(code.model, code.apiKey) : undefined;
     const web = this.deps.webSearch
       ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p), speaker)
       : null;

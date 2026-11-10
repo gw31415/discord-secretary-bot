@@ -20,7 +20,7 @@ import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
-import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
+import { chatModelFor, judgeModelFor } from "./llm/models.ts";
 import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
 import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
@@ -87,11 +87,9 @@ const planner = new Planner({
   revise: (input) => conversations.revise(input),
   // The actor's own response model and key, as for their conversation.
   summarize: async (code, actorId) => {
-    const ref = store.getSettings(actorId).response;
-    const model = ref && findChatModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(actorId, ref.provider);
-    if (!model || !apiKey) return null;
-    return summarizeCode({ model, apiKey, code });
+    const found = chatModelFor(store, actorId, (s) => s.response);
+    if (!found) return null;
+    return summarizeCode({ model: found.model, apiKey: found.apiKey, code });
   },
   beforeWrite: (plan, step) => engine.noteWrite(plan, step, null),
   onWrite: (plan, step, response) => {
@@ -164,25 +162,19 @@ const rules = new RuleService({
   now: () => Date.now(),
   log,
   summarize: async (code, ownerId, trigger, language) => {
-    const ref = store.getSettings(ownerId).response;
-    const model = ref && findChatModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
-    if (!model || !apiKey) return null;
-    return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger }, ...(language ? { language } : {}) });
+    const found = chatModelFor(store, ownerId, (s) => s.response);
+    if (!found) return null;
+    return summarizeCode({ model: found.model, apiKey: found.apiKey, code, subject: { kind: "rule", trigger }, ...(language ? { language } : {}) });
   },
   describeChanges: async (before, after, ownerId, trigger, language) => {
-    const ref = store.getSettings(ownerId).response;
-    const model = ref && findChatModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
-    if (!model || !apiKey) return null;
-    return describeChanges({ model, apiKey, before, after, trigger, ...(language ? { language } : {}) });
+    const found = chatModelFor(store, ownerId, (s) => s.response);
+    if (!found) return null;
+    return describeChanges({ model: found.model, apiKey: found.apiKey, before, after, trigger, ...(language ? { language } : {}) });
   },
   visibilityScore: async ({ userId, command, options, reply, images, steps }) => {
-    const ref = judgeRef(store.getSettings(userId));
-    const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(userId, ref.provider);
-    if (!model || !apiKey) return null;
-    return publicReplyScore({ model, apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
+    const found = judgeModelFor(store, userId);
+    if (!found) return null;
+    return publicReplyScore({ model: found.model, apiKey: found.apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
   },
 });
 

@@ -5,6 +5,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { typesafeProvider } from "@earendil-works/pi-ai/providers/typesafe";
 import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
+import type { ModelRef, Store, UserSettings } from "../db.ts";
 
 export const PROVIDERS = {
   anthropic: { label: "Claude API" },
@@ -137,6 +138,24 @@ export function findModel(role: ModelRole, provider: ProviderId, modelId: string
 /** The judge model, or the default language model when none is set. */
 export function judgeRef<T>(settings: { response: T | null; judge: T | null }): T | null {
   return settings.judge ?? settings.response;
+}
+
+type KeyedSettings = Pick<Store, "getSettings" | "getApiKey">;
+
+/** The person's chat model that `pick` chooses, with their key for it; null when either is gone. */
+export function chatModelFor(store: KeyedSettings, userId: string, pick: (settings: UserSettings) => ModelRef | null): { model: Model<Api>; apiKey: string; ref: ModelRef } | null {
+  const ref = pick(store.getSettings(userId));
+  const model = ref && findChatModel(ref.provider, ref.model);
+  const apiKey = ref && store.getApiKey(userId, ref.provider);
+  return ref && model && apiKey ? { model, apiKey, ref } : null;
+}
+
+/** As chatModelFor, for a judgment: a classifier or a chat model, the judge model by default. */
+export function judgeModelFor(store: KeyedSettings, userId: string, pick: (settings: UserSettings) => ModelRef | null = judgeRef): { model: JudgeModel; apiKey: string; ref: ModelRef } | null {
+  const ref = pick(store.getSettings(userId));
+  const model = ref && findJudgeModel(ref.provider, ref.model);
+  const apiKey = ref && store.getApiKey(userId, ref.provider);
+  return ref && model && apiKey ? { model, apiKey, ref } : null;
 }
 
 export function isClassifier(model: JudgeModel): model is ClassifierModel<ClassifierApi> {

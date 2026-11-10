@@ -1,7 +1,7 @@
 import { contentText, Type } from "@earendil-works/pi-ai";
 import type { ClassifierAnswer, ClassifierQuestion, JsonObject } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
-import { budget, findJudgeModel, isClassifier, judgeRef, llm } from "../llm/models.ts";
+import { budget, isClassifier, judgeModelFor, llm } from "../llm/models.ts";
 import { firstJsonObject } from "./llm-json.ts";
 import type { Store } from "../db.ts";
 import type { JudgeModel } from "../llm/models.ts";
@@ -106,10 +106,9 @@ export const DECIDE_PRELUDE = [
 
 /** A person's judge model (the language model when none is set), or nothing when its key is gone. */
 export function decideFor(store: Pick<Store, "getSettings" | "getApiKey">, userId: string, signal?: AbortSignal): Decide | undefined {
-  const ref = judgeRef(store.getSettings(userId));
-  const model = ref && findJudgeModel(ref.provider, ref.model);
-  const apiKey = ref && store.getApiKey(userId, ref.provider);
-  if (!model || !apiKey) return undefined;
+  const found = judgeModelFor(store, userId);
+  if (!found) return undefined;
+  const { model, apiKey } = found;
   return (state, questions) => decide(model, apiKey, state, questions, signal);
 }
 
