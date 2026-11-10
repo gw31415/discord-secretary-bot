@@ -378,8 +378,7 @@ export class Conversations {
     if (!setupStatus(store, data.user_id).complete) return;
     const chooser = this.#reactionModel(data.user_id);
     if (!chooser) return;
-    const reacted = await deps.fetchMessage(data.channel_id, data.message_id);
-    const before = await deps.fetchBefore(data.channel_id, data.message_id, CONTEXT_MESSAGES);
+    const [reacted, before] = await Promise.all([deps.fetchMessage(data.channel_id, data.message_id), deps.fetchBefore(data.channel_id, data.message_id, CONTEXT_MESSAGES)]);
     const transcript = [...before.map(formatMessage).reverse(), formatMessage(reacted)];
     const choice = await deps.chooseReaction({ model: chooser.model, apiKey: chooser.apiKey, botName: deps.botName(), transcript, message: line, kind: "reaction" });
     if (choice.action !== "reply") return;
