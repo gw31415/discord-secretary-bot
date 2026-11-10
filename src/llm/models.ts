@@ -153,6 +153,12 @@ export function lightestThinking(model: Model<Api>): ThinkingLevel | undefined {
   return lightestLevel(model);
 }
 
+/** Room for the reply: more when the model has to think before it answers. */
+export function budget(model: Model<Api>, tokens: { thinking: number; plain: number }): { maxTokens: number; reasoning?: ThinkingLevel } {
+  const reasoning = lightestThinking(model);
+  return reasoning ? { maxTokens: tokens.thinking, reasoning } : { maxTokens: tokens.plain };
+}
+
 function lightestLevel(model: Model<Api>): ThinkingLevel {
   return THINKING_LEVELS.find((level) => model.thinkingLevelMap?.[level] !== null) ?? "minimal";
 }
