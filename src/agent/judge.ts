@@ -1,3 +1,4 @@
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, ClassifierApi, ClassifierModel, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { isClassifier, lightestThinking, llm } from "../llm/models.ts";
 import type { JudgeModel } from "../llm/models.ts";
@@ -92,10 +93,7 @@ async function askAddressed(input: JudgeInput & { model: Model<Api> }): Promise<
     },
     { apiKey: input.apiKey, signal: input.signal, ...judgeBudget(input.model) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
+  const text = contentText(res.content, "");
   // Fail quiet: an unreadable verdict means "not addressed".
   return parseJudgement(text) ?? { addressed: false, confidence: 0 };
 }
@@ -161,10 +159,7 @@ export async function publicReplyScore(input: VisibilityInput): Promise<number> 
     },
     { apiKey: input.apiKey, signal: input.signal, ...judgeBudget(model) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
+  const text = contentText(res.content, "");
   const match = /\{[\s\S]*\}/.exec(text);
   if (!match) return 0;
   try {

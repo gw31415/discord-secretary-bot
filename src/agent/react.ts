@@ -1,3 +1,4 @@
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, ClassifierApi, ClassifierModel, Model } from "@earendil-works/pi-ai";
 import { EMOJI_FORMAT } from "../plan/catalog.ts";
 import { isClassifier, lightestThinking, llm } from "../llm/models.ts";
@@ -135,9 +136,6 @@ async function ask(input: ChooseInput & { model: Model<Api> }): Promise<Reaction
     },
     { apiKey: input.apiKey, signal: input.signal, ...(reasoning ? { maxTokens: 2000, reasoning } : { maxTokens: 200 }) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
+  const text = contentText(res.content, "");
   return parseChoice(text, input.kind);
 }

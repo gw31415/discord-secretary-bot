@@ -2,6 +2,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import type { Decide } from "./decide.ts";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { Reader } from "../discord/reader.ts";
 import { lightestThinking, llm } from "../llm/models.ts";
@@ -220,11 +221,7 @@ function userPrompt(input: RespondInput): string {
 }
 
 function textOf(m: AssistantMessage): string {
-  return m.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("")
-    .trim();
+  return contentText(m.content, "").trim();
 }
 
 /** The text of a failed tool's result: an Error, or a tool result whose content carries the message. */

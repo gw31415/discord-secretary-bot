@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { contentText, Type } from "@earendil-works/pi-ai";
 import type { ClassifierAnswer, ClassifierQuestion, JsonObject } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { findJudgeModel, isClassifier, judgeRef, lightestThinking, llm } from "../llm/models.ts";
@@ -57,7 +57,7 @@ export async function decide(model: JudgeModel, apiKey: string, state: JsonObjec
     },
     { apiKey, signal, ...(reasoning ? { maxTokens: 4000, reasoning } : { maxTokens: 1500 }) },
   );
-  const text = res.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("");
+  const text = contentText(res.content, "");
   return parseAnswers(text, questions);
 }
 

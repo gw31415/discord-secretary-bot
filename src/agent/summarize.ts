@@ -1,3 +1,4 @@
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { lightestThinking, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
@@ -84,11 +85,7 @@ export async function summarizeCode(input: SummarizeInput): Promise<string | nul
     },
     { apiKey: input.apiKey, signal: input.signal ?? AbortSignal.timeout(30_000), ...(reasoning ? { maxTokens: 3000, reasoning } : { maxTokens: 600 }) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("")
-    .trim();
+  const text = contentText(res.content, "").trim();
   return text ? text.slice(0, 800) : null;
 }
 
@@ -116,10 +113,7 @@ export async function describeChanges(input: Omit<SummarizeInput, "code" | "subj
     },
     { apiKey: input.apiKey, signal: input.signal ?? AbortSignal.timeout(30_000), ...(reasoning ? { maxTokens: 3000, reasoning } : { maxTokens: 600 }) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
+  const text = contentText(res.content, "");
   const bullets = changeBullets(text);
   return bullets.length > 0 ? bullets : null;
 }
