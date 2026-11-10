@@ -9,6 +9,8 @@ import { Store } from "../src/db.ts";
 import { findChatModel, isMustThinkError, judgeRef, lightestThinking, llm, selectableModels } from "../src/llm/models.ts";
 import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
 import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
+import { TRIGGERS, triggerEvents } from "../src/rules/triggers.ts";
+import type { Rule } from "../src/rules/types.ts";
 
 const master = randomBytes(32);
 
@@ -302,4 +304,47 @@ test("OpenRouter models that must think are retried once with the lightest level
   await llm.completeSimple(model, context, { apiKey: "k", fetch, maxRetries: 0 } as never);
   assert.deepEqual(bodies.map((b) => b.reasoning?.effort), ["none", "minimal", "minimal"]);
   assert.ok(isMustThinkError('400: {"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}'));
+});
+
+test("enabledRules picks the same rules, in the same order, as filtering every rule by triggerEvents", () => {
+  const store = new Store(":memory:", master);
+  const names = [...Object.keys(TRIGGERS), "UNKNOWN_EVENT", ""];
+  // A fixed pseudo-random sequence, so a failure can be replayed.
+  let seed = 7;
+  const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2147483648), Math.floor(seed / 65536) % n);
+  const pick = () => names[random(names.length)]!;
+  for (let i = 0; i < 300; i++) {
+    const guildId = random(4) === 0 ? "other" : "g";
+    const trigger: Rule["trigger"] = { event: pick() };
+    const shape = random(4);
+    if (shape === 1) trigger.events = [];
+    if (shape === 2) trigger.events = Array.from({ length: 1 + random(4) }, pick);
+    if (shape === 3) trigger.events = [trigger.event, pick()];
+    store.insertRule({
+      id: `r${i}`,
+      guildId,
+      ownerId: "u",
+      name: `r${i}`,
+      sourcePrompt: "",
+      trigger,
+      allow: [],
+      program: { kind: "js", code: "" },
+      summary: null,
+      limits: {} as Rule["limits"],
+      version: 1,
+      enabled: random(3) !== 0,
+      consecutiveFailures: 0,
+      disabledReason: null,
+      // Repeated times, so ties keep their order too.
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, random(50))).toISOString(),
+      updatedAt: "",
+    });
+  }
+  for (const guildId of ["g", "other", "none"]) {
+    for (const event of names) {
+      const expected = store.listRules(guildId).filter((r) => r.enabled && triggerEvents(r.trigger).includes(event));
+      assert.deepEqual(store.enabledRules(guildId, event), expected, `${guildId} ${event}`);
+    }
+  }
+  assert.ok(names.filter((e) => store.enabledRules("g", e).length > 1).length > 10, "the sample covers most events");
 });
