@@ -152,7 +152,7 @@ export function limitsLabel(limits: RuleLimits): string {
 }
 
 export function dryRunText(dry: RuleDryRun): string {
-  const head = `**ドライラン**${dry.source ? `(${dry.source}で)` : ""}`;
+  const head = `**ドライラン**${dry.source ? `(${dry.source})` : ""}`;
   const body: string[] = [];
   switch (dry.outcome) {
     case "no_event":
@@ -495,7 +495,8 @@ export function commandView(input: CommandInput): Rendered {
     SEPARATOR,
     noticeLine(input.notice),
     row([button(ruleCustomId("cmddel", rule.id), "コマンドを削除", ButtonStyle.Danger)]),
-    row([button(ruleCustomId("open", rule.id), "関連ルールを見る"), button(ruleCustomId("commands"), "← 一覧へ")]),
+    row([button(ruleCustomId("open", rule.id), "関連ルールを見る")]),
+    row([button(ruleCustomId("commands"), "← 一覧へ")]),
   );
   return container(parts);
 }

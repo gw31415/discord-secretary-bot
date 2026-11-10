@@ -262,8 +262,14 @@ function statusLine(plan: Plan, state: DialogState): string {
       const registered = `ルール${plan.rules.length}件を登録しました。止めるときは ${settingsCommand(state.settingsCommandId)} の「ルール」から。`;
       return plan.steps.length > 0 ? `✅ 実行しました。${registered}` : `✅ ${registered}`;
     }
-    case "failed":
-      return `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)。${state.reason ?? ""}`;
+    case "failed": {
+      const head = `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)`;
+      const reason = state.reason ?? "";
+      // A failed step shows why under its own line, so only what was added after it (restore, keep) follows here.
+      if (!state.steps?.some((s) => s.state === "failed")) return reason ? `${head}。${reason}` : head;
+      const notes = reason.split("\n").slice(1).filter(Boolean);
+      return [head, ...notes].join("\n");
+    }
     case "cancelled":
       return state.reason ?? "取り消しました";
     case "aborted":
@@ -401,7 +407,7 @@ function replyLine(r: PlanRuleDraft): string {
 }
 
 function dryLine(r: PlanRuleDraft): string {
-  const head = r.dry.source ? `ドライラン(${r.dry.source}で)` : "ドライラン";
+  const head = r.dry.source ? `ドライラン(${r.dry.source})` : "ドライラン";
   switch (r.dry.outcome) {
     case "steps": {
       const n = r.dry.lines.length;

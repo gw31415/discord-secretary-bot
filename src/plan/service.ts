@@ -713,10 +713,10 @@ export class Planner {
           await closed();
           return true;
         }
-        const { drafts, skipped } = this.restoreDrafts(row);
+        const { drafts, skipped, skippedNames } = this.restoreDrafts(row);
         if (drafts.length === 0) {
           await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
-          await followUp(`戻せる変更がありません。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
+          await followUp(`戻せる変更がありません。${skippedNames.length > 0 ? `戻せないもの: ${skippedNames.join("、")}` : ""}`);
           return true;
         }
         await busy("変更案を作っています…");
@@ -724,7 +724,7 @@ export class Planner {
           const shareable = this.#shareable(plan, row.channelId);
           const restore = await this.propose({ guildId: plan.guildId, channelId: row.channelId, replyToId: row.messageId, actorId: plan.actor.userId, drafts, shareable });
           store.audit(plan.actor, "plan.restore", { restorePlan: restore.id, skipped }, plan.id);
-          const note = `復元の変更案 \`${restore.id}\` を出しました${skipped.length > 0 ? `。戻せないもの: ${skipped.join("、")}` : ""}`;
+          const note = `復元の変更案 \`${restore.id}\` を出しました${skippedNames.length > 0 ? `。戻せないもの: ${skippedNames.join("、")}` : ""}`;
           store.transitionPlan(plan.id, ["failed"], "failed", { reason: `${row.reason ?? ""}\n${note}` });
           this.#shown.set(plan.id, { ...this.#shown.get(plan.id), closed: true });
           await this.#refresh(plan.id);
@@ -806,12 +806,18 @@ export class Planner {
     return shareableChannels(cache.guild, channelId, actor, this.deps.selfId());
   }
 
-  /** Steps that undo what a failed plan already did, newest first. */
-  restoreDrafts(row: PlanRow): { drafts: StepDraft[]; skipped: string[] } {
+  /**
+   * Steps that undo what a failed plan already did, newest first. `skipped`
+   * (kept in the audit log) names each step that cannot be undone by its id;
+   * `skippedNames` says them to people by operation, since a dialog that has
+   * started shows no line numbers.
+   */
+  restoreDrafts(row: PlanRow): { drafts: StepDraft[]; skipped: string[]; skippedNames: string[] } {
     const { plan } = row;
     const rows = new Map(this.deps.store.getSteps(plan.id).map((s) => [s.stepId, s]));
     const drafts: StepDraft[] = [];
     const skipped: string[] = [];
+    const names = new Set<string>();
     for (const step of [...plan.steps].reverse()) {
       const state = rows.get(step.id);
       if (state?.state !== "done" || !state.request) continue;
@@ -819,9 +825,12 @@ export class Planner {
       const snapshot = this.deps.store.getSnapshot(plan.id, step.id)?.data ?? null;
       const inverse = spec.inverse?.(state.request.pathParams, state.request.body as Body, snapshot, state.response as Record<string, unknown> | null);
       if (inverse) drafts.push(inverse);
-      else skipped.push(`${step.id}(${spec.label})`);
+      else {
+        skipped.push(`${step.id}(${spec.label})`);
+        names.add(spec.label);
+      }
     }
-    return { drafts, skipped };
+    return { drafts, skipped, skippedNames: [...names] };
   }
 
   // --- Execution ----------------------------------------------------------

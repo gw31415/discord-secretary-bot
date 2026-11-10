@@ -1435,5 +1435,9 @@ test("a Discord error is said by its code in the dialog, and the step keeps Disc
   assert.equal(store.getPlan(plan.id)!.reason, "2. ロール付与ができませんでした。Discord の上限に達しました。");
   assert.equal(store.getSteps(plan.id)[1]!.error, "Maximum number of guild roles reached (250)");
   assert.match(dialogText(replies.at(-1)!.body), /\n　→ Discord の上限に達しました\n/);
-  assert.match(dialogText(replies.at(-1)!.body), /\n⚠️ 途中で失敗しました\(1\/2件完了\)。2\. ロール付与ができませんでした。Discord の上限に達しました。$/);
+  // The step's line already says why, and a started dialog numbers no lines, so the status line says only how far it got.
+  assert.match(dialogText(replies.at(-1)!.body), /\n⚠️ 途中で失敗しました\(1\/2件完了\)$/);
+  // What is added afterwards still shows, on the next line.
+  await planner.handleInteraction(click(plan, "keep", "1"));
+  assert.match(dialogText(replies.at(-1)!.body), /\n⚠️ 途中で失敗しました\(1\/2件完了\)\nそのままにしました。$/);
 });

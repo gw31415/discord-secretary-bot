@@ -564,7 +564,7 @@ test("the command screens follow the same order, name a halt, and say 動作中 
   assert.deepEqual(layout(list).map((p) => p.split("\n")[0]), ["## コマンド", "🛑 全ルール停止中", "`/announce` ⏸️ 停止中 お知らせを投稿する", "[select: 自分のコマンドを開く(1件)]", "[buttons: ← 設定のトップへ]"]);
   assert.match((list as any).components[0].components[3].components[0].options[0].description, /^停止中 · お知らせを投稿する/);
   const own = layout(commandView({ rule: { ...rule, enabled: true }, ids: {}, notice: "「全員に見せる」にしました" }));
-  assert.deepEqual(own.slice(-6), ["返事を見せる相手:", "[select: ]", "---", "-# 「全員に見せる」にしました", "[buttons: コマンドを削除]", "[buttons: 関連ルールを見る | ← 一覧へ]"]);
+  assert.deepEqual(own.slice(-7), ["返事を見せる相手:", "[select: ]", "---", "-# 「全員に見せる」にしました", "[buttons: コマンドを削除]", "[buttons: 関連ルールを見る]", "[buttons: ← 一覧へ]"]);
   assert.match(layout(commandView({ rule, ids: {} })).join("\n"), /⏸️ 停止中\(ルールを再開すると使えます\)/);
   assert.match(layout(commandView({ rule, ids: {}, confirmDelete: true })).join("\n"), /⚠️ 「\/announce」とルール「お知らせ」を削除します。実行履歴と監査ログは残ります。/);
 });
