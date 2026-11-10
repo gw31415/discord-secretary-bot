@@ -5,12 +5,12 @@ import { Value } from "typebox/value";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
 import { ChannelType, ComponentType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";
-import { downloadImages, fetchImage, imageRefs, MAX_IMAGES } from "./images.ts";
+import { downloadImages, imageRefs, MAX_IMAGES, messageImage } from "./images.ts";
 import { CodeFailed, syntaxError } from "./coder.ts";
 import type { CodeEnv, Coder, CodeKind } from "./coder.ts";
 import { mimeOf } from "./attachments.ts";
 import type { ImageBox } from "./attachments.ts";
-import { ConvertOptionsSchema, convertImage, forModel, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
+import { ConvertOptionsSchema, convertImage, extOf, forModel, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { ConvertOptions, MathOptions } from "../media.ts";
 import { checkDecideInput, JUDGE_CODE_LINE, MAX_QUESTIONS, MAX_STATE_JSON as MAX_JUDGE_STATE_JSON } from "./decide.ts";
 import type { Decide } from "./decide.ts";
@@ -276,17 +276,12 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     if (!Value.Check(ImageSourceSchema, source) || typeof source !== "object") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
     const { message_id, channel_id, index } = source as { message_id: string; channel_id?: string; index?: number };
     // Goes through the reader, so only messages that may be shown here are opened.
-    const message = (await reader.get(`/channels/${channel_id ?? reader.scope.channelId}/messages/${message_id}`)) as APIMessage;
-    const ref = imageRefs(message).at(index ?? 0);
-    if (!ref) throw new Error(`メッセージ ${message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
-    const image = await fetchImage(ref, options.fetch);
-    if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
-    return image;
+    return messageImage(reader, { channelId: channel_id ?? reader.scope.channelId, messageId: message_id, index: index ?? 0 }, options.fetch);
   };
   /** Puts a message's image into the box unchanged (an animated GIF stays animated) and returns its id. */
   const keepAttached = async (source: unknown): Promise<string> => {
     const { data, mimeType } = await attachedImage(source);
-    return box!.addForPlan({ data, name: `image.${mimeType.split("/")[1] === "jpeg" ? "jpg" : mimeType.split("/")[1]}` });
+    return box!.addForPlan({ data, name: `image.${extOf(mimeType.split("/")[1]!)}` });
   };
   const makeMath = async (tex: string, opts: MathOptions, name: string | undefined): Promise<string> => {
     box!.checkRoom();
@@ -295,7 +290,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   const makeConverted = async (source: unknown, opts: ConvertOptions, name: string | undefined): Promise<string> => {
     box!.checkRoom();
     const { data, format } = await convertImage(await loadImage(source), opts);
-    return box!.add({ data, name: `${name || "image"}.${format === "jpeg" ? "jpg" : format}` });
+    return box!.add({ data, name: `${name || "image"}.${extOf(format)}` });
   };
 
   /** Bindings for one run whose images go into the reply's box; `made` collects their ids. */
@@ -319,16 +314,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     return { result, made: result.ok ? made : [] };
   };
   /** The coder's trial runs draw too, but nothing is kept; formulas are still checked so TeX mistakes show. */
-  const trialBindings: SandboxBindings = box
-    ? {
-        ...sandboxBindings,
-        attach: () => "img0",
-        media: {
-          math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), "img0"),
-          convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), "img0"),
-        },
-      }
-    : sandboxBindings;
+  const trialBindings: SandboxBindings = box ? { ...sandboxBindings, ...trialMedia("img0") } : sandboxBindings;
   /** The images as the model sees them: shrunk, and only when it can see images. */
   const drawn = async (ids: string[]) => {
     if (!box || ids.length === 0) return [];
@@ -493,7 +479,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
               image: async (data: Buffer, name: string) => {
                 box.checkRoom();
                 const { data: out, format } = await convertImage(data, {});
-                const id = box.add({ data: out, name: `${name || "image"}.${format === "jpeg" ? "jpg" : format}` });
+                const id = box.add({ data: out, name: `${name || "image"}.${extOf(format)}` });
                 made.push(id);
                 return id;
               },
@@ -649,14 +635,20 @@ function ruleTask(r: CodedRuleInput & { code_task: string }): string {
   ].join("\n");
 }
 
-/** A rule's trial runs draw too, but nothing is kept; formulas are still checked so TeX mistakes show. */
-const RULE_TRIAL_MEDIA: Pick<SandboxBindings, "attach" | "media"> = {
-  attach: () => "img1",
-  media: {
-    math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), "img1"),
-    convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), "img1"),
-  },
-};
+/**
+ * Trial runs draw too, but nothing is kept; formulas are still checked so TeX
+ * mistakes show. Every image gets `id`: a rule's trial needs "img1" so its
+ * `files: ["img1"]` passes the same checks as a real run.
+ */
+function trialMedia(id: string): Pick<SandboxBindings, "attach" | "media"> {
+  return {
+    attach: () => id,
+    media: {
+      math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), id),
+      convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), id),
+    },
+  };
+}
 
 /** One coding agent per rule, all at once. */
 async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: SandboxBindings, tools: AgentTool<any>[]): Promise<RuleInput[]> {
@@ -670,7 +662,7 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask({ ...r, code_task: task }), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), ...([r.trigger_event, ...(r.more_trigger_events ?? [])].some((e) => e === "INTERACTION_CREATE" || e === "COMMAND") ? { respond: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
+          run: (code, event) => runRuleCode(code, { ...bindings, ...trialMedia("img1"), ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), ...([r.trigger_event, ...(r.more_trigger_events ?? [])].some((e) => e === "INTERACTION_CREATE" || e === "COMMAND") ? { respond: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
           tools,
         });
         return { ...rest, code };

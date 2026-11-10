@@ -137,6 +137,11 @@ export async function toUploadable<T extends { name: string; data: Buffer }>(fil
 }
 
 export const FORMATS = ["png", "jpeg", "webp"] as const;
+
+/** The file extension for an image format. */
+export function extOf(format: string): string {
+  return format === "jpeg" ? "jpg" : format;
+}
 export type Format = (typeof FORMATS)[number];
 export const FITS = ["inside", "contain", "cover", "fill", "outside"] as const;
 

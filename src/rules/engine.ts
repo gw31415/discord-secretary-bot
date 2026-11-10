@@ -17,9 +17,8 @@ import { DEFAULT_TIMEZONE, isoNext, parseCron, startCron } from "./schedule.ts";
 import { ACTOR_EVENTS, createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
-import { fetchImage, imageRefs } from "../agent/images.ts";
-import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
-import type { APIMessage } from "discord-api-types/v10";
+import { messageImage } from "../agent/images.ts";
+import { convertImage, ConvertOptionsSchema, extOf, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { Rule, RunOutcome } from "./types.ts";
 import { NO_DECIDE, runModule } from "../wasm/run.ts";
 import { ANSWER_TTL_MS, isModalResponse } from "./interaction.ts";
@@ -768,13 +767,7 @@ export class RuleEngine {
         }
         const ref = raw as { message_id?: unknown; channel_id?: unknown; index?: unknown } | null;
         if (typeof ref?.message_id !== "string" || typeof ref.channel_id !== "string") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
-        const message = (await source.get(`/channels/${ref.channel_id}/messages/${ref.message_id}`, {})) as APIMessage | null;
-        const index = typeof ref.index === "number" ? ref.index : 0;
-        const found = message && imageRefs(message).at(index);
-        if (!found) throw new Error(`メッセージ ${ref.message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
-        const image = await fetchImage(found);
-        if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
-        return image.data;
+        return (await messageImage(source, { channelId: ref.channel_id, messageId: ref.message_id, index: typeof ref.index === "number" ? ref.index : 0 })).data;
       };
       const decider = this.deps.decide?.(actorId);
       const bindings: SandboxBindings = {
@@ -798,7 +791,7 @@ export class RuleEngine {
             math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.svg`),
             convert: async (source: unknown, raw: unknown, name: string) => {
               const { data, format } = await convertImage(await load(source), parseOptions(ConvertOptionsSchema, raw));
-              return keep(data, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+              return keep(data, `${name || "image"}.${extOf(format)}`);
             },
           },
       };
@@ -812,7 +805,7 @@ export class RuleEngine {
       // A module draws with its own libraries and hands over the image; it is re-encoded so only real images go out.
       const image = async (data: Buffer, name: string) => {
         const { data: out, format } = await convertImage(data, {});
-        return keep(out, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+        return keep(out, `${name || "image"}.${extOf(format)}`);
       };
       result = await (this.deps.run ?? runModule)(program, { ...bindings, image }, SANDBOX_LIMITS);
     } catch (e) {
