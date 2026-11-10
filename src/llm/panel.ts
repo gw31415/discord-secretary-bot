@@ -13,7 +13,7 @@ import type { WebTool } from "../agent/web.ts";
 import { findModel, isClassifier, judgesOnly, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 import { ruleCustomId } from "../rules/panel.ts";
-import { WASM_SECTION_ID } from "../wasm/panel.ts";
+import { NS, WASM_HOME_ID } from "../discord/custom-id.ts";
 
 export type { ModelRole };
 
@@ -29,17 +29,17 @@ const MODEL_UNSET = "none";
 const MODEL_TYPED = "typed";
 
 export const CUSTOM_ID = {
-  keySetSelect: "llm:key:set",
-  keyDeleteSelect: "llm:key:delete",
-  keyModal: (p: KeyProviderId) => `llm:keymodal:${p}`,
+  keySetSelect: `${NS.llm}:key:set`,
+  keyDeleteSelect: `${NS.llm}:key:delete`,
+  keyModal: (p: KeyProviderId) => `${NS.llm}:keymodal:${p}`,
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
   // The render token makes each panel's selects new, so Discord forgets the option picked
   // last: one that opened a modal can then be picked again.
-  modelSelect: (role: ModelRole, p: ProviderId | "all", page: number, token = "") => `llm:model:${role}:${p}:${page}${token ? `:${token}` : ""}`,
-  webSelect: "llm:web:tool",
-  typedModelModal: (role: ModelRole) => `llm:typedmodal:${role}`,
-  readScopeSelect: "llm:read:scope",
-  page: (page: PanelPage) => `llm:page:${page}`,
+  modelSelect: (role: ModelRole, p: ProviderId | "all", page: number, token = "") => `${NS.llm}:model:${role}:${p}:${page}${token ? `:${token}` : ""}`,
+  webSelect: `${NS.llm}:web:tool`,
+  typedModelModal: (role: ModelRole) => `${NS.llm}:typedmodal:${role}`,
+  readScopeSelect: `${NS.llm}:read:scope`,
+  page: (page: PanelPage) => `${NS.llm}:page:${page}`,
 } as const;
 
 export interface SetupStatus {
@@ -137,7 +137,7 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
       components: [
         { type: ComponentType.Button, custom_id: ruleCustomId("home"), label: "ルール", style: ButtonStyle.Primary },
         { type: ComponentType.Button, custom_id: ruleCustomId("commands"), label: "コマンド", style: ButtonStyle.Primary },
-        { type: ComponentType.Button, custom_id: WASM_SECTION_ID, label: "Wasm", style: ButtonStyle.Primary },
+        { type: ComponentType.Button, custom_id: WASM_HOME_ID, label: "Wasm", style: ButtonStyle.Primary },
       ],
     },
     // From the per-use page, the モデル button above leads back to the models page.
@@ -425,7 +425,7 @@ export type PanelAction =
 /** Parses a custom_id (and select value) into an action. Unknown ids return null. */
 export function parseCustomId(customId: string, values: string[] = []): PanelAction | null {
   const [ns, kind, arg] = customId.split(":");
-  if (ns !== "llm" || !arg) return null;
+  if (ns !== NS.llm || !arg) return null;
   if (kind === "key" && (arg === "set" || arg === "delete")) {
     const provider = values[0] ?? "";
     if (!isKeyProviderId(provider)) return null;

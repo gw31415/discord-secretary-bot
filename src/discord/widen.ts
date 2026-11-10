@@ -2,6 +2,7 @@ import type { API } from "@discordjs/core";
 import { ButtonStyle, ComponentType, InteractionType, MessageFlags } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import { randomUUID } from "node:crypto";
+import { NS } from "./custom-id.ts";
 
 // Questions to the speaker in the middle of a reply: letting it read beyond
 // what everyone in the channel can see, or going on past its turn limit. The
@@ -9,7 +10,7 @@ import { randomUUID } from "node:crypto";
 // reply waits for the answer (or gives up after a while).
 
 export const WIDEN_TIMEOUT_MS = 2 * 60_000;
-const PREFIX = "widen";
+const PREFIX = NS.widen;
 
 interface Pending {
   speakerId: string;

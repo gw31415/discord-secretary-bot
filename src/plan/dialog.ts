@@ -19,6 +19,7 @@ import { dialogFileName, dialogImageIds } from "./files.ts";
 import { draftOf, RISK_LABEL } from "./types.ts";
 import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
+import { NS } from "../discord/custom-id.ts";
 
 // The approval dialog, drawn only from the Plan and its step states. Nothing
 // the conversing model wrote as explanation appears here; a plan made from code
@@ -45,7 +46,7 @@ const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise
 
 /** `rule` names which of the plan's rules a control is for ("visibility.r1"). */
 export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">, rule?: string): string {
-  return `plan:${action}${rule ? `.${rule}` : ""}:${plan.id}:${plan.hash.slice(0, 8)}`;
+  return `${NS.plan}:${action}${rule ? `.${rule}` : ""}:${plan.id}:${plan.hash.slice(0, 8)}`;
 }
 
 export function parsePlanCustomId(id: string): { action: PlanAction; planId: string; hash8: string; rule?: string } | null {

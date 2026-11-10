@@ -10,6 +10,7 @@ import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { ACTOR_EVENTS, TRIGGERS, triggerEvents } from "./triggers.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 import { truncate } from "../text.ts";
+import { NS, SETTINGS_HOME_ID } from "../discord/custom-id.ts";
 
 const VISIBILITY_LABEL = { auto: "(返事を全員に見せるかは判定用のモデルが決めます)", private: "(返事は実行した人だけに見えます)", public: "(返事は全員に見えます)" } as const;
 
@@ -39,11 +40,11 @@ export const RULE_PAGES = Object.keys(PAGE_LABEL) as RulePage[];
 /** The page menu's extra entry, which asks before deleting. */
 export const DELETE_CHOICE = "delete";
 
-/** The settings panel's home (CUSTOM_ID.page("home") in llm/panel.ts); the rules are one of its sections. */
-export const SETTINGS_HOME_ID = "llm:page:home";
+// The rules are one of the settings panel's sections.
+export { SETTINGS_HOME_ID };
 
 export function ruleCustomId(action: RuleAction, arg = ""): string {
-  return `rule:${action}:${arg}`;
+  return `${NS.rule}:${action}:${arg}`;
 }
 
 export function parseRuleCustomId(id: string): { action: RuleAction; arg: string } | null {

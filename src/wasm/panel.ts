@@ -3,7 +3,7 @@ import { ButtonStyle, ComponentType, InteractionType, MessageFlags, TextInputSty
 import type { APIButtonComponent, APIComponentInContainer, APIInteraction, APIModalInteractionResponseCallbackData, APIModalSubmitInteraction } from "discord-api-types/v10";
 import type { WasmModule, WasmSource } from "../db.ts";
 import { modalValue } from "../discord/modal.ts";
-import { SETTINGS_HOME_ID } from "../rules/panel.ts";
+import { NS, SETTINGS_HOME_ID } from "../discord/custom-id.ts";
 import type { Rendered } from "../rules/panel.ts";
 import { MAX_MEMORY_PAGES, MAX_MODULE_BYTES } from "./module.ts";
 import { MAX_BYTES_PER_USER, MAX_MODULES_PER_USER, ModuleRejected, sizeLabel } from "./registry.ts";
@@ -16,12 +16,11 @@ import { errorMessage } from "../errors.ts";
 // something once a rule runs it. Modules belong to the person, like the
 // rest of /settings, so the section is the same in every server.
 
-export const WASM_SECTION_ID = "wasm:home:";
 const ACTIONS = new Set(["home", "open", "upload", "uploaded", "rename", "renamed", "del", "del2", "src"]);
 type WasmAction = "home" | "open" | "upload" | "uploaded" | "rename" | "renamed" | "del" | "del2" | "src";
 
 export function wasmCustomId(action: WasmAction, arg = ""): string {
-  return `wasm:${action}:${arg}`;
+  return `${NS.wasm}:${action}:${arg}`;
 }
 
 function parse(id: string): { action: WasmAction; arg: string } | null {

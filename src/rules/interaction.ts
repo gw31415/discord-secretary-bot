@@ -2,6 +2,7 @@ import type { API } from "@discordjs/core";
 import { InteractionResponseType, InteractionType, MessageFlags, Routes } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import { errorMessage } from "../errors.ts";
+import { BOT_NAMESPACES } from "../discord/custom-id.ts";
 
 // Presses of buttons and selects on the bot's messages, and forms sent from
 // them, that are not the bot's own panels go to INTERACTION_CREATE rules. The
@@ -12,9 +13,6 @@ import { errorMessage } from "../errors.ts";
 // wait for the run's changes. If nothing has answered in time the press is
 // acknowledged without a change, and a later message goes out as a follow-up.
 
-/** The first segments of the custom ids the bot's own panels and dialogs use. */
-export const BOT_CUSTOM_ID_NAMESPACES = new Set(["llm", "rule", "plan", "widen", "wasm"]);
-
 /** How long a run may take before the press is acknowledged without an answer. */
 export const ANSWER_WITHIN_MS = 2_500;
 /** Discord's interaction tokens last 15 minutes. */
@@ -23,7 +21,7 @@ export const ANSWER_TTL_MS = 15 * 60_000;
 /** A press or form on a message that is not the bot's own panel. */
 export function isRuleInteraction(interaction: APIInteraction): boolean {
   if (interaction.type !== InteractionType.MessageComponent && interaction.type !== InteractionType.ModalSubmit) return false;
-  return !BOT_CUSTOM_ID_NAMESPACES.has(interaction.data.custom_id.split(":")[0] ?? "");
+  return !BOT_NAMESPACES.has(interaction.data.custom_id.split(":")[0] ?? "");
 }
 
 /** The event the rule reads: the interaction as Discord sent it, without its token. */
