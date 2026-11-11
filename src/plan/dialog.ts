@@ -1,4 +1,4 @@
-import { ButtonStyle, ComponentType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, TextInputStyle } from "discord-api-types/v10";
 import type {
   APIActionRowComponent,
   APIButtonComponent,
@@ -11,14 +11,20 @@ import type {
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
 import { fenceLanguage, limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
-import { VISIBILITY_CHOICES } from "../rules/command.ts";
+import { visibilityLabel, visibilitySelect } from "../rules/command.ts";
 import { DEFAULT_LIMITS } from "../rules/types.ts";
+import { messageRef } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
 import { lineDiff } from "./diff.ts";
 import { dialogFileName, dialogImageIds } from "./files.ts";
-import { RISK_LABEL } from "./types.ts";
+import { draftOf, RISK_LABEL } from "./types.ts";
 import type { Plan, PlanRuleDraft, PlanStatus, Risk, Step } from "./types.ts";
 import { irreversibleSteps, specOf, stepRisk } from "./validate.ts";
+import { NS } from "../discord/custom-id.ts";
+import { actionRow, button, discordTime, fence, textDisplay, v2Message } from "../discord/ui.ts";
+import type { Rendered } from "../discord/ui.ts";
+import { discordErrorText, settingsCommand } from "../discord/labels.ts";
+import { sentence, truncate } from "../text.ts";
 
 // The approval dialog, drawn only from the Plan and its step states. Nothing
 // the conversing model wrote as explanation appears here; a plan made from code
@@ -45,7 +51,7 @@ const ACTIONS = new Set<PlanAction>(["run", "cancel", "json", "confirm", "revise
 
 /** `rule` names which of the plan's rules a control is for ("visibility.r1"). */
 export function customId(action: PlanAction, plan: Pick<Plan, "id" | "hash">, rule?: string): string {
-  return `plan:${action}${rule ? `.${rule}` : ""}:${plan.id}:${plan.hash.slice(0, 8)}`;
+  return `${NS.plan}:${action}${rule ? `.${rule}` : ""}:${plan.id}:${plan.hash.slice(0, 8)}`;
 }
 
 export function parsePlanCustomId(id: string): { action: PlanAction; planId: string; hash8: string; rule?: string } | null {
@@ -57,19 +63,8 @@ export function parsePlanCustomId(id: string): { action: PlanAction; planId: str
 
 /** While the plan waits, who sees a command's replies is picked under its rule; the pick is part of what is approved. */
 function visibilityRow(plan: Plan, state: DialogState, r: PlanRuleDraft): APIActionRowComponent<APIStringSelectComponent>[] {
-  if (state.status !== "pending_approval" || state.actions === false || !r.trigger.command) return [];
-  return [
-    {
-      type: ComponentType.ActionRow,
-      components: [
-        {
-          type: ComponentType.StringSelect,
-          custom_id: customId("visibility", plan, r.key),
-          options: VISIBILITY_CHOICES.map((o) => ({ value: o.value, label: o.label, default: (r.trigger.command!.visibility ?? "auto") === o.value })),
-        },
-      ],
-    },
-  ];
+  if (state.status !== "pending_approval" || state.actions === false || state.busy || !r.trigger.command) return [];
+  return [visibilitySelect(customId("visibility", plan, r.key), r.trigger.command.visibility)];
 }
 
 const MAX_LISTED = 15;
@@ -96,6 +91,35 @@ function beforeOf(plan: Plan, resource: string | undefined): Record<string, unkn
   return plan.preconditions.find((p) => p.resource === resource)?.values ?? null;
 }
 
+/**
+ * A resource key ("role:123", "message:1/2") as people know the thing: by the
+ * name the plan labelled it with, else as the key itself.
+ */
+export function resourceName(plan: Plan, resource: string): string {
+  const sep = resource.indexOf(":");
+  const kind = resource.slice(0, sep);
+  const [a, b] = resource.slice(sep + 1).split("/") as [string, string | undefined];
+  const named = (id: string | undefined) => (id === undefined ? undefined : plan.labels[id]);
+  const name = beforeOf(plan, resource)?.name;
+  switch (kind) {
+    case "role":
+    case "channel":
+      return named(a) ?? resource;
+    case "member":
+      return named(a) ? `@${named(a)}` : resource;
+    case "message":
+      return named(a) && b ? messageRef({ channel: a, message: b }, (id) => label(plan, id), plan.guildId) : resource;
+    case "emoji":
+      return typeof name === "string" ? `:${name}:` : resource;
+    case "sticker":
+      return typeof name === "string" ? `スタンプ「${name}」` : resource;
+    case "ban":
+      return named(b) ? `@${named(b)} のBAN` : resource;
+    default:
+      return resource;
+  }
+}
+
 interface Group {
   label: string;
   change: string;
@@ -103,6 +127,7 @@ interface Group {
   targets: string[];
   states: StepRow["state"][];
   errors: string[];
+  stepIds: string[];
 }
 
 /**
@@ -116,17 +141,18 @@ function groups(plan: Plan, steps?: StepRow[]): Group[] {
   for (const step of plan.steps) {
     const spec = specOf(step);
     const resource = spec.target?.(step.pathParams, plan.guildId);
-    const { target, change } = spec.describe(step.pathParams, step.body as Body, beforeOf(plan, resource), (id) => label(plan, id));
+    const { target, change } = spec.describe(step.pathParams, step.body as Body, beforeOf(plan, resource), (id) => label(plan, id), plan.guildId);
     const risk = stepRisk(step);
     const key = `${spec.op}\u0000${change}\u0000${risk}`;
     let group = byKey.get(key);
     if (!group) {
-      group = { label: spec.label, change, risk, targets: [], states: [], errors: [] };
+      group = { label: spec.label, change, risk, targets: [], states: [], errors: [], stepIds: [] };
       byKey.set(key, group);
       out.push(group);
     }
     const state = states.get(step.id);
     group.targets.push(target);
+    group.stepIds.push(step.id);
     group.states.push(state?.state ?? "pending");
     if (state?.state === "failed" && state.error) group.errors.push(state.error);
   }
@@ -140,18 +166,23 @@ function mark(g: Group, started: boolean, index: number): string {
   return "・";
 }
 
-function groupLine(g: Group, started: boolean, index: number): string {
+function groupLine(g: Group, started: boolean, index: number, risk: boolean): string {
   const shown = g.targets.slice(0, MAX_TARGETS_SHOWN).join("、");
   const more = g.targets.length > MAX_TARGETS_SHOWN ? ` ほか${g.targets.length - MAX_TARGETS_SHOWN}件` : "";
   const count = g.targets.length > 1 ? `(${g.targets.length}件${started ? `、完了 ${g.states.filter((s) => s === "done").length}` : ""}) ` : "";
-  const error = g.errors.length > 0 ? `\n　→ ${g.errors[0]!.slice(0, 200)}` : "";
-  return `${mark(g, started, index)} **${g.label}** ${count}${shown}${more} — ${g.change}  \`${RISK_LABEL[g.risk]}\`${error}`;
+  const error = g.errors.length > 0 ? `\n　→ ${truncate(discordErrorText(g.errors[0]!), 200)}` : "";
+  return `${mark(g, started, index)} **${g.label}** ${count}${shown}${more} — ${g.change}${risk ? `  \`${RISK_LABEL[g.risk]}\`` : ""}${error}`;
 }
 
-/** One line per kind of change: operation, targets, before → after, risk. */
-export function stepLines(plan: Plan, steps?: StepRow[]): string[] {
+/** One line per kind of change: operation, targets, before → after, and with `risk` its risk. */
+export function stepLines(plan: Plan, steps?: StepRow[], { risk = false }: { risk?: boolean } = {}): string[] {
   const started = !!steps && steps.some((s) => s.state !== "pending");
-  return groups(plan, steps).map((g, i) => groupLine(g, started, i));
+  return groups(plan, steps).map((g, i) => groupLine(g, started, i, risk));
+}
+
+/** How the dialog names each step to people: its line's number and operation ("2. ロール付与"), by step id. */
+export function stepNames(plan: Plan): Map<string, string> {
+  return new Map(groups(plan).flatMap((g, i) => g.stepIds.map((id) => [id, `${i + 1}. ${g.label}`] as const)));
 }
 
 /** Single messages deleted up to this many, and DMs up to this many, take one click. */
@@ -211,28 +242,38 @@ export interface DialogState {
   reason?: string | null;
   /** Show the buttons for the current status (false once someone chose to leave it). */
   actions?: boolean;
-}
-
-function unix(iso: string): number {
-  return Math.floor(Date.parse(iso) / 1000);
+  /** Shown in place of the status line while a press is being worked on ("修正中…"); the buttons are hidden meanwhile. */
+  busy?: string;
+  /** /settings's id, so the line after registering rules links to it. */
+  settingsCommandId?: string;
 }
 
 function statusLine(plan: Plan, state: DialogState): string {
+  if (state.busy) return state.busy;
   const done = state.steps?.filter((s) => s.state === "done").length ?? 0;
   switch (state.status) {
     case "pending_approval":
-      return `${needsTypedConfirm(plan) ? "戻せない操作があるので、実行時に確認の入力があります。\n" : ""}-# 期限 <t:${unix(plan.expiresAt)}:R> · \`${plan.id}\``;
+      return `${needsTypedConfirm(plan) ? "⚠️ 戻せない操作を含みます\n" : ""}-# 期限 ${discordTime(plan.expiresAt)}`;
     case "approved":
     case "executing":
       return plan.steps.length > 1 ? `実行中… ${done}/${plan.steps.length}` : "実行中…";
-    case "succeeded":
-      return plan.rules?.length ? `✅ 実行し、ルール${plan.rules.length}件を登録しました。止めるときは \`/settings\` の「ルール」から。` : "✅ 実行しました";
-    case "failed":
-      return `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)。${state.reason ?? ""}${state.actions === false ? "" : "\n「復元」は済んだ変更を戻す案を出します。"}`;
+    case "succeeded": {
+      if (!plan.rules?.length) return "✅ 実行しました";
+      const settings = settingsCommand(state.settingsCommandId);
+      return plan.steps.length > 0 ? `✅ 実行しました。ルールは ${settings} で止められます` : `✅ ルール${plan.rules.length}件を登録しました。${settings} で止められます`;
+    }
+    case "failed": {
+      const head = `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)`;
+      const reason = state.reason ?? "";
+      // A failed step shows why under its own line, so only what was added after it (restore, keep) follows here.
+      if (!state.steps?.some((s) => s.state === "failed")) return reason ? `${head}。${reason}` : head;
+      const notes = reason.split("\n").slice(1).filter(Boolean);
+      return [head, ...notes].join("\n");
+    }
     case "cancelled":
       return state.reason ?? "取り消しました";
     case "aborted":
-      return `中止しました: ${state.reason ?? "前提が変わりました"}`;
+      return `⚠️ 中止しました。${sentence(state.reason ?? "前提が変わりました")}`;
   }
 }
 
@@ -250,13 +291,9 @@ function color(plan: Plan, status: PlanStatus): number {
   }
 }
 
-function button(id: string, text: string, style: ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Danger): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: id, label: text, style };
-}
-
 function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
   const out: APIButtonComponent[] = [];
-  if (state.actions === false) return out;
+  if (state.actions === false || state.busy) return out;
   switch (state.status) {
     case "pending_approval":
       out.push(button(customId("run", plan), "実行", plan.risk === "destructive" ? ButtonStyle.Danger : ButtonStyle.Primary));
@@ -278,11 +315,11 @@ function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
 
 const VIEW_LABEL: Record<DialogView, string> = { result: "概要", code: "コード", details: "詳細" };
 
-/** The sections this plan has: code only when it was made from code or registers rules, details only when there is more to show. */
+/** The sections this plan has: code only when it was made from code or registers rules. Details always: who asked, the risk and the plan's id live there. */
 function views(plan: Plan): DialogView[] {
   const out: DialogView[] = ["result"];
   if (plan.source || plan.rules?.length) out.push("code");
-  if (plan.rules?.length || (plan.source && plan.steps.length > 0)) out.push("details");
+  out.push("details");
   return out;
 }
 
@@ -311,11 +348,6 @@ function viewMenu(plan: Plan, current: DialogView): APIActionRowComponent<APIStr
   };
 }
 
-/** Keeps a code block from being closed by its own content. */
-function fenced(lang: string, body: string): string {
-  return `\`\`\`${lang}\n${body.replaceAll("```", "`\u200b``")}\n\`\`\``;
-}
-
 /**
  * Only the code: whoever opens this section came to read it, and the summary
  * already explains it. A new version of a rule shows its diff.
@@ -338,7 +370,7 @@ function codeBody(plan: Plan, room: number): string[] {
     const limit = Math.max(200, Math.min(MAX_CODE, share - title.length - 100));
     const cut = code.lastIndexOf("\n", limit);
     const shown = code.length > limit ? `${code.slice(0, cut > 0 ? cut : limit)}\n${lang === "diff" ? "…" : "// …"}(続きは「ファイルで受け取る」)` : code;
-    return [`**${title}**`, fenced(lang, shown)];
+    return [`**${title}**`, fence(lang, shown)];
   });
 }
 
@@ -370,17 +402,39 @@ export function codeFiles(plan: Plan): Array<{ name: string; data: Buffer }> {
 /** The code block language for a compiler language id. */
 function replyLine(r: PlanRuleDraft): string {
   const images = r.dry.images ? `(画像${r.dry.images}枚)` : "";
-  const response = r.dry.response ? `\n　応答: ${r.dry.response.slice(0, 200)}` : "";
-  return `${r.dry.reply || images ? `\n　返事: ${(r.dry.reply ?? "").slice(0, 200)}${images}` : ""}${response}`;
+  const response = r.dry.response ? `\n　応答: ${truncate(r.dry.response, 200)}` : "";
+  return `${r.dry.reply || images ? `\n　返事: ${truncate(r.dry.reply ?? "", 200)}${images}` : ""}${response}`;
 }
 
-function dryLine(r: PlanRuleDraft): string {
-  const where = r.dry.source ? `${r.dry.source}で` : "";
+/** The dry run in one line for the summary; why it failed stays, the rest is in the details. */
+function dryShort(r: PlanRuleDraft): string {
   switch (r.dry.outcome) {
-    case "steps":
-      return `ドライラン(${where}試行): ${r.dry.lines.length}種類の変更をします\n${r.dry.lines.slice(0, 3).map((l) => `　${l}`).join("\n")}${replyLine(r)}`;
+    case "steps": {
+      const n = r.dry.lines.length;
+      return n === 1 ? "ドライラン: 1種類の操作をします" : `ドライラン: ${n}種類の操作をします`;
+    }
     case "none":
-      return `ドライラン(${where}試行): 何も変更しません${replyLine(r)}`;
+      return "ドライラン: 何も変更しません";
+    case "pending":
+      return "ドライラン: 登録後に動きます";
+    case "no_event":
+      return "ドライラン: 試せるイベントがありませんでした";
+    case "error":
+      return `ドライラン: エラー ${r.dry.problems[0] ?? ""}`;
+  }
+}
+
+/** The dry run in full, with where its event came from: for the details. */
+function dryLine(r: PlanRuleDraft): string {
+  const head = r.dry.source ? `ドライラン(${r.dry.source})` : "ドライラン";
+  switch (r.dry.outcome) {
+    case "steps": {
+      const n = r.dry.lines.length;
+      const lines = [...r.dry.lines.slice(0, 3), ...(n > 3 ? [`…ほか${n - 3}種類`] : [])];
+      return `${head}: ${n}種類の操作をします\n${lines.map((l) => `　${l}`).join("\n")}${replyLine(r)}`;
+    }
+    case "none":
+      return `${head}: 何も変更しません${replyLine(r)}`;
     case "pending":
       return "ドライラン: この変更で作るものを使うため、登録後に動きます(コードがエラーにならないことは確かめました)";
     case "no_event":
@@ -413,44 +467,55 @@ function changeLines(r: PlanRuleDraft): string[] {
   return [...code, ...settings.map((c) => `- ${c}`)];
 }
 
-/** A rule the plan registers, in short: when it runs, what it does or what changes, and how its dry run went. */
+/**
+ * A rule the plan registers, in short: when it runs, what it does or what changes, and how its dry run went
+ * in a line. Its risk, the event's internal name, who sees a command's replies and the dry run in full are in the details.
+ */
 function ruleSummary(r: PlanRuleDraft): string {
   const triggerChanged = r.replaces?.before && !same(r.replaces.before.trigger, r.trigger);
   return [
-    `**${r.name}**${r.replaces ? `(v${r.replaces.version} からの変更${r.replaces.name !== r.name ? `、元の名前「${r.replaces.name}」` : ""})` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
-    ...(triggerChanged ? [] : [`きっかけ: ${triggerLabel(r.trigger)}`]),
+    `**${r.name}**${r.replaces ? `(v${r.replaces.version} からの変更${r.replaces.name !== r.name ? `、元の名前「${r.replaces.name}」` : ""})` : ""}`,
+    ...(triggerChanged ? [] : [`きっかけ: ${triggerLabel(r.trigger, { visibility: false, internal: false })}`]),
     ...(r.replaces ? changeLines(r) : [r.summary ?? "説明を作れませんでした。「コード」で確かめてください。"]),
-    dryLine(r),
+    dryShort(r),
   ].join("\n");
 }
 
-/** A rule's full definition, drawn only from it. */
-function ruleDetail(plan: Plan, r: PlanRuleDraft): string {
+/** A rule's full definition, drawn only from it. `picking`: the reply audience's select follows, so its heading closes the text. */
+function ruleDetail(plan: Plan, r: PlanRuleDraft, picking: boolean): string {
   const lookup = (id: string) => label(plan, id);
   return [
-    `**${r.name}**`,
+    `**${r.name}** · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
+    `きっかけ: ${triggerLabel(r.trigger, { visibility: false })}`,
     ...(r.limits ? [limitsLabel(r.limits)] : []),
     `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n") || "なし(返事だけします)"}`,
-    ...(r.params ? [`params:\n${paramsText(r.params, lookup)}`] : []),
-    ...(r.trigger.command ? ["返事を見せる相手:"] : []),
+    ...(r.params ? [`使う値:\n${paramsText(r.params, lookup)}`] : []),
+    dryLine(r),
+    ...(r.trigger.command ? [picking ? "返事を見せる相手:" : `返事を見せる相手: ${visibilityLabel(r.trigger.command.visibility ?? "auto")}`] : []),
   ].join("\n");
 }
 
 function resultBody(plan: Plan, state: DialogState): string[] {
   const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps);
   const listed = lines.slice(0, MAX_LISTED);
-  if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(全件は「ファイルで受け取る」)`);
+  if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(続きは「ファイルで受け取る」)`);
   const explained = plan.source ? [`**コードの説明**\n${plan.source.summary ?? "説明を作れませんでした。「コード」で確かめてください。"}`] : [];
-  const rules = plan.rules?.length ? [`**登録するルール**(${label(plan, plan.actor.userId)} の権限で、確認なしに動きます)`] : [];
+  // Whose permissions each rule runs with is said once, on its trigger's line.
+  const rules = plan.rules?.length ? ["**登録するルール**(確認なしに動きます)"] : [];
   return [...explained, ...listed, ...rules];
 }
 
-function detailsBody(plan: Plan): string[] {
-  const out: string[] = [];
+/** Who asked, how risky the plan is in all and step by step, how much it does, and its id. */
+function detailsBody(plan: Plan, state: DialogState): string[] {
+  const counts = [...(plan.steps.length > 0 || !plan.rules?.length ? [`${plan.steps.length}件`] : []), ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join(" · ");
+  const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps, { risk: true });
+  const listed = lines.slice(0, MAX_LISTED);
+  if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(続きは「ファイルで受け取る」)`);
+  const out: string[] = [`依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts}`, `変更案 \`${plan.id}\``, ...listed];
   if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
-    const json = JSON.stringify(plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) })));
-    out.push(`**コードが作った変更**\n${json.length <= MAX_STEPS_JSON ? fenced("json", json) : "長いため「ファイルで受け取る」で確かめてください"}`);
+    const json = JSON.stringify(plan.steps.map(draftOf));
+    out.push(`**コードが作った変更**\n${fence("json", json.length <= MAX_STEPS_JSON ? json : `${json.slice(0, MAX_STEPS_JSON)}\n…(続きは「ファイルで受け取る」)`)}`);
   }
   return out;
 }
@@ -466,56 +531,47 @@ function gallery(plan: Plan): Array<APIMediaGalleryComponent | APITextDisplayCom
   ];
 }
 
-function header(plan: Plan): string {
-  const counts = [...(plan.steps.length > 0 || !plan.rules?.length ? [`${plan.steps.length}件`] : []), ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join(" · ");
-  return `### 変更の確認\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts}`;
-}
+/** The heading alone: who asked, the risk and the counts are in the details. */
+const HEADER = "### 変更の確認";
 
 /**
  * Laid out from the parts to the whole: the shown section (on the summary, each
  * rule with the pick that belongs to it), the menu that switches sections, and
  * last, under a divider, the dialog's own status and the buttons that act on it.
  */
-export function renderDialog(plan: Plan, state: DialogState): { components: APIMessageTopLevelComponent[]; flags: MessageFlags } {
+export function renderDialog(plan: Plan, state: DialogState): Rendered {
   let room = MAX_TEXT;
   const text = (content: string): APITextDisplayComponent => {
-    const shown = content.slice(0, Math.max(0, room));
+    // Whatever is cut ends with "…", which takes one of the characters left.
+    const shown = content.length <= room ? content : room > 1 ? truncate(content, room - 1) : "";
     room -= shown.length;
-    return { type: ComponentType.TextDisplay, content: shown || "…" };
+    return textDisplay(shown || "…");
   };
-  const row = (components: APIButtonComponent[]): APIActionRowComponent<APIButtonComponent>[] => (components.length > 0 ? [{ type: ComponentType.ActionRow, components }] : []);
+  const row = (components: APIButtonComponent[]): APIActionRowComponent<APIButtonComponent>[] => (components.length > 0 ? [actionRow(components)] : []);
   const status = statusLine(plan, state);
   room -= status.length;
   const view = viewOf(plan, state);
   const section = view === "result"
     ? [
-        text([header(plan), ...resultBody(plan, state)].join("\n")),
+        text([HEADER, ...resultBody(plan, state)].join("\n")),
         ...gallery(plan),
         ...(plan.rules ?? []).map((r) => text(ruleSummary(r))),
       ]
     : view === "code"
-      ? [text([header(plan), ...codeBody(plan, room - header(plan).length)].join("\n"))]
+      ? [text([HEADER, ...codeBody(plan, room - HEADER.length)].join("\n"))]
       : [
-          text([header(plan), ...detailsBody(plan)].join("\n")),
-          // Who sees a command's replies starts on the judge model's pick (the summary says which); it is changed here.
-          ...(plan.rules ?? []).flatMap((r) => [text(ruleDetail(plan, r)), ...visibilityRow(plan, state, r)]),
+          text([HEADER, ...detailsBody(plan, state)].join("\n")),
+          // Who sees a command's replies starts on the judge model's pick; it is shown and changed only here.
+          ...(plan.rules ?? []).flatMap((r) => {
+            const select = visibilityRow(plan, state, r);
+            return [text(ruleDetail(plan, r, select.length > 0)), ...select];
+          }),
         ];
-  return {
-    components: [
-      {
-        type: ComponentType.Container,
-        accent_color: color(plan, state.status),
-        components: [
-          ...section,
-          viewMenu(plan, view),
-          { type: ComponentType.Separator },
-          { type: ComponentType.TextDisplay, content: status },
-          ...row(buttons(plan, state)),
-        ],
-      },
-    ],
-    flags: MessageFlags.IsComponentsV2,
-  };
+  // Not ephemeral: the dialog stays in the channel.
+  return v2Message(
+    [...section, viewMenu(plan, view), { type: ComponentType.Separator }, textDisplay(status), ...row(buttons(plan, state))],
+    { ephemeral: false, accent: color(plan, state.status) },
+  );
 }
 
 /** The dialog's text, for tests and logs. */

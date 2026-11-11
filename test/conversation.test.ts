@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import type { APIMessage } from "discord-api-types/v10";
-import { Conversations, SESSION_MS, setupNotice, splitForDiscord, styleSamples } from "../src/conversation.ts";
+import { Conversations, SESSION_MS, replyFailure, setupNotice, splitForDiscord, styleSamples } from "../src/conversation.ts";
 import type { ConversationDeps, GuildMessage } from "../src/conversation.ts";
 import { Store } from "../src/db.ts";
 import { parseJudgement } from "../src/agent/judge.ts";
@@ -382,4 +382,12 @@ test("without a way to ask, the agent gets no widen hook", async () => {
   const t = setup({ respond: async (input) => (seen.push(input.widen), { text: "answer", progress: 0, turns: 1, toolCalls: [] }) });
   await t.conv.handle(message("1", "1", "<@999> hi", { mentions: [mention] }));
   assert.deepEqual(seen, [undefined]);
+});
+
+test("a failed reply says what went wrong: a 4xx points to /settings, a dropped connection asks to wait", () => {
+  assert.equal(replyFailure('401 {"error":"invalid x-api-key"}', "123"), "応答を作れませんでした(LLMのエラー 401)。</settings:123> のキーとモデルを確かめてください。");
+  assert.equal(replyFailure("429 rate limited"), "応答を作れませんでした(LLMのエラー 429)。`/settings` のキーとモデルを確かめてください。");
+  assert.equal(replyFailure("terminated"), "LLMとの通信が切れて答えられませんでした。少し待ってから話しかけてください。");
+  assert.equal(replyFailure("unexpected end of JSON"), "応答を作れませんでした。unexpected end of JSON。");
+  assert.equal(replyFailure("x".repeat(150)), `応答を作れませんでした。${"x".repeat(100)}…`);
 });

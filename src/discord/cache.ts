@@ -5,7 +5,7 @@ import type {
   APIRole,
   GatewayGuildCreateDispatchData,
 } from "discord-api-types/v10";
-import { ChannelType } from "discord-api-types/v10";
+import { isThread } from "./permissions.ts";
 import type { ChannelState, GuildState, MemberState, OverwriteState, RoleState } from "./permissions.ts";
 
 // In-memory mirror of each guild the bot serves, kept current from Gateway
@@ -36,11 +36,11 @@ export function toMember(member: Pick<APIGuildMember, "roles"> & { user: { id: s
   return { userId: member.user.id, roleIds: [...member.roles], bot: member.user.bot ?? false };
 }
 
-const THREAD_TYPES = new Set<number>([ChannelType.AnnouncementThread, ChannelType.PublicThread, ChannelType.PrivateThread]);
-
 export class GuildCache {
   guild: GuildState | null = null;
   readonly guildId: string;
+  /** The server's name, for messages sent outside it (a DM saying which server's rule stopped). */
+  name: string | null = null;
   /** Who is in which voice channel: user id -> channel id. */
   readonly voice = new Map<string, string>();
   /**
@@ -60,6 +60,7 @@ export class GuildCache {
 
   loadGuild(data: GatewayGuildCreateDispatchData): void {
     if (data.id !== this.guildId) return;
+    this.name = data.name;
     this.guild = {
       id: data.id,
       ownerId: data.owner_id,
@@ -83,6 +84,10 @@ export class GuildCache {
     return before;
   }
 
+  setName(name: string): void {
+    this.name = name;
+  }
+
   setOwner(ownerId: string): void {
     if (this.guild) this.guild.ownerId = ownerId;
   }
@@ -99,7 +104,7 @@ export class GuildCache {
 
   upsertChannel(channel: APIChannel): void {
     this.guild?.channels.set(channel.id, toChannel(channel));
-    if (!THREAD_TYPES.has(channel.type)) this.raw?.channels.set(channel.id, channel);
+    if (!isThread(channel)) this.raw?.channels.set(channel.id, channel);
   }
 
   deleteChannel(channelId: string): void {

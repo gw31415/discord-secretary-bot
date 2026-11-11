@@ -1,5 +1,6 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { APIMessage } from "discord-api-types/v10";
+import type { Reader } from "../discord/reader.ts";
 import { forModel, MAX_SOURCE_BYTES } from "../media.ts";
 
 // Images the model may look at: attachments and embed images of messages it
@@ -51,6 +52,20 @@ export async function fetchImage(ref: ImageRef, fetchFn: typeof fetch = fetch): 
   } catch {
     return null;
   }
+}
+
+/** An image on a message the reader may open, as it was posted. */
+export async function messageImage(
+  reader: Pick<Reader, "get">,
+  at: { channelId: string; messageId: string; index: number },
+  fetchFn?: typeof fetch,
+): Promise<{ data: Buffer; mimeType: string }> {
+  const message = (await reader.get(`/channels/${at.channelId}/messages/${at.messageId}`)) as APIMessage | null;
+  const ref = message && imageRefs(message).at(at.index);
+  if (!ref) throw new Error(`メッセージ ${at.messageId} に${at.index ? ` ${at.index + 1}枚目の` : ""}画像がありません`);
+  const image = await fetchImage(ref, fetchFn);
+  if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
+  return image;
 }
 
 export async function downloadImages(refs: ImageRef[], fetchFn: typeof fetch = fetch): Promise<ImageContent[]> {

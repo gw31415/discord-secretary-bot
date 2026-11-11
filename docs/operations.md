@@ -14,12 +14,12 @@ Botが行える書き込みは、下の表の操作だけです。`PATCH /guilds
 | 操作 | 内容 | 危険度 | 要る権限 |
 |---|---|---|---|
 | `POST /channels/{channel}/messages` | 投稿(`content`、`files` に画像ID、`components` にボタン・セレクトなど、`flags`) | 書き込み | チャンネルを見る・メッセージを送信 |
-| `PATCH /channels/{channel}/messages/{message}` | Botの投稿を編集(`content`・`components`・`flags`) | 書き込み | チャンネルを見る・履歴を読む・メッセージの管理 |
-| `DELETE /channels/{channel}/messages/{message}` | メッセージ削除 | 破壊的 | チャンネルを見る・履歴を読む・メッセージの管理 |
+| `PATCH /channels/{channel}/messages/{message}` | Botの投稿を編集(`content`・`components`・`flags`) | 書き込み | チャンネルを見る・メッセージ履歴を読む・メッセージの管理 |
+| `DELETE /channels/{channel}/messages/{message}` | メッセージ削除 | 破壊的 | チャンネルを見る・メッセージ履歴を読む・メッセージの管理 |
 | `POST /channels/{channel}/messages/bulk-delete` | メッセージ一括削除(2〜100件、2週間以内) | 破壊的 | 同上 |
-| `PUT /channels/{channel}/messages/{message}/reactions/{emoji}/@me` | リアクションを付ける | 書き込み | チャンネルを見る・履歴を読む・リアクションの追加 |
-| `DELETE …/reactions/{emoji}/@me` | Botのリアクションを外す | 書き込み | チャンネルを見る・履歴を読む |
-| `DELETE …/reactions/{emoji}/{user}` | ほかの人のリアクションを外す | 書き込み | チャンネルを見る・履歴を読む・メッセージの管理 |
+| `PUT /channels/{channel}/messages/{message}/reactions/{emoji}/@me` | リアクションを付ける | 書き込み | チャンネルを見る・メッセージ履歴を読む・リアクションの追加 |
+| `DELETE …/reactions/{emoji}/@me` | Botのリアクションを外す | 書き込み | チャンネルを見る・メッセージ履歴を読む |
+| `DELETE …/reactions/{emoji}/{user}` | ほかの人のリアクションを外す | 書き込み | チャンネルを見る・メッセージ履歴を読む・メッセージの管理 |
 | `PUT /channels/{channel}/messages/pins/{message}` | ピン留め | 書き込み | チャンネルを見る・メッセージのピン留め |
 | `DELETE /channels/{channel}/messages/pins/{message}` | ピン留め解除 | 書き込み | 同上 |
 | `POST /guilds/{guild}/channels` | チャンネル作成 | 書き込み | チャンネルの管理(権限の上書きを付けるならロールの管理も) |
@@ -51,7 +51,7 @@ Botが行える書き込みは、下の表の操作だけです。`PATCH /guilds
 |---|---|---|
 | `nick` | ニックネーム(32文字まで、`null` で消す) | ニックネームの管理 |
 | `communication_disabled_until` | タイムアウトの終了時刻(最長28日後、`null` で解除) | メンバーをタイムアウト |
-| `mute` / `deaf` | サーバーミュート / スピーカーミュート | メンバーをミュート / スピーカーミュート |
+| `mute` / `deaf` | サーバーミュート / スピーカーミュート | メンバーをミュート / メンバーをスピーカーミュート |
 | `channel_id` | ボイスチャンネルの移動先(`null` で切断) | メンバーを移動 |
 
 ロールの上下はニックネームとタイムアウトのときだけ確かめます(Discord と同じ)。

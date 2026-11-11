@@ -3,11 +3,12 @@ import type { Store, WasmModule } from "./db.ts";
 import type { CompilerLanguage, SourceFile } from "./wasm/compiler.ts";
 import type { CompileResult, FreshModule } from "./wasm/registry.ts";
 import { formatMessage } from "./agent/tools.ts";
+import type { WasmTools } from "./agent/tools.ts";
 import { imageRefs } from "./agent/images.ts";
 import type { ImageRef } from "./agent/images.ts";
 import { resolveWebAccess } from "./agent/web.ts";
 import { Inbox, ReplyFailed } from "./agent/respond.ts";
-import { isTransient } from "./agent/retry.ts";
+import { CLIENT_ERROR, isTransient } from "./agent/retry.ts";
 import { ImageBox } from "./agent/attachments.ts";
 import type { ImageTools } from "./agent/attachments.ts";
 import type { Attachment } from "./plan/types.ts";
@@ -15,7 +16,7 @@ import type { RespondInput, RespondResult } from "./agent/respond.ts";
 import type { Judgement } from "./agent/judge.ts";
 import type { ChooseInput, ReactionChoice } from "./agent/react.ts";
 import { CONFIDENCE_THRESHOLD } from "./agent/judge.ts";
-import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
+import { chatModelFor, findChatModel, judgeModelFor, judgeRef } from "./llm/models.ts";
 import { llmCoder } from "./agent/coder.ts";
 import { decideFor } from "./agent/decide.ts";
 import { toUploadable } from "./media.ts";
@@ -25,8 +26,12 @@ import type { Reader, ReadScope } from "./discord/reader.ts";
 import type { ContinueRequest, WidenRequest } from "./discord/widen.ts";
 import type { ProposeInput } from "./plan/service.ts";
 import type { Plan } from "./plan/types.ts";
+import { draftOf } from "./plan/types.ts";
 import type { Rule, RuleRun } from "./rules/types.ts";
 import { SETTINGS_COMMAND_ID } from "./discord/commands.ts";
+import { settingsCommand } from "./discord/labels.ts";
+import { errorMessage } from "./errors.ts";
+import { sentence, truncate } from "./text.ts";
 
 // Conversation mode: wake on a mention, answer messages addressed to the bot,
 // and fall asleep after a quiet period. One session per channel (a thread is
@@ -120,8 +125,15 @@ export type Decision =
 
 /** The DM to someone who has not set up; with the command's id, /settings is a link that opens it. */
 export function setupNotice(settingsCommandId?: string): string {
-  const command = settingsCommandId ? `</settings:${settingsCommandId}>` : "`/settings`";
-  return `このBotと話すには、サーバーで ${command} を実行して、APIキーと言語モデルを設定してください。`;
+  return `このBotと話すには、サーバーで ${settingsCommand(settingsCommandId)} を実行して、APIキーと言語モデルを設定してください。`;
+}
+
+/** Why a reply could not be made: a 4xx is the key's or the model's, which /settings fixes; anything else in short. */
+export function replyFailure(reason: string, settingsCommandId?: string): string {
+  if (isTransient(reason)) return "LLMとの通信が切れて答えられませんでした。少し待ってから話しかけてください。";
+  const status = CLIENT_ERROR.exec(reason)?.[1];
+  if (status) return `応答を作れませんでした(LLMのエラー ${status})。${settingsCommand(settingsCommandId)} のキーとモデルを確かめてください。`;
+  return `応答を作れませんでした。${sentence(truncate(reason.trim(), 100))}`;
 }
 
 interface ChannelContext {
@@ -142,6 +154,32 @@ export function styleSamples(messages: Pick<APIMessage, "author" | "webhook_id" 
     .filter((m) => !m.author.bot && !m.webhook_id && m.content.trim())
     .map((m) => m.content.trim())
     .slice(-STYLE_SAMPLES);
+}
+
+/** The context the reply is written in: the messages before it, newest first from the API. */
+function contextOf(before: APIMessage[]): ChannelContext {
+  return { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
+}
+
+/** The Wasm tools as the agent sees them: bound to the speaker, who owns the modules. */
+function speakerWasm(wasm: NonNullable<NonNullable<ConversationDeps["rules"]>["wasm"]>, speaker: string, guildId: string): WasmTools {
+  const { compiler } = wasm;
+  return {
+    list: () => wasm.list(speaker),
+    upload: (name, bytes) => wasm.upload(speaker, name, bytes),
+    load: (ref) => wasm.load(speaker, guildId, ref),
+    ...(compiler
+      ? {
+          compiler: {
+            languages: () => compiler.languages(),
+            guide: (language) => compiler.guide(language),
+            compile: (language, files, optimize) => compiler.compile(speaker, language, files, optimize),
+            fresh: (ref) => compiler.fresh(speaker, ref),
+            keep: (name, ref) => compiler.keep(speaker, name, ref),
+          },
+        }
+      : {}),
+  };
 }
 
 /** Splits a reply into posts: first at the model's own breaks, then at Discord's length limit. */
@@ -257,21 +295,24 @@ export class Conversations {
   }
 
   async #context(message: GuildMessage): Promise<ChannelContext> {
-    const before = await this.deps.fetchBefore(message.channel_id, message.id, CONTEXT_MESSAGES);
-    return { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
+    return contextOf(await this.deps.fetchBefore(message.channel_id, message.id, CONTEXT_MESSAGES));
+  }
+
+  /** Keeps the channel's conversation awake for another session from now. */
+  #extend(channelId: string): void {
+    const latest = this.deps.store.getConversation(channelId);
+    if (latest) this.deps.store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
+    this.deps.onAwake?.();
   }
 
   async #addressed(transcript: string[], message: GuildMessage): Promise<boolean> {
     const { store } = this.deps;
     const speaker = message.author.id;
-    const settings = store.getSettings(speaker);
-    const ref = settings.addressee ?? judgeRef(settings);
-    const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(speaker, ref.provider);
-    if (!model || !apiKey) return false; // The speaker's setup broke; stay quiet rather than guess.
+    const found = judgeModelFor(store, speaker, (s) => s.addressee ?? judgeRef(s));
+    if (!found) return false; // The speaker's setup broke; stay quiet rather than guess.
     const verdict = await this.deps.judge({
-      model,
-      apiKey,
+      model: found.model,
+      apiKey: found.apiKey,
       botName: this.deps.botName(),
       transcript,
       // The bot's message may be older than the transcript; show what is being answered.
@@ -293,9 +334,7 @@ export class Conversations {
     });
     this.deps.onAwake?.();
     if (await this.#reactInstead(message, context)) {
-      const latest = store.getConversation(message.channel_id);
-      if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
-      this.deps.onAwake?.();
+      this.#extend(message.channel_id);
       return;
     }
     await this.#answer({
@@ -312,19 +351,14 @@ export class Conversations {
     });
 
     // Extend the session from the moment the reply went out.
-    const latest = store.getConversation(message.channel_id);
-    if (latest) store.saveConversation({ ...latest, awakeUntil: this.deps.now() + SESSION_MS });
-    this.deps.onAwake?.();
+    this.#extend(message.channel_id);
   }
 
   /** The speaker's reaction model, or without one their judge model (or language model). */
   #reactionModel(userId: string): { model: JudgeModel; apiKey: string; label: string } | null {
     const { store } = this.deps;
-    const settings = store.getSettings(userId);
-    const ref = settings.reaction ?? judgeRef(settings);
-    const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(userId, ref.provider);
-    return model && apiKey ? { model, apiKey, label: `${ref.provider}/${ref.model}` } : null;
+    const found = judgeModelFor(store, userId, (s) => s.reaction ?? judgeRef(s));
+    return found && { model: found.model, apiKey: found.apiKey, label: `${found.ref.provider}/${found.ref.model}` };
   }
 
   /** With a reaction model, a message that only needs a reaction gets one instead of words. */
@@ -378,8 +412,7 @@ export class Conversations {
     if (!setupStatus(store, data.user_id).complete) return;
     const chooser = this.#reactionModel(data.user_id);
     if (!chooser) return;
-    const reacted = await deps.fetchMessage(data.channel_id, data.message_id);
-    const before = await deps.fetchBefore(data.channel_id, data.message_id, CONTEXT_MESSAGES);
+    const [reacted, before] = await Promise.all([deps.fetchMessage(data.channel_id, data.message_id), deps.fetchBefore(data.channel_id, data.message_id, CONTEXT_MESSAGES)]);
     const transcript = [...before.map(formatMessage).reverse(), formatMessage(reacted)];
     const choice = await deps.chooseReaction({ model: chooser.model, apiKey: chooser.apiKey, botName: deps.botName(), transcript, message: line, kind: "reaction" });
     if (choice.action !== "reply") return;
@@ -398,9 +431,7 @@ export class Conversations {
       images: [],
       audit: { channelId: data.channel_id, messageId: data.message_id, reaction: line },
     });
-    const latest = store.getConversation(data.channel_id);
-    if (latest) store.saveConversation({ ...latest, awakeUntil: deps.now() + SESSION_MS });
-    deps.onAwake?.();
+    this.#extend(data.channel_id);
   }
 
   /**
@@ -411,12 +442,11 @@ export class Conversations {
     const { plan } = input;
     const speaker = plan.actor.userId;
     if (!setupStatus(this.deps.store, speaker).complete) {
-      return Promise.reject(new Error("/settings の設定が終わっていないため修正できません"));
+      return Promise.reject(new Error("/settings の設定が済んでいません"));
     }
     const run = async () => {
-      const before = await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES);
-      const context = { transcript: before.map(formatMessage).reverse(), styleSamples: styleSamples([...before].reverse()) };
-      const current = plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) }));
+      const context = contextOf(await this.deps.fetchBefore(input.channelId, input.messageId, CONTEXT_MESSAGES));
+      const current = plan.steps.map(draftOf);
       const name = plan.labels[speaker] ?? speaker;
       await this.#answer({
         guildId: plan.guildId,
@@ -462,16 +492,16 @@ export class Conversations {
   }): Promise<void> {
     const { store } = this.deps;
     const { speaker, channelId } = input;
-    const ref = store.getSettings(speaker).response!;
+    const settings = store.getSettings(speaker);
+    const ref = settings.response!;
     const model = findChatModel(ref.provider, ref.model)!;
     const apiKey = store.getApiKey(speaker, ref.provider)!;
-    const codeRef = store.getSettings(speaker).code;
-    const codeModel = codeRef && findChatModel(codeRef.provider, codeRef.model);
-    const codeKey = codeRef && store.getApiKey(speaker, codeRef.provider);
+    const code = chatModelFor(store, speaker, (s) => s.code);
+    const codeRef = code?.ref;
     // A coding model whose key was removed falls back to the response model.
-    const coder = codeModel && codeKey ? llmCoder(codeModel, codeKey) : undefined;
+    const coder = code ? llmCoder(code.model, code.apiKey) : undefined;
     const web = this.deps.webSearch
-      ? resolveWebAccess(store.getSettings(speaker).web, ref.provider, (p) => store.getApiKey(speaker, p), speaker)
+      ? resolveWebAccess(settings.web, ref.provider, (p) => store.getApiKey(speaker, p), speaker)
       : null;
     const reader = this.deps.makeReader({ guildId: input.guildId, channelId, speakerId: speaker });
     // Asked only when the agent finds it needs more than the channel's audience may see.
@@ -490,7 +520,9 @@ export class Conversations {
       : undefined;
 
     await this.deps.typing(channelId).catch(() => undefined);
-    const typing = setInterval(() => void this.deps.typing(channelId).catch(() => undefined), 8000);
+    const keepTyping = () => setInterval(() => void this.deps.typing(channelId).catch(() => undefined), 8000);
+    let typing = keepTyping();
+    let typingStopped = false;
     const inbox = new Inbox();
     this.#working.set(channelId, { speaker, messageIds: new Set(input.messageIds ?? []), inbox });
     // The first post answers the message; the rest follow it as a series.
@@ -529,6 +561,11 @@ export class Conversations {
         ...(this.deps.askContinue ? { askContinue: (turns: number) => this.deps.askContinue!({ channelId, replyToId: input.replyToId, speakerId: speaker, turns }) } : {}),
         onProgress: async (content) => {
           await post(content);
+          // Restarted so the next tick comes a full interval after this one, not right on top of it.
+          if (!typingStopped) {
+            clearInterval(typing);
+            typing = keepTyping();
+          }
           await this.deps.typing(channelId).catch(() => undefined);
         },
         propose: this.deps.propose
@@ -555,26 +592,7 @@ export class Conversations {
           ? {
               list: () => this.deps.rules!.list(input.guildId, speaker, reader.shareable()),
               runs: (ruleId, limit) => this.deps.rules!.runs(input.guildId, speaker, ruleId, reader.shareable(), limit),
-              ...(this.deps.rules.wasm
-                ? {
-                    wasm: {
-                      list: () => this.deps.rules!.wasm!.list(speaker),
-                      upload: (name: string, bytes: Uint8Array) => this.deps.rules!.wasm!.upload(speaker, name, bytes),
-                      load: (ref: string) => this.deps.rules!.wasm!.load(speaker, input.guildId, ref),
-                      ...(this.deps.rules.wasm.compiler
-                        ? {
-                            compiler: {
-                              languages: () => this.deps.rules!.wasm!.compiler!.languages(),
-                              guide: (language: string) => this.deps.rules!.wasm!.compiler!.guide(language),
-                              compile: (language: string, files: SourceFile[], optimize: "size" | "speed") => this.deps.rules!.wasm!.compiler!.compile(speaker, language, files, optimize),
-                              fresh: (ref: string) => this.deps.rules!.wasm!.compiler!.fresh(speaker, ref),
-                              keep: (name: string, ref: string) => this.deps.rules!.wasm!.compiler!.keep(speaker, name, ref),
-                            },
-                          }
-                        : {}),
-                    },
-                  }
-                : {}),
+              ...(this.deps.rules.wasm ? { wasm: speakerWasm(this.deps.rules.wasm, speaker, input.guildId) } : {}),
             }
           : undefined,
       });
@@ -583,17 +601,16 @@ export class Conversations {
       text = result.text || (progress > 0 || result.reactions?.length || images.forReply().length > 0 ? "" : "うまく答えを作れませんでした。言い方を変えてもう一度聞いてください。");
       detail = { ...detail, ...(result.reactions?.length ? { reactions: result.reactions } : {}), progress: result.progress, turns: result.turns, toolCalls: result.toolCalls, ...(result.toolErrors?.length ? { toolErrors: result.toolErrors } : {}), ...(result.retries ? { retries: result.retries } : {}), messagesRead: reader.messagesRead };
     } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
+      const reason = errorMessage(e);
       this.deps.log(`応答の生成に失敗 (${input.replyToId})`, e);
-      text = isTransient(reason)
-        ? "LLMとの通信が途中で切れたため、応答を作れませんでした(やり直しても切れました)。少し待ってからもう一度話しかけてください。"
-        : `応答の生成に失敗しました: ${reason.slice(0, 300)}`;
+      text = replyFailure(reason, store.getMeta(SETTINGS_COMMAND_ID));
       detail = {
         ...detail,
         error: reason.slice(0, 500),
         ...(e instanceof ReplyFailed ? { turns: e.turns, toolCalls: e.toolCalls, retries: e.retries } : {}),
       };
     } finally {
+      typingStopped = true;
       clearInterval(typing);
       if (this.#working.get(channelId)?.inbox === inbox) this.#working.delete(channelId);
     }

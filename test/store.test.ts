@@ -7,8 +7,11 @@ import { join } from "node:path";
 import { open, seal } from "../src/crypto.ts";
 import { Store } from "../src/db.ts";
 import { findChatModel, isMustThinkError, judgeRef, lightestThinking, llm, selectableModels } from "../src/llm/models.ts";
-import { CUSTOM_ID, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
+import { ButtonStyle } from "discord-api-types/v10";
+import { CUSTOM_ID, keyModal, parseCustomId, renderPanel, setupStatus, typedModelId, typedModelModal } from "../src/llm/panel.ts";
 import { SETTINGS_HOME_ID } from "../src/rules/panel.ts";
+import { TRIGGERS, triggerEvents } from "../src/rules/triggers.ts";
+import type { Rule } from "../src/rules/types.ts";
 
 const master = randomBytes(32);
 
@@ -191,6 +194,9 @@ test("a Tavily key alone does not complete setup, and the web tool defaults to t
   store.setWebTool("u1", "tavily");
   assert.equal(store.getSettings("u1").web, "tavily");
   assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1")), /llm:model:response:tavily/);
+  // What is missing is said on the home page only.
+  assert.match(JSON.stringify(renderPanel(store, "u1")), /⚠️ まだ設定していないものがあります: APIキー、言語モデル/);
+  assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1", undefined, "keys")), /まだ設定していない/);
 });
 
 test("OpenRouter models are typed in, and the one chosen is shown in its role's menu", () => {
@@ -302,4 +308,122 @@ test("OpenRouter models that must think are retried once with the lightest level
   await llm.completeSimple(model, context, { apiKey: "k", fetch, maxRetries: 0 } as never);
   assert.deepEqual(bodies.map((b) => b.reasoning?.effort), ["none", "minimal", "minimal"]);
   assert.ok(isMustThinkError('400: {"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}'));
+});
+
+test("enabledRules picks the same rules, in the same order, as filtering every rule by triggerEvents", () => {
+  const store = new Store(":memory:", master);
+  const names = [...Object.keys(TRIGGERS), "UNKNOWN_EVENT", ""];
+  // A fixed pseudo-random sequence, so a failure can be replayed.
+  let seed = 7;
+  const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2147483648), Math.floor(seed / 65536) % n);
+  const pick = () => names[random(names.length)]!;
+  for (let i = 0; i < 300; i++) {
+    const guildId = random(4) === 0 ? "other" : "g";
+    const trigger: Rule["trigger"] = { event: pick() };
+    const shape = random(4);
+    if (shape === 1) trigger.events = [];
+    if (shape === 2) trigger.events = Array.from({ length: 1 + random(4) }, pick);
+    if (shape === 3) trigger.events = [trigger.event, pick()];
+    store.insertRule({
+      id: `r${i}`,
+      guildId,
+      ownerId: "u",
+      name: `r${i}`,
+      sourcePrompt: "",
+      trigger,
+      allow: [],
+      program: { kind: "js", code: "" },
+      summary: null,
+      limits: {} as Rule["limits"],
+      version: 1,
+      enabled: random(3) !== 0,
+      consecutiveFailures: 0,
+      disabledReason: null,
+      // Repeated times, so ties keep their order too.
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, random(50))).toISOString(),
+      updatedAt: "",
+    });
+  }
+  for (const guildId of ["g", "other", "none"]) {
+    for (const event of names) {
+      const expected = store.listRules(guildId).filter((r) => r.enabled && triggerEvents(r.trigger).includes(event));
+      assert.deepEqual(store.enabledRules(guildId, event), expected, `${guildId} ${event}`);
+    }
+  }
+  assert.ok(names.filter((e) => store.enabledRules("g", e).length > 1).length > 10, "the sample covers most events");
+});
+
+test("old rule runs are deleted through the started_at index, and newer ones stay", () => {
+  const store = new Store(":memory:", master);
+  const plan = store.db.prepare("EXPLAIN QUERY PLAN DELETE FROM rule_runs WHERE started_at < ?").all("x") as Array<{ detail: string }>;
+  assert.ok(plan.some((row) => row.detail.includes("rule_runs_started")), JSON.stringify(plan));
+  const insert = store.db.prepare("INSERT INTO rule_runs (rule_id, rule_version, event_id, outcome, started_at) VALUES ('r', 1, 'e', 'executed', ?)");
+  insert.run("2026-01-01T00:00:00.000Z");
+  insert.run("2026-03-01T00:00:00.000Z");
+  store.deleteRuleRunsBefore(new Date("2026-02-01T00:00:00.000Z"));
+  assert.deepEqual(store.db.prepare("SELECT started_at FROM rule_runs").pluck().all(), ["2026-03-01T00:00:00.000Z"]);
+});
+
+test("a kept program's used_at is written at most once a day", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-01-01T00:00:00.000Z") });
+  const store = new Store(":memory:", master);
+  const usedAt = () => store.db.prepare("SELECT used_at FROM js_bytecode WHERE key = 'k'").pluck().get();
+  store.setBytecode("k", Buffer.from("b"));
+  t.mock.timers.tick(60 * 60_000);
+  assert.deepEqual(store.getBytecode("k"), Buffer.from("b"));
+  store.touchBytecode("k");
+  assert.equal(usedAt(), "2026-01-01T00:00:00.000Z");
+  t.mock.timers.tick(24 * 60 * 60_000);
+  store.touchBytecode("k");
+  assert.equal(usedAt(), "2026-01-02T01:00:00.000Z");
+  t.mock.timers.tick(60_000);
+  store.getBytecode("k");
+  assert.equal(usedAt(), "2026-01-02T01:00:00.000Z");
+});
+
+test("the settings pages say each thing once, name models rather than ids, and keep the moves gray", () => {
+  const store = new Store(":memory:", master);
+  store.setApiKey("u1", "anthropic", "sk-ant-abcdefgh1234");
+  store.setApiKey("u1", "tavily", "tvly-abcdefgh5678");
+  const model = selectableModels("anthropic", "response")[0]!;
+  store.setModel("u1", "response", { provider: "anthropic", model: model.id });
+  const buttons = (view: { components: unknown[] }): Array<{ label: string; style: number }> => {
+    const found: Array<{ label: string; style: number }> = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!node || typeof node !== "object") return;
+      const c = node as { type?: number; label?: string; style?: number; components?: unknown };
+      if (c.type === 2) found.push({ label: c.label!, style: c.style! });
+      walk(c.components);
+    };
+    walk(view.components);
+    return found;
+  };
+  const home = renderPanel(store, "u1");
+  const homeText = JSON.stringify(home);
+  assert.match(homeText, /"## 設定"/);
+  assert.doesNotMatch(homeText, /あなたにだけ見えています/);
+  assert.match(homeText, new RegExp(`${model.name}\\(`));
+  assert.doesNotMatch(homeText, new RegExp(`${model.id}\\(`));
+  // Moving between screens is gray; nothing on the settings pages asks for an action.
+  assert.ok(buttons(home).every((b) => b.style === ButtonStyle.Secondary), JSON.stringify(buttons(home)));
+  const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
+  assert.match(keys, /Tavily · 末尾 `/);
+  // Keys not registered are offered only in the select.
+  assert.doesNotMatch(keys, /未登録|OpenAI · /);
+  assert.match(keys, /OpenAIのキーを登録する/);
+  assert.doesNotMatch(keys, /Webツール\)/);
+  assert.match(JSON.stringify(keyModal("anthropic")), /Claude API のキー/);
+  assert.doesNotMatch(JSON.stringify(keyModal("anthropic")), /placeholder/);
+  const models = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
+  // A page holds its own settings: what each model is for is in docs/settings.md, and the moves are on the home page only.
+  assert.match(models, /"\*\*判定モデル\*\*\\n-# 軽いモデルが向いています"/);
+  assert.doesNotMatch(models, /Botがあなたのキーで使うモデルです|返事を書く|judge\(\)/);
+  for (const page of ["keys", "models", "roles", "lookup"] as const) {
+    const view = renderPanel(store, "u1", undefined, page);
+    assert.deepEqual(buttons(view).map((b) => b.label).filter((l) => l !== "用途別のモデル"), ["← 設定のトップへ"], page);
+    assert.doesNotMatch(JSON.stringify(view), /設定は済んで|まだ設定していない/, page);
+  }
+  assert.deepEqual(buttons(home).map((b) => b.label), ["APIキー", "モデル", "ハーネス", "ルール", "コマンド", "Wasm"]);
+  assert.doesNotMatch(homeText, /設定は済んで/);
 });

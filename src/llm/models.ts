@@ -5,6 +5,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { typesafeProvider } from "@earendil-works/pi-ai/providers/typesafe";
 import { zaiProvider } from "@earendil-works/pi-ai/providers/zai";
+import type { ModelRef, Store, UserSettings } from "../db.ts";
 
 export const PROVIDERS = {
   anthropic: { label: "Claude API" },
@@ -31,7 +32,12 @@ export const KEY_PROVIDERS = {
 } as const;
 
 export type KeyProviderId = keyof typeof KEY_PROVIDERS;
-export type ModelRole = "response" | "judge" | "addressee" | "code" | "reaction";
+export const MODEL_ROLES = ["response", "judge", "addressee", "code", "reaction"] as const;
+export type ModelRole = (typeof MODEL_ROLES)[number];
+
+export function isModelRole(value: string | undefined): value is ModelRole {
+  return (MODEL_ROLES as readonly (string | undefined)[]).includes(value);
+}
 
 /** Roles that take a classifier as well as a chat model. */
 export function judgesOnly(role: ModelRole): boolean {
@@ -72,7 +78,7 @@ function thinksAnyway(model: Model<Api>): boolean {
   return model.provider === "openrouter" && mustThink.has(model.id);
 }
 
-/** Mark a model as one that cannot skip thinking (also used by tests). */
+/** Mark a model as one that cannot skip thinking. */
 export function rememberMustThink(model: Model<Api>): void {
   mustThink.add(model.id);
 }
@@ -134,6 +140,24 @@ export function judgeRef<T>(settings: { response: T | null; judge: T | null }): 
   return settings.judge ?? settings.response;
 }
 
+type KeyedSettings = Pick<Store, "getSettings" | "getApiKey">;
+
+/** The person's chat model that `pick` chooses, with their key for it; null when either is gone. */
+export function chatModelFor(store: KeyedSettings, userId: string, pick: (settings: UserSettings) => ModelRef | null): { model: Model<Api>; apiKey: string; ref: ModelRef } | null {
+  const ref = pick(store.getSettings(userId));
+  const model = ref && findChatModel(ref.provider, ref.model);
+  const apiKey = ref && store.getApiKey(userId, ref.provider);
+  return ref && model && apiKey ? { model, apiKey, ref } : null;
+}
+
+/** As chatModelFor, for a judgment: a classifier or a chat model, the judge model by default. */
+export function judgeModelFor(store: KeyedSettings, userId: string, pick: (settings: UserSettings) => ModelRef | null = judgeRef): { model: JudgeModel; apiKey: string; ref: ModelRef } | null {
+  const ref = pick(store.getSettings(userId));
+  const model = ref && findJudgeModel(ref.provider, ref.model);
+  const apiKey = ref && store.getApiKey(userId, ref.provider);
+  return ref && model && apiKey ? { model, apiKey, ref } : null;
+}
+
 export function isClassifier(model: JudgeModel): model is ClassifierModel<ClassifierApi> {
   return isModelType(model, "classifier");
 }
@@ -151,6 +175,12 @@ export function lightestThinking(model: Model<Api>): ThinkingLevel | undefined {
   const map = model.thinkingLevelMap;
   if (!model.reasoning || !map || map.off !== null) return undefined;
   return lightestLevel(model);
+}
+
+/** Room for the reply: more when the model has to think before it answers. */
+export function budget(model: Model<Api>, tokens: { thinking: number; plain: number }): { maxTokens: number; reasoning?: ThinkingLevel } {
+  const reasoning = lightestThinking(model);
+  return reasoning ? { maxTokens: tokens.thinking, reasoning } : { maxTokens: tokens.plain };
 }
 
 function lightestLevel(model: Model<Api>): ThinkingLevel {

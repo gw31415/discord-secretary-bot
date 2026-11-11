@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { Client, GatewayDispatchEvents, GatewayIntentBits } from "@discordjs/core";
 import { REST } from "@discordjs/rest";
 import { WebSocketManager } from "@discordjs/ws";
@@ -19,7 +20,8 @@ import { Reader } from "./discord/reader.ts";
 import { WidenPrompts } from "./discord/widen.ts";
 import type { ReadScope } from "./discord/reader.ts";
 import { handleInteraction } from "./interactions.ts";
-import { findChatModel, findJudgeModel, judgeRef } from "./llm/models.ts";
+import { replyEphemeral } from "./discord/respond.ts";
+import { chatModelFor, judgeModelFor } from "./llm/models.ts";
 import { Planner, SNAPSHOT_RETENTION_MS } from "./plan/service.ts";
 import { RuleAdmin } from "./rules/admin.ts";
 import { RuleEngine } from "./rules/engine.ts";
@@ -37,7 +39,7 @@ const store = new Store(config.dbPath, config.masterKey);
 const caches = new GuildCaches();
 const compiler = config.compilerSocket ? new CompilerClient(config.compilerSocket) : undefined;
 const wasm = new WasmRegistry(store, compiler);
-setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data) });
+setBytecodeCache({ get: (key) => store.getBytecode(key), set: (key, data) => store.setBytecode(key, data), touch: (key) => store.touchBytecode(key) });
 
 function served(guildId: string | undefined): guildId is string {
   return !!guildId && (config.allowedGuildIds.size === 0 || config.allowedGuildIds.has(guildId));
@@ -86,11 +88,9 @@ const planner = new Planner({
   revise: (input) => conversations.revise(input),
   // The actor's own response model and key, as for their conversation.
   summarize: async (code, actorId) => {
-    const ref = store.getSettings(actorId).response;
-    const model = ref && findChatModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(actorId, ref.provider);
-    if (!model || !apiKey) return null;
-    return summarizeCode({ model, apiKey, code });
+    const found = chatModelFor(store, actorId, (s) => s.response);
+    if (!found) return null;
+    return summarizeCode({ model: found.model, apiKey: found.apiKey, code });
   },
   beforeWrite: (plan, step) => engine.noteWrite(plan, step, null),
   onWrite: (plan, step, response) => {
@@ -117,7 +117,7 @@ async function sendDm(userId: string, content: string): Promise<void> {
 // Custom slash commands follow the rules; changes close together register once.
 const commandSyncs = new Map<string, ReturnType<typeof setTimeout>>();
 function syncCommands(guildId: string): void {
-  // SCHEDULE rules' cron jobs follow the rules at once.
+  // SCHEDULE rules' timer follows the rules at once.
   try {
     engine.syncSchedules(guildId);
   } catch (e) {
@@ -149,6 +149,7 @@ const engine = new RuleEngine({
   decide: (userId) => decideFor(store, userId),
   wasm,
   onRulesChanged: syncCommands,
+  guildName: (guildId) => caches.get(guildId)?.name ?? undefined,
   log,
 });
 const admin = new RuleAdmin({ store, caches, selfId: () => selfId, now: () => Date.now(), onChange: syncCommands });
@@ -163,25 +164,19 @@ const rules = new RuleService({
   now: () => Date.now(),
   log,
   summarize: async (code, ownerId, trigger, language) => {
-    const ref = store.getSettings(ownerId).response;
-    const model = ref && findChatModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
-    if (!model || !apiKey) return null;
-    return summarizeCode({ model, apiKey, code, subject: { kind: "rule", trigger }, ...(language ? { language } : {}) });
+    const found = chatModelFor(store, ownerId, (s) => s.response);
+    if (!found) return null;
+    return summarizeCode({ model: found.model, apiKey: found.apiKey, code, subject: { kind: "rule", trigger }, ...(language ? { language } : {}) });
   },
   describeChanges: async (before, after, ownerId, trigger, language) => {
-    const ref = store.getSettings(ownerId).response;
-    const model = ref && findChatModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(ownerId, ref.provider);
-    if (!model || !apiKey) return null;
-    return describeChanges({ model, apiKey, before, after, trigger, ...(language ? { language } : {}) });
+    const found = chatModelFor(store, ownerId, (s) => s.response);
+    if (!found) return null;
+    return describeChanges({ model: found.model, apiKey: found.apiKey, before, after, trigger, ...(language ? { language } : {}) });
   },
   visibilityScore: async ({ userId, command, options, reply, images, steps }) => {
-    const ref = judgeRef(store.getSettings(userId));
-    const model = ref && findJudgeModel(ref.provider, ref.model);
-    const apiKey = ref && store.getApiKey(userId, ref.provider);
-    if (!model || !apiKey) return null;
-    return publicReplyScore({ model, apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
+    const found = judgeModelFor(store, userId);
+    if (!found) return null;
+    return publicReplyScore({ model: found.model, apiKey: found.apiKey, command, options, reply, images, steps, signal: AbortSignal.timeout(10_000) });
   },
 });
 
@@ -288,7 +283,7 @@ client.on(GatewayDispatchEvents.GuildCreate, async ({ data, api }) => {
   } catch (e) {
     log(`${data.name}: BOT_READY のルールの振り分けに失敗`, e);
   }
-  // The SCHEDULE rules' cron jobs, and later() requests that came due while the bot was away.
+  // The SCHEDULE rules' timer, and later() requests that came due while the bot was away.
   try {
     engine.syncSchedules(data.id);
     engine.runTimers([data.id]);
@@ -307,6 +302,7 @@ client.on(GatewayDispatchEvents.GuildDelete, ({ data }) => {
 client.on(GatewayDispatchEvents.GuildUpdate, ({ data }) => {
   const cache = caches.get(data.id);
   cache?.setOwner(data.owner_id);
+  cache?.setName(data.name);
   for (const role of data.roles) cache?.upsertRole(role);
 });
 client.on(GatewayDispatchEvents.GuildRoleCreate, ({ data }) => caches.get(data.guild_id)?.upsertRole(data.role));
@@ -371,7 +367,11 @@ client.on(GatewayDispatchEvents.MessageUpdate, ({ data }) => {
 });
 
 client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
-  if (!caches.get(data.guild_id)) return;
+  if (!caches.get(data.guild_id)) {
+    // A served server whose GUILD_CREATE has not arrived yet: the bot is still starting.
+    if (served(data.guild_id)) await replyEphemeral(api, data, "起動中です。少し待ってから押してください。").catch(() => undefined);
+    return;
+  }
   try {
     if (await widenPrompts.handleInteraction(data)) return;
     if (await planner.handleInteraction(data)) return;
@@ -382,6 +382,8 @@ client.on(GatewayDispatchEvents.InteractionCreate, async ({ data, api }) => {
     await handleInteraction(api, store, data);
   } catch (e) {
     log("インタラクションの処理に失敗", e);
+    // Discord refuses a second answer, so this reaches the presser only when nothing answered yet.
+    await replyEphemeral(api, data, "処理できませんでした。もう一度試してください。").catch(() => undefined);
   }
 });
 
@@ -394,16 +396,23 @@ const sweeper = setInterval(() => {
   conversations.sweep();
   planner.sweep().catch((e) => log("変更の期限処理に失敗", e));
   engine.sweep();
+}, 60_000);
+// Retention is counted in days, so deleting old rows hourly is enough.
+const pruneOld = () => {
+  planner.pruneSnapshots();
   store.deleteRuleRunsBefore(new Date(Date.now() - SNAPSHOT_RETENTION_MS));
   store.deleteBytecodeBefore(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
-}, 60_000);
+};
+pruneOld();
+const pruner = setInterval(pruneOld, 60 * 60_000);
 
 async function shutdown(signal: string): Promise<void> {
   log(`${signal} を受けたので停止します`);
   clearInterval(sweeper);
+  clearInterval(pruner);
   engine.stopSchedules();
   presence.stop();
-  await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);
+  await Promise.race([engine.idle(), sleep(10_000)]);
   await gateway.destroy();
   store.close();
   process.exit(0);
@@ -414,7 +423,8 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 // Everything rules run is compiled before the first event: the JS engine, every enabled rule's code (kept
 // as bytecode across restarts) and every uploaded module an enabled rule runs.
 await precompileJsEngine().catch((e) => log("JSエンジンのコンパイルに失敗", e));
-warmWorkers();
+// With nothing for rules to run, the threads wait for the first run instead.
+if (store.enabledRuleCode().length + store.wasmInUse().length > 0) warmWorkers();
 void warmJsEngine();
 {
   let compiled = 0;

@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../crypto.ts";
+import { errorMessage } from "../errors.ts";
 
 // Checks an uploaded Wasm module before anything runs it, and caps its memory.
 // A module is a WASI preview 1 command: it exports `_start` and `memory`, and
@@ -35,7 +36,7 @@ export async function prepareModule(bytes: Uint8Array): Promise<{ bytes: Buffer;
   try {
     module = await WebAssembly.compile(patched);
   } catch (e) {
-    throw new ModuleRejected(`Wasmとして読めません: ${e instanceof Error ? e.message : String(e)}`);
+    throw new ModuleRejected(`Wasmとして読めません: ${errorMessage(e)}`);
   }
   const imports = WebAssembly.Module.imports(module);
   const problems: string[] = [];
@@ -52,7 +53,7 @@ export async function prepareModule(bytes: Uint8Array): Promise<{ bytes: Buffer;
   return {
     bytes: out,
     info: {
-      sha256: createHash("sha256").update(out).digest("hex"),
+      sha256: sha256Hex(out),
       size: out.length,
       producers,
       imports: imports.map((i) => `${i.module}.${i.name}`),

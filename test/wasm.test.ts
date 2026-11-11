@@ -136,6 +136,29 @@ test("rule code compiles to bytecode once and runs from it", async () => {
   }
 });
 
+test("a rule's program run again comes from memory and only marks its bytecode as used", async () => {
+  const { jsProgram, setBytecodeCache } = await import("../src/sandbox.ts");
+  const kept = new Map<string, Buffer>();
+  const calls: string[] = [];
+  setBytecodeCache({
+    get: (k) => (calls.push("get"), kept.get(k)),
+    set: (k, v) => (calls.push("set"), void kept.set(k, v)),
+    touch: (k) => (assert.ok(kept.has(k)), void calls.push("touch")),
+  });
+  try {
+    const code = "return plan([])";
+    const first = await jsProgram(code);
+    const second = await jsProgram(code);
+    assert.deepEqual(second.prefix, first.prefix);
+    assert.deepEqual(calls, ["get", "set", "touch"]);
+    setBytecodeCache({ get: (k) => (calls.push("get2"), kept.get(k)), set: () => assert.fail("kept already") });
+    assert.deepEqual((await jsProgram(code)).prefix, first.prefix);
+    assert.equal(calls.at(-1), "get2", "a new cache starts without the old one's memory");
+  } finally {
+    setBytecodeCache(null);
+  }
+});
+
 /** A module that prints `output` and nothing else. */
 function printer(output: string): Uint8Array {
   return wasm({
@@ -329,7 +352,8 @@ test("rules saved before programs were a union read as a JS or a Wasm program", 
   const old = { sourcePrompt: "", trigger: { event: "MESSAGE_CREATE" }, allow: [], summary: null, limits: { perMinute: 10, maxConsecutiveFailures: 5 } };
   insert.run("js", "js", JSON.stringify({ ...old, name: "js", code: "return null" }));
   insert.run("wasm", "wasm", JSON.stringify({ ...old, name: "wasm", code: "", wasm: "ab".repeat(32) }));
-  store.db.pragma(`user_version = ${version - 1}`);
+  // Back to before the migration that made programs a union (the one before the rule_runs index).
+  store.db.pragma(`user_version = ${version - 2}`);
   store.close();
   store = new Store(path, key);
   try {
@@ -540,4 +564,44 @@ test("get takes a query written into the route, and an explicit query wins", asy
     ["/channels/3/messages", { limit: 5, before: "9" }],
     ["/channels/3/messages", { limit: 2 }],
   ]);
+});
+
+test("the Wasm section opens with one sentence and the usage, and each screen ends with the way back", async () => {
+  const { detailView, homeView, sourceView } = await import("../src/wasm/panel.ts");
+  const parts = (view: unknown): string[] => {
+    const c = (view as { components: Array<{ components: Array<{ type: number; content?: string; placeholder?: string; components?: Array<{ type: number; label?: string; placeholder?: string }> }> }> }).components[0]!;
+    return c.components.map((p) => (p.type === 10 ? p.content! : p.type === 14 ? "---" : p.components![0]!.type === 3 ? `[select: ${p.components![0]!.placeholder}]` : `[buttons: ${p.components!.map((b) => b.label).join(" | ")}]`));
+  };
+  const module = {
+    ownerId: "u1", sha256: "ab".repeat(32), name: "hello", size: 1234, createdAt: new Date(0).toISOString(),
+    info: { memory: { min: 1, max: 16 }, producers: ["rustc"], imports: ["wasi_snapshot_preview1.fd_write"] },
+    source: { language: "rust", files: 1 },
+  } as unknown as import("../src/db.ts").WasmModule;
+
+  const empty = parts(homeView([], () => 0));
+  assert.deepEqual([empty[0], empty[1]], ["## Wasm", "Botに .wasm を渡すか、「Wasmを登録」で登録します"]);
+  assert.equal(empty[2], "まだ登録していません。");
+  assert.ok(!empty.some((p) => p.includes("上限")));
+  assert.deepEqual(empty.slice(-2), ["[buttons: Wasmを登録]", "[buttons: ← 設定のトップへ]"]);
+  // The sentence names the source only where a compiler can take it.
+  assert.equal(parts(homeView([], () => 0, undefined, ["rust"]))[1], "Botに .wasm かソースを渡すか、「Wasmを登録」で登録します");
+  assert.ok(!parts(homeView([], () => 0, "登録中…", [], true)).some((p) => p.includes("Wasmを登録]")));
+  const many = Array.from({ length: 30 }, (_, i) => ({ ...module, sha256: `${i}`.padStart(64, "0"), name: `m${i}` }));
+  assert.ok(parts(homeView(many, () => 0)).includes("[select: モジュールを開く(30個中25個)]"));
+  assert.ok(parts(homeView(many.slice(0, 2), () => 0)).includes("[select: モジュールを開く(2個)]"));
+  assert.equal(parts(homeView(many.slice(0, 2), () => 0))[2], "-# 2個 · 2KB");
+
+  const detail = parts(detailView(module, true, [{ name: "あいさつ", enabled: true, guildId: "g", mine: true }, { name: "停止", enabled: false, guildId: "g", mine: false }], false, "名前を変えました。この名前でルールに使えます"));
+  // A compiled module shows its size, source and when it came; the technical facts are at the end of its source.
+  assert.equal(detail[1], "**大きさ**: 1KB\n**ソース**: rust・1ファイル(Botがコンパイル)\n**登録**: <t:0:R>");
+  const source = parts(sourceView(module, { language: "rust", version: "1", files: [{ path: "src/main.rs", content: "fn main() {}" }] }));
+  assert.match(source.at(-2)!, /^\*\*sha256\*\*: `(ab)+`\n\*\*メモリ\*\*: .*\n\*\*ビルド\*\*: rustc\n\*\*インポート\*\*: `wasi_snapshot_preview1.fd_write`$/);
+  // An uploaded module has no source screen, so they stay on its own.
+  const uploaded = parts(detailView({ ...module, source: null } as never, true, []));
+  assert.match(uploaded[1]!, /\*\*sha256\*\*.*\n.*\*\*インポート\*\*/s);
+  assert.ok(!uploaded.includes("[buttons: ソースを見る]"));
+  assert.equal(detail[2], "**使っているルール**\n🟢 動作中 · あいさつ\n⏸️ 停止中 · 停止(ほかの人のルール)");
+  assert.deepEqual(detail.slice(3), ["[buttons: ソースを見る]", "---", "-# 名前を変えました。この名前でルールに使えます", "[buttons: 名前を変える | 削除]", "[buttons: ← 一覧へ]"]);
+  assert.ok(parts(detailView(module, true, [], true)).includes("⚠️ 「hello」を削除します"));
+  assert.equal(parts(sourceView(module, { language: "rust", version: "1", files: [{ path: "src/main.rs", content: "fn main() {}" }] })).at(-1), "[buttons: ← hello へ]");
 });

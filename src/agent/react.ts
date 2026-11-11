@@ -1,6 +1,8 @@
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, ClassifierApi, ClassifierModel, Model } from "@earendil-works/pi-ai";
 import { EMOJI_FORMAT } from "../plan/catalog.ts";
-import { isClassifier, lightestThinking, llm } from "../llm/models.ts";
+import { budget, isClassifier, llm } from "../llm/models.ts";
+import { firstJsonObject } from "./llm-json.ts";
 import type { JudgeModel } from "../llm/models.ts";
 
 // The reaction model (/settings, optional): before the response model is asked,
@@ -70,15 +72,11 @@ export function isReactionEmoji(value: unknown): value is string {
 }
 
 export function parseChoice(text: string, kind: ChooseInput["kind"]): ReactionChoice {
-  const match = /\{[\s\S]*\}/.exec(text);
-  if (!match) return fallback(kind);
-  try {
-    const value = JSON.parse(match[0]) as { action?: unknown; emoji?: unknown };
-    if (kind === "reaction") return value.action === "reply" ? REPLY : NONE;
-    if (value.action === "react" && isReactionEmoji(value.emoji)) return { action: "react", emoji: value.emoji };
-  } catch {
-    // Fall through to the safe side.
-  }
+  const value = firstJsonObject(text);
+  if (!value) return fallback(kind);
+  if (kind === "reaction") return value.action === "reply" ? REPLY : NONE;
+  if (value.action === "react" && isReactionEmoji(value.emoji)) return { action: "react", emoji: value.emoji };
+  // Fall through to the safe side.
   return fallback(kind);
 }
 
@@ -115,7 +113,6 @@ async function classify(input: ChooseInput & { model: ClassifierModel<Classifier
 }
 
 async function ask(input: ChooseInput & { model: Model<Api> }): Promise<ReactionChoice> {
-  const reasoning = lightestThinking(input.model);
   const actions = Object.entries(ACTION_CRITERIA(input.kind)).map(([k, v]) => `- ${k}: ${v}`);
   const res = await llm.completeSimple(
     input.model,
@@ -133,11 +130,8 @@ async function ask(input: ChooseInput & { model: Model<Api> }): Promise<Reaction
       ].join("\n"),
       messages: [{ role: "user", content: `<messages>\n${input.transcript.join("\n")}\n</messages>\n\n応じる相手:\n${input.message}`, timestamp: Date.now() }],
     },
-    { apiKey: input.apiKey, signal: input.signal, ...(reasoning ? { maxTokens: 2000, reasoning } : { maxTokens: 200 }) },
+    { apiKey: input.apiKey, signal: input.signal, ...budget(input.model, { thinking: 2000, plain: 200 }) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
+  const text = contentText(res.content, "");
   return parseChoice(text, input.kind);
 }

@@ -1,6 +1,6 @@
 import type { REST } from "@discordjs/rest";
 import { ChannelType, PermissionFlagsBits } from "discord-api-types/v10";
-import { EMOJI_FORMAT } from "../plan/catalog.ts";
+import { EMOJI_FORMAT, safeDecode } from "../plan/catalog.ts";
 import type { APIChannel, APIMessage, APIMessageSearchIndexNotReadyResponse, APIThreadChannel, RESTGetAPIGuildMessagesSearchResult } from "discord-api-types/v10";
 import type { GuildCache } from "./cache.ts";
 import { toChannel } from "./cache.ts";
@@ -55,14 +55,6 @@ function toSearchParams(query: Query): URLSearchParams {
     for (const v of Array.isArray(value) ? value : [value]) params.append(key, String(v));
   }
   return params;
-}
-
-function safeDecode(text: string): string {
-  try {
-    return decodeURIComponent(text);
-  } catch {
-    return text;
-  }
 }
 
 const GUILD_PERMISSION_ROUTES: Array<[RegExp, bigint]> = [

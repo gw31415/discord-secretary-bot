@@ -1,5 +1,6 @@
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { lightestThinking, llm } from "../llm/models.ts";
+import { budget, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
 
 // Explains plan code for the approval dialog. The explainer sees only the code
@@ -75,20 +76,15 @@ const RULE_NOTE = (trigger: string) =>
 
 export async function summarizeCode(input: SummarizeInput): Promise<string | null> {
   const base = input.language ? SOURCE_PROMPT(input.language) : SYSTEM_PROMPT;
-  const reasoning = lightestThinking(input.model);
   const res = await llm.completeSimple(
     input.model,
     {
       systemPrompt: input.subject?.kind === "rule" ? `${base}\n\n${RULE_NOTE(input.subject.trigger)}` : base,
       messages: [{ role: "user", content: `<code>\n${input.language ? input.code : stripComments(input.code)}\n</code>`, timestamp: Date.now() }],
     },
-    { apiKey: input.apiKey, signal: input.signal ?? AbortSignal.timeout(30_000), ...(reasoning ? { maxTokens: 3000, reasoning } : { maxTokens: 600 }) },
+    { apiKey: input.apiKey, signal: input.signal ?? AbortSignal.timeout(30_000), ...budget(input.model, { thinking: 3000, plain: 600 }) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("")
-    .trim();
+  const text = contentText(res.content, "").trim();
   return text ? text.slice(0, 800) : null;
 }
 
@@ -106,7 +102,6 @@ const CHANGES_PROMPT = (language: string | undefined, trigger: string) =>
 
 /** What changes between two versions of a rule's code, as bullet points written from the code alone. */
 export async function describeChanges(input: Omit<SummarizeInput, "code" | "subject"> & { before: string; after: string; trigger: string }): Promise<string[] | null> {
-  const reasoning = lightestThinking(input.model);
   const clean = (code: string) => (input.language ? code : stripComments(code));
   const res = await llm.completeSimple(
     input.model,
@@ -114,12 +109,9 @@ export async function describeChanges(input: Omit<SummarizeInput, "code" | "subj
       systemPrompt: CHANGES_PROMPT(input.language, input.trigger),
       messages: [{ role: "user", content: `<before>\n${clean(input.before)}\n</before>\n<after>\n${clean(input.after)}\n</after>`, timestamp: Date.now() }],
     },
-    { apiKey: input.apiKey, signal: input.signal ?? AbortSignal.timeout(30_000), ...(reasoning ? { maxTokens: 3000, reasoning } : { maxTokens: 600 }) },
+    { apiKey: input.apiKey, signal: input.signal ?? AbortSignal.timeout(30_000), ...budget(input.model, { thinking: 3000, plain: 600 }) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
+  const text = contentText(res.content, "");
   const bullets = changeBullets(text);
   return bullets.length > 0 ? bullets : null;
 }

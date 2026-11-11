@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { CANVAS_PRELUDE } from "./canvas.ts";
+import { sha256Hex } from "./crypto.ts";
+import { CANVAS_PRELUDE } from "./canvas-prelude.ts";
 import { DECIDE_PRELUDE } from "./agent/decide.ts";
 import type { Decide } from "./agent/decide.ts";
 import { execute, hostCalls, runModule, warmUp, wasmInput } from "./wasm/run.ts";
 import type { Program } from "./wasm/run.ts";
+import { errorMessage } from "./errors.ts";
 
 // Read-only code execution. JavaScript is one more Wasm module: QuickJS built
 // for WASI (wasm/js-runner), run in the same sandbox and with the same ABI as
@@ -131,7 +133,7 @@ let runner: Promise<{ module: WebAssembly.Module; sha256: string }> | null = nul
 export function precompileJsEngine(): Promise<{ module: WebAssembly.Module; sha256: string }> {
   runner ??= (async () => {
     const bytes = await readFile(new URL("./wasm/js-runner.wasm", import.meta.url));
-    return { module: await WebAssembly.compile(bytes), sha256: createHash("sha256").update(bytes).digest("hex") };
+    return { module: await WebAssembly.compile(bytes), sha256: sha256Hex(bytes) };
   })();
   runner.catch(() => (runner = null));
   return runner;
@@ -141,11 +143,24 @@ export function precompileJsEngine(): Promise<{ module: WebAssembly.Module; sha2
 export interface BytecodeCache {
   get(key: string): Buffer | undefined;
   set(key: string, data: Buffer): void;
+  /** Marks a kept program as still in use, for one served from memory. */
+  touch?(key: string): void;
 }
 
 let bytecodeCache: BytecodeCache | null = null;
 export function setBytecodeCache(cache: BytecodeCache | null): void {
   bytecodeCache = cache;
+  recent.clear();
+}
+
+// Programs run lately, by code, so a run neither hashes its code nor reads the cache; least recently run goes first.
+const MAX_RECENT_PROGRAMS = 64;
+const recent = new Map<string, { key: string; bytecode: Buffer }>();
+
+function remember(code: string, key: string, bytecode: Buffer): void {
+  recent.delete(code);
+  recent.set(code, { key, bytecode });
+  if (recent.size > MAX_RECENT_PROGRAMS) recent.delete(recent.keys().next().value!);
 }
 
 /** The runner's stdin ahead of the run's input: a header line, then the program. */
@@ -173,6 +188,7 @@ async function cacheKey(code: string): Promise<string> {
 /** Compiles a rule's code ahead of its first run, unless it is kept already. */
 export async function precompileJs(code: string): Promise<boolean> {
   if (!bytecodeCache) return false;
+  if (recent.has(code)) return false;
   const key = await cacheKey(code);
   if (bytecodeCache.get(key)) return false;
   bytecodeCache.set(key, await compileText(ruleProgram(code)));
@@ -187,17 +203,24 @@ export async function precompileJs(code: string): Promise<boolean> {
 export async function jsProgram(code: string): Promise<Program> {
   const { module } = await precompileJsEngine();
   let bytecode: Buffer | undefined;
-  if (bytecodeCache) {
+  const cache = bytecodeCache;
+  const hit = cache ? recent.get(code) : undefined;
+  if (cache && hit) {
+    remember(code, hit.key, hit.bytecode);
+    cache.touch?.(hit.key);
+    bytecode = hit.bytecode;
+  } else if (cache) {
     const key = await cacheKey(code);
-    bytecode = bytecodeCache.get(key);
+    bytecode = cache.get(key);
     if (!bytecode) {
       try {
         bytecode = await compileText(ruleProgram(code));
-        bytecodeCache.set(key, bytecode);
+        cache.set(key, bytecode);
       } catch {
         bytecode = undefined;
       }
     }
+    if (bytecode && bytecodeCache === cache) remember(code, key, bytecode);
   }
   return { module, prefix: bytecode ? prefix("bytecode", bytecode) : prefix("source", Buffer.from(ruleProgram(code))), engine: true };
 }
@@ -242,7 +265,7 @@ export async function runSandboxed(code: string, bindings: SandboxBindings, limi
     if (run.exitCode !== 0) return { ok: false, error: logs.at(-1) ?? `JSの実行が止まりました(${run.exitCode})`, logs: logs.slice(0, -1) };
     output = run.stdout.toString("utf8");
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e), logs };
+    return { ok: false, error: errorMessage(e), logs };
   }
   try {
     return { ok: true, value: (JSON.parse(output) as { value?: unknown }).value, logs };

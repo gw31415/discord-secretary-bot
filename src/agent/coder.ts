@@ -1,6 +1,7 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { lightestThinking, llm } from "../llm/models.ts";
 import { catalogSummary } from "../plan/catalog.ts";
@@ -8,6 +9,8 @@ import { triggerSummary } from "../rules/triggers.ts";
 import { compileJs, WASM_CODE_LINE } from "../sandbox.ts";
 import { JUDGE_CODE_LINE } from "./decide.ts";
 import { retryFailedCall } from "./retry.ts";
+import { truncate } from "../text.ts";
+import { TOOL_CUT } from "./tool-text.ts";
 
 // A second agent, on the model the speaker picked for writing code. The conversation
 // agent describes what the code should do; this agent tries code against the server
@@ -107,15 +110,11 @@ export function extractCode(reply: string): string {
 }
 
 function textOf(m: AssistantMessage): string {
-  return m.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("")
-    .trim();
+  return contentText(m.content, "").trim();
 }
 
 function clip(value: string): string {
-  return value.length > MAX_TRY_OUTPUT ? `${value.slice(0, MAX_TRY_OUTPUT)}\n…(長いため省略)` : value;
+  return truncate(value, MAX_TRY_OUTPUT, TOOL_CUT);
 }
 
 function reply(text: string, extra: { isError?: boolean; terminate?: boolean } = {}) {

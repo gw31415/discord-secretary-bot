@@ -1,4 +1,4 @@
-import { ButtonStyle, ComponentType, MessageFlags, TextInputStyle } from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, TextInputStyle } from "discord-api-types/v10";
 import type {
   APIActionRowComponent,
   APIButtonComponent,
@@ -10,10 +10,11 @@ import type {
 import type { ReadScopeSetting, Store } from "../db.ts";
 import { isWebTool, WEB_TOOLS, webToolsFor, webToolWarning } from "../agent/web.ts";
 import type { WebTool } from "../agent/web.ts";
-import { findModel, isClassifier, judgesOnly, isKeyProviderId, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
+import { findModel, isClassifier, judgesOnly, isKeyProviderId, isModelRole, isProviderId, KEY_PROVIDERS, PROVIDERS, selectableModels, TYPED_MODEL_PROVIDERS } from "./models.ts";
 import type { KeyProviderId, ModelRole, ProviderId } from "./models.ts";
 import { ruleCustomId } from "../rules/panel.ts";
-import { WASM_SECTION_ID } from "../wasm/panel.ts";
+import { NS, WASM_HOME_ID } from "../discord/custom-id.ts";
+import { button, v2Message } from "../discord/ui.ts";
 
 export type { ModelRole };
 
@@ -29,17 +30,17 @@ const MODEL_UNSET = "none";
 const MODEL_TYPED = "typed";
 
 export const CUSTOM_ID = {
-  keySetSelect: "llm:key:set",
-  keyDeleteSelect: "llm:key:delete",
-  keyModal: (p: KeyProviderId) => `llm:keymodal:${p}`,
+  keySetSelect: `${NS.llm}:key:set`,
+  keyDeleteSelect: `${NS.llm}:key:delete`,
+  keyModal: (p: KeyProviderId) => `${NS.llm}:keymodal:${p}`,
   // Provider and page only keep custom_ids unique; the chosen value carries the model.
   // The render token makes each panel's selects new, so Discord forgets the option picked
   // last: one that opened a modal can then be picked again.
-  modelSelect: (role: ModelRole, p: ProviderId | "all", page: number, token = "") => `llm:model:${role}:${p}:${page}${token ? `:${token}` : ""}`,
-  webSelect: "llm:web:tool",
-  typedModelModal: (role: ModelRole) => `llm:typedmodal:${role}`,
-  readScopeSelect: "llm:read:scope",
-  page: (page: PanelPage) => `llm:page:${page}`,
+  modelSelect: (role: ModelRole, p: ProviderId | "all", page: number, token = "") => `${NS.llm}:model:${role}:${p}:${page}${token ? `:${token}` : ""}`,
+  webSelect: `${NS.llm}:web:tool`,
+  typedModelModal: (role: ModelRole) => `${NS.llm}:typedmodal:${role}`,
+  readScopeSelect: `${NS.llm}:read:scope`,
+  page: (page: PanelPage) => `${NS.llm}:page:${page}`,
 } as const;
 
 export interface SetupStatus {
@@ -111,23 +112,25 @@ export type PanelPage = "home" | "keys" | "models" | "roles" | "lookup";
 const LOOKUP_TITLE = "ハーネス";
 
 function navButton(page: PanelPage, label: string, current: PanelPage): APIButtonComponent {
-  return { type: ComponentType.Button, custom_id: CUSTOM_ID.page(page), label, style: page === "home" ? ButtonStyle.Secondary : ButtonStyle.Primary, disabled: page === current };
+  return button(CUSTOM_ID.page(page), label, ButtonStyle.Secondary, page === current);
 }
 
-/** The settings panel: a home page with the general settings, and pages for keys and models reached by buttons. */
+/**
+ * The settings panel: a home page with the general settings and the buttons to every page, and pages
+ * for keys, models and the harness that hold only their own settings, their notice and the way back.
+ */
 export function renderPanel(store: Store, userId: string, notice?: string, page: PanelPage = "home"): { flags: number; components: APIMessageTopLevelComponent[] } {
-  const status = setupStatus(store, userId);
   const body: APIComponentInContainer[] =
     page === "keys" ? keysPage(store, userId) : page === "models" ? modelsPage(store, userId) : page === "roles" ? rolesPage(store, userId) : page === "lookup" ? lookupPage(store, userId) : homePage(store, userId);
-  body.push(
-    { type: ComponentType.Separator },
-    {
-      type: ComponentType.TextDisplay,
-      content: status.complete
-        ? "✅ 設定は済んでいます。Botをメンションすると会話できます。"
-        : `⚠️ まだ設定していないものがあります: ${status.missing.join("、")}`,
-    },
-  );
+  body.push({ type: ComponentType.Separator });
+  if (page !== "home") {
+    if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
+    body.push({ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] });
+    return v2Message(body, { ephemeral: true });
+  }
+  // Only what is missing is said; a finished setup needs no line.
+  const status = setupStatus(store, userId);
+  if (!status.complete) body.push({ type: ComponentType.TextDisplay, content: `⚠️ まだ設定していないものがあります: ${status.missing.join("、")}` });
   if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
   // At most three buttons a row; the rules and the commands open their own panels in this message.
   body.push(
@@ -135,42 +138,38 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
     {
       type: ComponentType.ActionRow,
       components: [
-        { type: ComponentType.Button, custom_id: ruleCustomId("home"), label: "ルール", style: ButtonStyle.Primary },
-        { type: ComponentType.Button, custom_id: ruleCustomId("commands"), label: "コマンド", style: ButtonStyle.Primary },
-        { type: ComponentType.Button, custom_id: WASM_SECTION_ID, label: "Wasm", style: ButtonStyle.Primary },
+        button(ruleCustomId("home"), "ルール"),
+        button(ruleCustomId("commands"), "コマンド"),
+        button(WASM_HOME_ID, "Wasm"),
       ],
     },
-    // From the per-use page, the モデル button above leads back to the models page.
-    ...(page === "home" ? [] : [{ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] } satisfies APIActionRowComponent<APIButtonComponent>]),
   );
-  return {
-    flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2,
-    components: [{ type: ComponentType.Container, components: body }],
-  };
+  return v2Message(body, { ephemeral: true });
 }
 
-function modelName(ref: { provider: ProviderId; model: string } | null): string | null {
-  return ref ? `${ref.model}(${PROVIDERS[ref.provider].label})` : null;
+/** A chosen model as the model's name and its provider; the id when the list has no name for it (OpenRouter). */
+function modelName(role: ModelRole, ref: { provider: ProviderId; model: string } | null): string | null {
+  return ref ? `${findModel(role, ref.provider, ref.model)?.name ?? ref.model}(${PROVIDERS[ref.provider].label})` : null;
 }
 
 function homePage(store: Store, userId: string): APIComponentInContainer[] {
   const keys = store.listKeys(userId).map((k) => KEY_PROVIDERS[k.provider]?.label ?? k.provider);
   const settings = store.getSettings(userId);
-  const language = modelName(settings.response);
+  const language = modelName("response", settings.response);
   const overrides = [
-    ...(settings.addressee ? [`宛先の判定 ${modelName(settings.addressee)}`] : []),
-    ...(settings.code ? [`コード ${modelName(settings.code)}`] : []),
-    ...(settings.reaction ? [`リアクション ${modelName(settings.reaction)}`] : []),
+    ...(settings.addressee ? [`宛先の判定 ${modelName("addressee", settings.addressee)}`] : []),
+    ...(settings.code ? [`コード ${modelName("code", settings.code)}`] : []),
+    ...(settings.reaction ? [`リアクション ${modelName("reaction", settings.reaction)}`] : []),
   ];
   return [
-    { type: ComponentType.TextDisplay, content: "## 設定\nこの画面はあなたにだけ見えています。" },
+    { type: ComponentType.TextDisplay, content: "## 設定" },
     { type: ComponentType.Separator },
     {
       type: ComponentType.TextDisplay,
       content: [
         `**APIキー**: ${keys.length > 0 ? keys.join("・") : "未登録"}`,
         `**言語モデル**: ${language ?? "未設定"}`,
-        `**判定モデル**: ${modelName(settings.judge) ?? (language ? "言語モデルと同じ" : "未設定")}`,
+        `**判定モデル**: ${modelName("judge", settings.judge) ?? (language ? "言語モデルと同じ" : "未設定")}`,
         ...(overrides.length > 0 ? [`**用途別のモデル**: ${overrides.join("、")}`] : []),
         `**Webツール**: ${WEB_TOOLS[settings.web].label}`,
         `**読み取りの範囲**: ${READ_SCOPES[settings.readScope].label}`,
@@ -185,25 +184,19 @@ function lookupPage(store: Store, userId: string): APIComponentInContainer[] {
     { type: ComponentType.TextDisplay, content: `## ${LOOKUP_TITLE}` },
     ...webSection(store, userId),
     { type: ComponentType.Separator },
-    {
-      type: ComponentType.TextDisplay,
-      content: "**読み取りの範囲**\nBotは、チャンネルの全員が見られる情報だけを使います。あなたへの返事にそれより広い情報が要るときの扱いを選んでください。",
-    },
+    { type: ComponentType.TextDisplay, content: "**読み取りの範囲**\n全員が見られる範囲より広い情報が要るとき" },
     readScopeSelect(store, userId),
   ];
 }
 
 function keysPage(store: Store, userId: string): APIComponentInContainer[] {
   const keys = new Map(store.listKeys(userId).map((k) => [k.provider, k.last4]));
-  const keyLines = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p) => {
-    const last4 = keys.get(p);
-    const note = p === "tavily" ? "(Webツール)" : "";
-    return `${KEY_PROVIDERS[p].label}${note}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
-  });
+  // Only the keys there are; the ones to register are in the select below.
+  const keyLines = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).filter((p) => keys.has(p)).map((p) => `${KEY_PROVIDERS[p].label} · 末尾 \`${keys.get(p)}\``);
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## APIキー\nキーは暗号化して保存します。表示するのは末尾4文字だけです。" },
+    { type: ComponentType.TextDisplay, content: "## APIキー" },
     { type: ComponentType.Separator },
-    { type: ComponentType.TextDisplay, content: keyLines.join("\n") },
+    { type: ComponentType.TextDisplay, content: keyLines.join("\n") || "まだ登録していません" },
     {
       type: ComponentType.ActionRow,
       components: [{
@@ -234,7 +227,7 @@ function keysPage(store: Store, userId: string): APIComponentInContainer[] {
 
 function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## モデル\nBotがあなたのキーで使うモデルです。用途ごとに変えたいときは「用途別のモデル」で選びます。" },
+    { type: ComponentType.TextDisplay, content: "## モデル" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
@@ -243,14 +236,11 @@ function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
   }
   const response = roleSelects(store, userId, "response", "言語モデル");
   body.push(
-    { type: ComponentType.TextDisplay, content: "**言語モデル**\n返事を書く、調べものをする、変更案やコードを作るときに使います。" },
+    { type: ComponentType.TextDisplay, content: "**言語モデル**" },
     ...(response.length > 0
       ? response
       : [{ type: ComponentType.TextDisplay, content: "-# 言語モデルに使えるモデルがありません。Claude API、GLM Coding Plan、OpenAI、OpenRouterのどれかのキーを登録してください。" } satisfies APIComponentInContainer]),
-    {
-      type: ComponentType.TextDisplay,
-      content: "**判定モデル**\n発言がBot宛てかどうか、コマンドの返事を誰に見せるか、どのリアクションを付けるかを決めるときに使います。コードやルールの judge()・rank() もこのモデルが答えます。軽いモデルか、判定専用のJevやGPT-6 Lunaが向いています。",
-    },
+    { type: ComponentType.TextDisplay, content: "**判定モデル**\n-# 軽いモデルが向いています" },
     ...roleSelects(store, userId, "judge", "判定モデル", "言語モデルと同じ"),
     { type: ComponentType.ActionRow, components: [navButton("roles", "用途別のモデル", "models")] },
   );
@@ -262,7 +252,7 @@ const NO_KEY = "先に「APIキー」でキーを登録すると、モデルを�
 // Part of the models page: each use takes the language or judge model unless one is chosen here.
 function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## 用途別のモデル\n用途ごとに、言語モデルや判定モデルとは別のモデルを選べます。選ばなければ元のモデルを使います。" },
+    { type: ComponentType.TextDisplay, content: "## 用途別のモデル\n選ばなければ元のモデルを使います" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
@@ -270,14 +260,11 @@ function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
     return body;
   }
   body.push(
-    { type: ComponentType.TextDisplay, content: "**宛先の判定**\nBotが起きている間に、あなたのメンションのない発言がBot宛てかどうかを決めます。" },
+    { type: ComponentType.TextDisplay, content: "**宛先の判定** — Bot宛てかを決める" },
     ...roleSelects(store, userId, "addressee", "宛先を判定するモデル", "判定モデルと同じ"),
-    { type: ComponentType.TextDisplay, content: "**コード**\n調べもの、変更案、ルールのコードを書きます。" },
+    { type: ComponentType.TextDisplay, content: "**コード** — 変更案とルールを書く" },
     ...roleSelects(store, userId, "code", "コードを書くモデル", "言語モデルと同じ"),
-    {
-      type: ComponentType.TextDisplay,
-      content: "**リアクション**\n文章で返すかリアクションだけで返すか、どの絵文字を付けるかを決めます。Botの発言にあなたが付けたリアクションへの応じ方も決めます。判定専用のモデルが向いています。",
-    },
+    { type: ComponentType.TextDisplay, content: "**リアクション** — 絵文字だけで返すかを決める" },
     ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", "判定モデルと同じ"),
   );
   return body;
@@ -292,11 +279,8 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
     { type: ComponentType.Separator },
     {
       type: ComponentType.TextDisplay,
-      content: [
-        "**Webツール**",
-        "BotがWebを検索したりページを読んだりするときに使います。",
-        ...(warning ? [`-# ⚠️ ${warning}`] : []),
-      ].join("\n"),
+      // What each tool does is in its option's description; a warning stays, since it says why the web is not used.
+      content: ["**Webツール**", ...(warning ? [`-# ⚠️ ${warning}`] : [])].join("\n"),
     },
     {
       type: ComponentType.ActionRow,
@@ -389,7 +373,7 @@ export function typedModelModal(role: ModelRole, current?: string): APIModalInte
 export function keyModal(provider: KeyProviderId): APIModalInteractionResponseCallbackData {
   return {
     custom_id: CUSTOM_ID.keyModal(provider),
-    title: `${KEY_PROVIDERS[provider].label}のAPIキー`,
+    title: `${KEY_PROVIDERS[provider].label} のキー`,
     components: [
       {
         type: ComponentType.ActionRow,
@@ -402,7 +386,6 @@ export function keyModal(provider: KeyProviderId): APIModalInteractionResponseCa
             required: true,
             min_length: 10,
             max_length: 512,
-            placeholder: "暗号化して保存し、表示は末尾4文字だけにします",
           },
         ],
       },
@@ -425,7 +408,7 @@ export type PanelAction =
 /** Parses a custom_id (and select value) into an action. Unknown ids return null. */
 export function parseCustomId(customId: string, values: string[] = []): PanelAction | null {
   const [ns, kind, arg] = customId.split(":");
-  if (ns !== "llm" || !arg) return null;
+  if (ns !== NS.llm || !arg) return null;
   if (kind === "key" && (arg === "set" || arg === "delete")) {
     const provider = values[0] ?? "";
     if (!isKeyProviderId(provider)) return null;
@@ -435,11 +418,10 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
   if (kind === "key" && isKeyProviderId(arg)) return { kind: "openKeyModal", provider: arg };
   if (kind === "delkey" && isKeyProviderId(arg)) return { kind: "deleteKey", provider: arg };
   if (kind === "keymodal" && isKeyProviderId(arg)) return { kind: "submitKey", provider: arg };
-  const isRole = (r: string | undefined): r is ModelRole => r === "response" || r === "judge" || r === "addressee" || r === "code" || r === "reaction";
   // The OpenRouter select and buttons on panels opened before its option joined the model selects.
-  if (kind === "typed" && isRole(arg)) return { kind: "openTypedModelModal", role: arg };
-  if (kind === "typed" && arg === "role") return isRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
-  if (kind === "typedmodal" && isRole(arg)) return { kind: "submitTypedModel", role: arg };
+  if (kind === "typed" && isModelRole(arg)) return { kind: "openTypedModelModal", role: arg };
+  if (kind === "typed" && arg === "role") return isModelRole(values[0]) ? { kind: "openTypedModelModal", role: values[0] } : null;
+  if (kind === "typedmodal" && isModelRole(arg)) return { kind: "submitTypedModel", role: arg };
   // "advanced" is the per-use page's id on panels opened before it moved under the models page.
   if (kind === "page" && arg === "advanced") return { kind: "page", page: "roles" };
   if (kind === "page" && (arg === "home" || arg === "keys" || arg === "models" || arg === "roles" || arg === "lookup")) return { kind: "page", page: arg };
@@ -451,7 +433,7 @@ export function parseCustomId(customId: string, values: string[] = []): PanelAct
     const tool = values[0] ?? "";
     return isWebTool(tool) ? { kind: "selectWeb", tool } : null;
   }
-  if (kind === "model" && isRole(arg)) {
+  if (kind === "model" && isModelRole(arg)) {
     const value = values[0] ?? "";
     if (arg !== "response" && value === MODEL_UNSET) return { kind: "clearModel", role: arg };
     if (value === MODEL_TYPED) return { kind: "openTypedModelModal", role: arg };

@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { Agent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 
@@ -12,8 +13,8 @@ const RETRY_DELAY_MS = 1_500;
 
 const TRANSIENT =
   /aborted|terminated|timed? ?out|timeout|socket|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|fetch failed|network|other side closed|overloaded|Stream ended without finish_reason|\b5\d\d\b/i;
-/** A 4xx is the request's or the account's problem (a bad key, no balance), and retrying will not help. */
-const CLIENT_ERROR = /^\s*4\d\d\b/;
+/** A 4xx is the request's or the account's problem (a bad key, no balance), and retrying will not help. A provider's message starts with the status, captured. */
+export const CLIENT_ERROR = /^\s*(4\d\d)\b/;
 
 function failedCall(messages: AgentMessage[]): AssistantMessage | null {
   const last = messages[messages.length - 1] as AssistantMessage | undefined;
@@ -32,7 +33,7 @@ export function isTransient(message: string): boolean {
 export async function retryFailedCall(
   agent: Agent,
   canRetry: () => boolean,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep: (ms: number) => Promise<void> = delay,
 ): Promise<number> {
   let retries = 0;
   for (;;) {

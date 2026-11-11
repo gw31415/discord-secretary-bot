@@ -2,6 +2,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import type { Decide } from "./decide.ts";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { Reader } from "../discord/reader.ts";
 import { lightestThinking, llm } from "../llm/models.ts";
@@ -15,6 +16,7 @@ import type { ImageBox, ImageTools } from "./attachments.ts";
 import { retryFailedCall } from "./retry.ts";
 import { HOSTED_WEB_TOOLS, isHostedWeb, webTools } from "./web.ts";
 import type { WebAccess } from "./web.ts";
+import { errorMessage } from "../errors.ts";
 
 export interface RespondInput {
   model: Model<Api>;
@@ -220,11 +222,7 @@ function userPrompt(input: RespondInput): string {
 }
 
 function textOf(m: AssistantMessage): string {
-  return m.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("")
-    .trim();
+  return contentText(m.content, "").trim();
 }
 
 /** The text of a failed tool's result: an Error, or a tool result whose content carries the message. */
@@ -398,6 +396,8 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
   });
   input.signal?.addEventListener("abort", () => agent.abort(), { once: true });
 
+  /** The speaker answered ここで終える (or nothing) when asked to go on past the limit. */
+  let declined = false;
   const steer = (text: string) => agent.steer({ role: "user", content: text, timestamp: Date.now() });
   try {
     const images = seesImages && input.images?.length ? await downloadImages(input.images, input.fetch) : [];
@@ -417,7 +417,10 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
     await drain();
     // At the limit with no answer yet, the speaker may let it go on from where it stopped.
     for (let asked = 0; asked < MAX_CONTINUES && atLimit() && unanswered(agent.state.messages) && input.askContinue && !input.signal?.aborted; asked++) {
-      if (!(await input.askContinue(turns))) break;
+      if (!(await input.askContinue(turns))) {
+        declined = true;
+        break;
+      }
       const last = agent.state.messages.at(-1) as AssistantMessage | undefined;
       if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) agent.state.messages = agent.state.messages.slice(0, -1);
       roundStart = turns;
@@ -438,12 +441,14 @@ export async function respond(input: RespondInput): Promise<RespondResult> {
     text = stripWrittenToolCalls(lastAssistantText(agent.state.messages), toolNames());
   } catch (e) {
     // Stopping at the turn limit aborts the call in flight; that is the limit, not a lost connection.
-    if (!capped) throw new ReplyFailed(e instanceof Error ? e.message : String(e), { turns, toolCalls, retries });
+    if (!capped) throw new ReplyFailed(errorMessage(e), { turns, toolCalls, retries });
     text = "";
   }
   const extra = retries > 0 ? { retries } : {};
   if (!text && capped) {
-    return { text: "調べる手順が多くなりすぎたため、途中で止めました。質問を絞ってもう一度聞いてください。", progress, turns, toolCalls, toolErrors, reactions, ...extra };
+    // The speaker chose to end (or did not answer), and the question already said why it stopped.
+    const stopped = declined ? "ここまでで止めました" : "手順の上限で止めました。質問を絞ってください。";
+    return { text: stopped, progress, turns, toolCalls, toolErrors, reactions, ...extra };
   }
   return { text, progress, turns, toolCalls, toolErrors, reactions, ...extra };
 }

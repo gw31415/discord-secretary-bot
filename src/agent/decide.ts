@@ -1,7 +1,9 @@
-import { Type } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ClassifierAnswer, ClassifierQuestion, JsonObject } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
-import { findJudgeModel, isClassifier, judgeRef, lightestThinking, llm } from "../llm/models.ts";
+import { budget, isClassifier, judgeModelFor, llm } from "../llm/models.ts";
+import { firstJsonObject } from "./llm-json.ts";
 import type { Store } from "../db.ts";
 import type { JudgeModel } from "../llm/models.ts";
 
@@ -43,7 +45,6 @@ export async function decide(model: JudgeModel, apiKey: string, state: JsonObjec
     if (res.stopReason !== "stop") throw new Error(`判定モデルが答えませんでした: ${res.errorMessage ?? res.stopReason}`);
     return res.answers;
   }
-  const reasoning = lightestThinking(model);
   const res = await llm.completeSimple(
     model,
     {
@@ -55,21 +56,16 @@ export async function decide(model: JudgeModel, apiKey: string, state: JsonObjec
       ].join("\n"),
       messages: [{ role: "user", content: `<state>\n${JSON.stringify(state)}\n</state>\n<questions>\n${JSON.stringify(questions)}\n</questions>`, timestamp: Date.now() }],
     },
-    { apiKey, signal, ...(reasoning ? { maxTokens: 4000, reasoning } : { maxTokens: 1500 }) },
+    { apiKey, signal, ...budget(model, { thinking: 4000, plain: 1500 }) },
   );
-  const text = res.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("");
+  const text = contentText(res.content, "");
   return parseAnswers(text, questions);
 }
 
 /** A chat model's JSON, read into the classifier's answer shapes. Missing or unreadable answers are errors. */
 export function parseAnswers(text: string, questions: Record<string, Question>): Record<string, Answer> {
-  const match = /\{[\s\S]*\}/.exec(text);
-  let raw: Record<string, Record<string, unknown>>;
-  try {
-    raw = JSON.parse(match?.[0] ?? "") as typeof raw;
-  } catch {
-    throw new Error("判定モデルの答えを読めませんでした");
-  }
+  const raw = firstJsonObject(text) as Record<string, Record<string, unknown>> | null;
+  if (!raw) throw new Error("判定モデルの答えを読めませんでした");
   const clamp = (n: unknown, lo: number, hi: number) => (typeof n === "number" && Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : undefined);
   const answers: Record<string, Answer> = {};
   for (const [key, q] of Object.entries(questions)) {
@@ -111,10 +107,9 @@ export const DECIDE_PRELUDE = [
 
 /** A person's judge model (the language model when none is set), or nothing when its key is gone. */
 export function decideFor(store: Pick<Store, "getSettings" | "getApiKey">, userId: string, signal?: AbortSignal): Decide | undefined {
-  const ref = judgeRef(store.getSettings(userId));
-  const model = ref && findJudgeModel(ref.provider, ref.model);
-  const apiKey = ref && store.getApiKey(userId, ref.provider);
-  if (!model || !apiKey) return undefined;
+  const found = judgeModelFor(store, userId);
+  if (!found) return undefined;
+  const { model, apiKey } = found;
   return (state, questions) => decide(model, apiKey, state, questions, signal);
 }
 

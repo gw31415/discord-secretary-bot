@@ -1,16 +1,16 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
-import type { Static, TSchema } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
 import { ChannelType, ComponentType } from "discord-api-types/v10";
 import type { Reader } from "../discord/reader.ts";
-import { downloadImages, fetchImage, imageRefs, MAX_IMAGES } from "./images.ts";
+import { downloadImages, imageRefs, MAX_IMAGES, messageImage } from "./images.ts";
 import { CodeFailed, syntaxError } from "./coder.ts";
 import type { CodeEnv, Coder, CodeKind } from "./coder.ts";
 import { mimeOf } from "./attachments.ts";
 import type { ImageBox } from "./attachments.ts";
-import { ConvertOptionsSchema, convertImage, forModel, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
+import { ConvertOptionsSchema, convertImage, extOf, forModel, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { ConvertOptions, MathOptions } from "../media.ts";
 import { checkDecideInput, JUDGE_CODE_LINE, MAX_QUESTIONS, MAX_STATE_JSON as MAX_JUDGE_STATE_JSON } from "./decide.ts";
 import type { Decide } from "./decide.ts";
@@ -20,17 +20,17 @@ import { catalogSummary } from "../plan/catalog.ts";
 import { RISK_LABEL, StepDraftSchema } from "../plan/types.ts";
 import type { Plan, StepDraft } from "../plan/types.ts";
 import { PlanRejected } from "../plan/validate.ts";
-import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
-import { MAX_OPTIONS, OPTION_TYPES } from "../rules/command.ts";
-import type { CommandSpec } from "../rules/command.ts";
 import { MAX_RULES_PER_PLAN } from "../rules/service.ts";
-import { MAX_BATCH, MAX_DEBOUNCE_SECONDS, MAX_TRIGGER_EVENTS, triggerSummary } from "../rules/triggers.ts";
-import { MAX_LIMITS, MAX_STATE_JSON } from "../rules/types.ts";
+import { RULES_DESCRIPTION } from "./prompts/rules.ts";
+import { CodedRuleSchema, RuleSchema, rulesFromCode, ruleTask, toProposal } from "./rule-input.ts";
+import type { CodedRuleInput, RuleInput } from "./rule-input.ts";
 import type { Rule, RuleProposal, RuleRun } from "../rules/types.ts";
 import type { WasmModule } from "../db.ts";
 import { MAX_MODULE_BYTES, prepareModule } from "../wasm/module.ts";
 import { execute, hostCalls, wasmInput } from "../wasm/run.ts";
 import type { WasmBindings } from "../wasm/run.ts";
+import { errorMessage } from "../errors.ts";
+import { toolText } from "./tool-text.ts";
 
 /** How much of a one-shot module's stdout the model sees. */
 const MAX_WASM_OUTPUT = 20_000;
@@ -45,8 +45,12 @@ import { docsIndex, loadDocs, readDoc, searchDocs } from "./docs.ts";
 const MAX_TOOL_OUTPUT = 20_000;
 
 function text(value: string) {
-  const body = value.length > MAX_TOOL_OUTPUT ? `${value.slice(0, MAX_TOOL_OUTPUT)}\n…(長いため省略)` : value;
-  return { content: [{ type: "text" as const, text: body }], details: {} };
+  return toolText(value, MAX_TOOL_OUTPUT);
+}
+
+/** A run's log lines, to add after its result or error. */
+function logsText(logs: string[]): string {
+  return logs.length > 0 ? `\nlog:\n${logs.join("\n")}` : "";
 }
 
 const ImageSourceSchema = Type.Union([
@@ -275,17 +279,12 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     if (!Value.Check(ImageSourceSchema, source) || typeof source !== "object") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
     const { message_id, channel_id, index } = source as { message_id: string; channel_id?: string; index?: number };
     // Goes through the reader, so only messages that may be shown here are opened.
-    const message = (await reader.get(`/channels/${channel_id ?? reader.scope.channelId}/messages/${message_id}`)) as APIMessage;
-    const ref = imageRefs(message).at(index ?? 0);
-    if (!ref) throw new Error(`メッセージ ${message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
-    const image = await fetchImage(ref, options.fetch);
-    if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
-    return image;
+    return messageImage(reader, { channelId: channel_id ?? reader.scope.channelId, messageId: message_id, index: index ?? 0 }, options.fetch);
   };
   /** Puts a message's image into the box unchanged (an animated GIF stays animated) and returns its id. */
   const keepAttached = async (source: unknown): Promise<string> => {
     const { data, mimeType } = await attachedImage(source);
-    return box!.addForPlan({ data, name: `image.${mimeType.split("/")[1] === "jpeg" ? "jpg" : mimeType.split("/")[1]}` });
+    return box!.addForPlan({ data, name: `image.${extOf(mimeType.split("/")[1]!)}` });
   };
   const makeMath = async (tex: string, opts: MathOptions, name: string | undefined): Promise<string> => {
     box!.checkRoom();
@@ -294,7 +293,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
   const makeConverted = async (source: unknown, opts: ConvertOptions, name: string | undefined): Promise<string> => {
     box!.checkRoom();
     const { data, format } = await convertImage(await loadImage(source), opts);
-    return box!.add({ data, name: `${name || "image"}.${format === "jpeg" ? "jpg" : format}` });
+    return box!.add({ data, name: `${name || "image"}.${extOf(format)}` });
   };
 
   /** Bindings for one run whose images go into the reply's box; `made` collects their ids. */
@@ -318,16 +317,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     return { result, made: result.ok ? made : [] };
   };
   /** The coder's trial runs draw too, but nothing is kept; formulas are still checked so TeX mistakes show. */
-  const trialBindings: SandboxBindings = box
-    ? {
-        ...sandboxBindings,
-        attach: () => "img0",
-        media: {
-          math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), "img0"),
-          convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), "img0"),
-        },
-      }
-    : sandboxBindings;
+  const trialBindings: SandboxBindings = box ? { ...sandboxBindings, ...trialMedia("img0") } : sandboxBindings;
   /** The images as the model sees them: shrunk, and only when it can see images. */
   const drawn = async (ids: string[]) => {
     if (!box || ids.length === 0) return [];
@@ -362,7 +352,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
     parameters: Type.Object({ code: Type.String({ description: "関数本体。最後に return で結果を返す" }) }),
     execute: async (_id, params) => {
       const { result, made } = await runDrawing(params.code);
-      const logs = result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : "";
+      const logs = logsText(result.logs);
       if (!result.ok) throw new Error(`${result.error}${logs}`);
       return { content: [{ type: "text" as const, text: `${JSON.stringify(result.value, null, 1)}${logs}` }, ...(await drawn(made))], details: {} };
     },
@@ -387,13 +377,13 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
       const { code } = await writeCode(coder!, "read", params.task, {
         check: async (code) => {
           ({ result, made } = await runDrawing(code));
-          return result.ok ? null : `${result.error}${result.logs.length > 0 ? `\nlog:\n${result.logs.join("\n")}` : ""}`;
+          return result.ok ? null : `${result.error}${logsText(result.logs)}`;
         },
         run: (code) => runSandboxed(code, trialBindings, SANDBOX_LIMITS),
         tools: coderTools,
         ...(box ? { canvas: true } : {}),
       });
-      const logs = result!.logs.length > 0 ? `\nlog:\n${result!.logs.join("\n")}` : "";
+      const logs = logsText(result!.logs);
       return { content: [{ type: "text" as const, text: `コード:\n${code}\n\n結果:\n${JSON.stringify(result!.value, null, 1)}${logs}` }, ...(await drawn(made))], details: {} };
     },
   });
@@ -492,7 +482,7 @@ export function readTools(reader: Reader, options: ToolOptions = { images: false
               image: async (data: Buffer, name: string) => {
                 box.checkRoom();
                 const { data: out, format } = await convertImage(data, {});
-                const id = box.add({ data: out, name: `${name || "image"}.${format === "jpeg" ? "jpg" : format}` });
+                const id = box.add({ data: out, name: `${name || "image"}.${extOf(format)}` });
                 made.push(id);
                 return id;
               },
@@ -555,69 +545,6 @@ function widenRead(reader: Reader, widen: (reason: string) => Promise<boolean>):
   });
 }
 
-const AllowSchema = Type.Object({
-  op: Type.String(),
-  path: Type.Optional(Type.Record(Type.String(), Type.Record(Type.String(), Type.Unknown()), { description: "パスパラメータ名 → JSON Schema。例: { channel: { enum: [\"123\"] } }" })),
-  body: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "本文の JSON Schema" })),
-  target: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "対象(チャンネル・ロール・メンバーなど)の実行直前の状態が満たすべき JSON Schema" })),
-  channel: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "ステップが働くチャンネル(投稿先など)の実行直前の状態が満たすべき JSON Schema" })),
-  max_steps_per_run: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-});
-
-const RULE_FIELDS = {
-  name: Type.String({ minLength: 1, maxLength: 60, description: "ルールの短い名前" }),
-  trigger_event: Type.String(),
-  more_trigger_events: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_TRIGGER_EVENTS - 1, description: "同じルールを動かすほかのきっかけ" })),
-  include_bot_origin: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("other_rules")])),
-  run_as: Type.Optional(Type.Union([Type.Literal("presser"), Type.Literal("owner")], { description: "COMMAND・INTERACTION_CREATE・リアクションだけ。既定は実行した人・押した人" })),
-  schedule: Type.Optional(Type.String({ maxLength: 100, description: "SCHEDULE の cron(分 時 日 月 曜日)" })),
-  timezone: Type.Optional(Type.String({ maxLength: 64 })),
-  debounce_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_DEBOUNCE_SECONDS })),
-  serial_by: Type.Optional(Type.String({ maxLength: 64, description: "\"rule\" か、イベントの項目のパス(user_id など)" })),
-  limits: Type.Optional(
-    Type.Object({
-      per_minute: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.perMinute })),
-      max_consecutive_failures: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMITS.maxConsecutiveFailures })),
-    }),
-  ),
-  allow: Type.Array(AllowSchema, { maxItems: MAX_ALLOW_ENTRIES, description: "COMMAND で返事だけ、INTERACTION_CREATE で応答だけのときは空でかまいません" }),
-  params: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-  sample_event: Type.Optional(Type.Unknown()),
-  replaces_rule: Type.Optional(Type.String()),
-  wasm: Type.Optional(Type.String({ description: "コードの代わりに動かすアップロード済みWasmモジュール(話し手のモジュール名か sha256)" })),
-  command: Type.Optional(
-    Type.Object(
-      {
-        name: Type.String({ maxLength: 32, description: "コマンド名(小文字・数字・-・_)" }),
-        description: Type.String({ maxLength: 100 }),
-        options: Type.Optional(
-          Type.Array(
-            Type.Object({
-              name: Type.String({ maxLength: 32 }),
-              description: Type.String({ maxLength: 100 }),
-              type: Type.Union(Object.keys(OPTION_TYPES).map((k) => Type.Literal(k))),
-              required: Type.Optional(Type.Boolean()),
-              choices: Type.Optional(Type.Array(Type.Object({ name: Type.String(), value: Type.Union([Type.String(), Type.Number()]) }), { maxItems: 25 })),
-            }),
-            { maxItems: MAX_OPTIONS },
-          ),
-        ),
-        permissions: Type.Optional(Type.Array(Type.String(), { description: "実行する人に必要な Discord 権限名(例: ManageChannels)" })),
-        visibility: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("private"), Type.Literal("public")], { description: "返事を見せる相手。auto(既定)は返事ごとに判定用のモデルが決め、private は実行した人だけ、public はチャンネルの全員" })),
-      },
-      { description: "trigger_event が COMMAND のときのスラッシュコマンド" },
-    ),
-  ),
-};
-const RuleSchema = Type.Object({ ...RULE_FIELDS, code: Type.Optional(Type.String({ maxLength: 8000 })) });
-type RuleInput = Static<typeof RuleSchema>;
-/** With a coding model, the agent describes each rule's code and the coder writes it. */
-const CodedRuleSchema = Type.Object({
-  ...RULE_FIELDS,
-  code_task: Type.Optional(Type.String({ maxLength: 4000, description: "イベントごとに何を確かめて何をするコードか(wasm のときは不要)" })),
-});
-type CodedRuleInput = Static<typeof CodedRuleSchema>;
-
 const CODER_LIMIT_NOTE = "コード用のモデルは会話を見ていないので、使うID・名前・条件・作るものの内容を全部書いてください。";
 
 /** Has the coder write code, turning its failure into an error the agent can act on. */
@@ -632,30 +559,20 @@ async function writeCode(coder: Coder, kind: CodeKind, task: string, env: CodeEn
   }
 }
 
-/** The rule's own settings go with its task, so the coder knows what it may do. */
-function ruleTask(r: CodedRuleInput & { code_task: string }): string {
-  return [
-    r.code_task,
-    "",
-    `きっかけ: ${[r.trigger_event, ...(r.more_trigger_events ?? [])].join("、")}${r.more_trigger_events?.length ? "(どれで動いたかは eventName で分かります)" : ""}`,
-    ...(r.schedule ? [`時刻: cron ${r.schedule}(${r.timezone ?? "Asia/Tokyo"})`] : []),
-    ...(r.command ? [`スラッシュコマンド: ${JSON.stringify(r.command)}(オプションは event.options、返事は reply("文"))`] : []),
-    ...(r.debounce_seconds ? [`まとめて実行: 最後のイベントから${r.debounce_seconds}秒待って1回だけ動きます。その間のイベントは batch(古い順の [{ eventName, event }])で全部読め、event は最後のものです`] : []),
-    `params: ${JSON.stringify(r.params ?? null)}`,
-    `許す操作: ${JSON.stringify(r.allow)}`,
-    ...(r.replaces_rule ? [`直すルール: ${r.replaces_rule}(list_rules・rule_runs で今のコードと実行履歴を見られます)。依頼で言われていない返事の形(文面の書き方・画像・ボタン)は前の版のまま変えないでください。`] : []),
-    ...(r.sample_event !== undefined ? [`イベントの例: ${JSON.stringify(r.sample_event).slice(0, 2000)}`] : []),
-  ].join("\n");
+/**
+ * Trial runs draw too, but nothing is kept; formulas are still checked so TeX
+ * mistakes show. Every image gets `id`: a rule's trial needs "img1" so its
+ * `files: ["img1"]` passes the same checks as a real run.
+ */
+function trialMedia(id: string): Pick<SandboxBindings, "attach" | "media"> {
+  return {
+    attach: () => id,
+    media: {
+      math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), id),
+      convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), id),
+    },
+  };
 }
-
-/** A rule's trial runs draw too, but nothing is kept; formulas are still checked so TeX mistakes show. */
-const RULE_TRIAL_MEDIA: Pick<SandboxBindings, "attach" | "media"> = {
-  attach: () => "img1",
-  media: {
-    math: async (tex, raw) => (await renderMath(tex, parseOptions(MathOptionsSchema, raw)), "img1"),
-    convert: async (_source, raw) => (parseOptions(ConvertOptionsSchema, raw), "img1"),
-  },
-};
 
 /** One coding agent per rule, all at once. */
 async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: SandboxBindings, tools: AgentTool<any>[]): Promise<RuleInput[]> {
@@ -669,89 +586,16 @@ async function codeRules(coder: Coder, rules: CodedRuleInput[], bindings: Sandbo
         const { code } = await writeCode(coder, "rule", ruleTask({ ...r, code_task: task }), {
           // Rule code only runs on events, so a submission is parsed rather than run.
           check: (code) => syntaxError(code),
-          run: (code, event) => runRuleCode(code, { ...bindings, ...RULE_TRIAL_MEDIA, ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), ...([r.trigger_event, ...(r.more_trigger_events ?? [])].some((e) => e === "INTERACTION_CREATE" || e === "COMMAND") ? { respond: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
+          run: (code, event) => runRuleCode(code, { ...bindings, ...trialMedia("img1"), ...(r.trigger_event === "COMMAND" ? { reply: () => {} } : {}), ...([r.trigger_event, ...(r.more_trigger_events ?? [])].some((e) => e === "INTERACTION_CREATE" || e === "COMMAND") ? { respond: () => {} } : {}), event: event ?? null, params: r.params ?? null, state: null }),
           tools,
         });
         return { ...rest, code };
       } catch (e) {
-        throw new Error(`rules[${i}](${r.name}): ${e instanceof Error ? e.message : String(e)}`);
+        throw new Error(`rules[${i}](${r.name}): ${errorMessage(e)}`);
       }
     }),
   );
 }
-
-function toProposal(r: RuleInput): RuleProposal {
-  return {
-    name: r.name.slice(0, 60),
-    trigger: {
-      event: r.trigger_event,
-      ...(r.more_trigger_events?.length ? { events: r.more_trigger_events.filter((e) => e !== r.trigger_event) } : {}),
-      ...(r.include_bot_origin ? { includeBotOrigin: r.include_bot_origin } : {}),
-      ...(r.run_as === "owner" ? { runAs: "owner" as const } : {}),
-      ...(r.schedule !== undefined ? { schedule: r.schedule } : {}),
-      ...(r.timezone !== undefined ? { timezone: r.timezone } : {}),
-      ...(r.debounce_seconds ? { debounceSeconds: r.debounce_seconds } : {}),
-      ...(r.serial_by ? { serialBy: r.serial_by } : {}),
-      ...(r.command ? { command: r.command as CommandSpec } : {}),
-    },
-    ...(r.limits
-      ? { limits: { ...(r.limits.per_minute ? { perMinute: r.limits.per_minute } : {}), ...(r.limits.max_consecutive_failures ? { maxConsecutiveFailures: r.limits.max_consecutive_failures } : {}) } }
-      : {}),
-    allow: r.allow.map((a) => ({
-      op: a.op,
-      ...(a.path ? { path: a.path } : {}),
-      ...(a.body ? { body: a.body } : {}),
-      ...(a.target ? { target: a.target } : {}),
-      ...(a.channel ? { channel: a.channel } : {}),
-      ...(a.max_steps_per_run ? { maxStepsPerRun: a.max_steps_per_run } : {}),
-    })),
-    program: r.wasm ? { kind: "wasm", module: r.wasm } : { kind: "js", code: r.code ?? "" },
-    ...(r.params ? { params: r.params } : {}),
-    ...(r.sample_event !== undefined ? { sampleEvent: r.sample_event } : {}),
-    ...(r.replaces_rule ? { replaces: r.replaces_rule } : {}),
-  };
-}
-
-/** Rules returned from plan code, checked like the tool's own parameter. */
-function rulesFromCode(value: unknown): RuleProposal[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error("plan(steps, rules) の rules は配列にしてください");
-  return value.map((r, i) => {
-    if (!Value.Check(RuleSchema, r)) {
-      const problems = [...Value.Errors(RuleSchema, r)].slice(0, 3).map((e) => `${e.instancePath || "/"} ${e.message}`);
-      throw new Error(`rules[${i}] の形が違います: ${problems.join("; ")}`);
-    }
-    return toProposal(r);
-  });
-}
-
-const RULES_DESCRIPTION = [
-  "rules: イベントルール。サーバーで決まったイベントが起きるたびに、依頼者の権限で人の確認なしに変更を実行します。steps と同じ承認ダイアログで確認され、「実行」でステップが済んだあとに登録されます。ルールだけのときは steps を空にします。",
-  "  各要素 { name, trigger_event, more_trigger_events?, include_bot_origin?, run_as?, schedule?, timezone?, debounce_seconds?, serial_by?, limits?, command?, allow, code か wasm, params?, sample_event?, replaces_rule? }。code モードでは rule({ 同じ項目 }) を作って plan(steps, [rule(...), ...]) で返します。",
-  "  trigger_event: きっかけ(下の一覧から1つ)。同じ処理を複数のきっかけで動かすときは、残りを more_trigger_events に並べます(合わせて" + MAX_TRIGGER_EVENTS + "種類まで。例: 作成と変更の両方で並べ替える)。ルールを分ける必要はありません。コードはどのきっかけで動いたかを eventName(\"CHANNEL_CREATE\" など)で読めます。sample_event は trigger_event のイベントの例にします。Bot自身が起こしたイベントでは既定で動きません。include_bot_origin は何度動いても結果が同じになるルールにだけ付けます。true はBotの変更すべてで動き、\"other_rules\" はほかのルールや会話からの変更では動くがこのルール自身の変更では動きません(Botの投稿・リアクションでは動きません)。ほかのルールの結果に合わせて直すルール(例: 並べ替えのあとに一覧を作り直す)は \"other_rules\" にします。",
-  "  時刻で動かすときは trigger_event(または more_trigger_events)に SCHEDULE を入れ、schedule に cron(分 時 日 月 曜日。例: 毎朝4時は \"0 4 * * *\"、10分おきは \"*/10 * * * *\")を、必要なら timezone(既定 Asia/Tokyo)を書きます。イベントのきっかけと一緒に使えます(例: チャンネルの作成・変更と毎日4時の作り直し)。BOT_READY はBotの起動・再接続のたびに動くので、止まっていた間の変化を取り込めます。",
-  "  debounce_seconds: 短い間にイベントがまとめて来るとき(並べ替えでチャンネルの変更が何件も届くなど)に付けると、最後のイベントからその秒数待って1回だけ動きます。コードはその間のイベントを batch(古い順の [{ eventName, event }]。最大" + MAX_BATCH + "件。たまったら待たずにその時点で動き、イベントは捨てません)で読めます。batch はいつもあり、まとめないときは1件です。",
-  "  serial_by: 同じルールの実行は既定で並行に動きます(debounce_seconds があるルールと state を書くルールは自動で1回ずつ)。前の実行の結果を前提にするときに付けます。\"rule\" はこのルールの実行をすべて順番に、イベントの項目のパス(例: \"user_id\")はその値が同じイベントだけ順番にします(例: 同じ人の入室と退室で部屋の作成と削除が入れ替わらないように)。",
-  "  state: ルールごとに次の実行へ値を持ち越せます。コードは前回保存した値を state(最初は null)で読み、setState(値) で次回の state を決めます(JSONで" + MAX_STATE_JSON + "文字まで)。保存されるのは実行が通ったとき(変更なし・実行済み)だけで、失敗した回は前の state のままです。setState を呼ばなければ state は変わりません。例: 前回作った一覧の内容を覚えて差分だけ直す、回数を数える、最後に処理したメッセージIDを覚える。",
-  "  later: 「◯分後に〜する」(ボタンを一定時間で外す、期限で締め切るなど)は later(いつ) で予約します。いつは秒数(600)、ISO 8601(期間 \"PT10M\"、日時 \"2026-10-28T09:00+09:00\"(時差がなければルールの時間帯)、区間・繰り返し \"R/2026-10-28T09:00/P1D\" はその次の始まり)、cron の式(\"0 9 * * *\" は次の9時に1回だけ)です。秒は60〜604800(7日)、1回の実行で10件・ルールごとに待ちは100件まで。予約は実行が通ったときだけ保存され、その時刻に同じルールが eventName \"TIMER\"、event { guild_id, due_at, chain, message? } でもう一度動きます。何のために起きたか(どのメッセージ・どの申請か)は、予約するときに自分で state に書いておきます。TIMER の実行がまた later するのは続けて10回まで(event.chain が10の実行では later はエラー)で、ずっと繰り返す処理には向きません(定期的な処理は SCHEDULE)。きっかけに TIMER は書きません。コードは eventName を見て分けます。予約した実行と同じ人として動きます(コマンドやボタンなら実行した人・押した人、run_as: \"owner\" なら作成者)。COMMAND の実行で予約すると、返事が全員に見えるときは event.message { channel_id, id } がその返事のメッセージです(例: 返事のボタンを10分後に外すなら PATCH /channels/{channel}/messages/{message} の body { components: [] }。この返事だけは、実行した人にメッセージの管理の権限がなくても、実行した人として書き換えられます。run_as: \"owner\" にすると judge・rank も作成者の判定モデルになり、ほかの人に作成者の分を使わせるので、このためには付けません)。ルールを止めたり消したりすると、待っている予約は動きません。",
-  "  limits: { per_minute?, max_consecutive_failures? }。既定は1分に10回・3回続けて失敗で停止です。必要なときだけ変えます。",
-  "  code: イベントごとに読み取り専用のサンドボックスで動く関数本体(文字列)。変更がなければ return null、あれば return plan([call(op, { id?, path, body }), ...])。前のステップの結果は $ref で参照できます。",
-  "    使えるもの: event(発火したイベント), params, guild, actor, discord.get(route, { query })(同期関数), call, plan, log, reply(COMMAND のときだけ), later(秒数・ISO 8601・cron の式)(1分〜7日先の1回だけこのルールをもう一度 TIMER で動かす予約), respond(INTERACTION_CREATE では押した人への応答。COMMAND では respond({ type: 4, data: { components } }) の data が返事に加わり、返事にボタンなどを付けられます。返事が公開のコマンドでも、エラーの知らせなどは respond({ type: 4, data: { flags: 64 } }) で実行した人だけに見せます), createCanvas・attachImage・renderMath・convertImage(画像を作ってIDを返します。投稿の body.files に入れるか、COMMAND では返事に添付されます。10枚まで), judge・rank(作成者の判定モデル、COMMAND では実行した人の判定モデルで判定・並べ替え。使い方は run_code の説明と同じ), runWasm(登録済みのWasmモジュールを1回動かして { exitCode, stdout, logs } を返す。モジュールの指定は wasm と同じ), Math.random, Date。実行は1回30秒・discord.get 200回まで。ネットワーク・タイマーはありません(あとで何かするときは later を使います)。",
-  "  params: code が params として読む値。この変更のステップで作るもののIDは { \"$ref\": \"steps.<id>.result.id\" } で渡せます(登録時に実際のIDになります)。",
-  "  allow: ルールに許す操作。各要素 { op, path?, body?, target?, channel?, max_steps_per_run? }。path はパスパラメータごとの、body は本文の、target は対象の実行直前の状態(例: チャンネルの name や type)の、channel はステップが働くチャンネル(投稿・メッセージ削除・リアクションの場所)の実行直前の状態の JSON Schema です。決まったカテゴリの中のチャンネルにだけ投稿させるなら channel: { properties: { parent_id: { const: \"<カテゴリID>\" } }, required: [\"parent_id\"] } のようにします。コードが出したステップはどれか1つに合わないと実行されません。",
-  "    できるだけ狭くします: チャンネルやロールが決まっていれば { enum: [ID] } で固定し(この変更で作るものなら { enum: [{ \"$ref\": \"steps.s1.result.id\" }] })、body は使うフィールドだけを properties に書いて additionalProperties: false、max_steps_per_run も付けます。削除や変更の対象を名前などで限るときは target を使います(例: { properties: { name: { pattern: \"^📞\" } }, required: [\"name\"] })。",
-  "    ルールのコードが同じ回の前のステップで作ったもの(例: 作った部屋へ移すときの channel_id)は、IDが前もって決まらないので { madeInRun: true } とします。例: { op: \"PATCH /guilds/{guild}/members/{user}\", body: { properties: { channel_id: { madeInRun: true } }, required: [\"channel_id\"], additionalProperties: false } }。そのフィールドは、コードの中で $ref で前のステップを指したときだけ通ります。変更案の steps で作るもの(登録時に決まるID)を指す { \"$ref\": \"steps.s1.result.id\" } とは別物なので混同しないでください。",
-  "  sample_event: 実際のイベントで試せないきっかけ(このチャンネルのメッセージやあなたのメンバー情報以外)のとき、ドライラン用のイベントを付けます。",
-  "  replaces_rule: 依頼者の既存のルールを直すときにそのID(list_rules で確認)。直すときは、依頼で言われない限り返事の形(文面の書き方・画像・ボタン・command の visibility)を前の版から変えません。visibility は付けなければ前の版のままになります。",
-  "  wasm: コードの代わりに、アップロードされたWasmモジュール(Botがソースからコンパイルして登録したものを含む)を動かすときに付けます(code は付けません)。話し手のモジュール名(list_wasm で確認)か、同じサーバーの人が上げたモジュールの sha256(12文字以上)です。Wasmは会話で登録できます(/settings の「Wasm」からも登録できます)。一度動かすだけなら登録せずに run_wasm で動かします。話し手が .wasm を添付して使い道を話したら、何をするモジュールか・どう使いたいか(どのきっかけで動かすか、コマンドにするか、何を変更するか)を相談し、決まったら register_wasm で登録してからルール案を出します。登録しただけで済ませたいと言われたら登録だけします。JavaScript 以外の言語(Rust・Go・C・MoonBit・Zig・Nim・Python など)で書きたいと頼まれたら、compile_wasm でコンパイルし、register_wasm(compiled と name)で登録してからその名前を wasm に入れます。モジュールはWASIのコマンドとして、標準入力でイベントなどのJSONを読み、標準出力に { steps, state?, reply? } を書きます(steps は call と同じ { id?, op, path, body } の配列)。allow・trigger・params などはJSのルールと同じに決めます。何をするモジュールかは話し手に聞くか、list_wasm の説明から判断します。",
-  "  ルールのコードでも画像を作れます(createCanvas・attachImage・renderMath・convertImage)。投稿の body.files に画像のID(\"img1\" など)を入れると添付されるので、そのときは allow の body に files: { type: \"array\", maxItems: 10 } を加えます。",
-  "  メッセージに付いたリアクションの人は discord.get(`/channels/<チャンネル>/messages/<メッセージ>/reactions/<絵文字>`) で読めます。リアクションの付け外しは PUT/DELETE …/reactions/{emoji}/@me、ほかの人のリアクションを外すのは DELETE …/reactions/{emoji}/{user} です(emoji は 👍 のような絵文字か 名前:ID)。Botの投稿の書き換えは PATCH /channels/{channel}/messages/{message} です。リアクションのルール(MESSAGE_REACTION_ADD・MESSAGE_REACTION_REMOVE)は、既定では付けた人・外した人として動きます(変更は allow の範囲でその人が持つ権限の分だけ、読み取りもその人の範囲、judge・rank はその人の判定モデル)。その人にない権限が要るとき(例: リアクションでロールを付ける)だけ run_as: \"owner\" を付けて作成者として動かします。COMMAND も同じで、既定は実行した人として動き、run_as: \"owner\" で作成者として動きます。",
-  "  スラッシュコマンドにするとき(「/◯◯ で△△できるように」など)は trigger_event を COMMAND にし(返事に付けたボタン・フォームを同じルールで受けるときは more_trigger_events に INTERACTION_CREATE を足します。ほかのきっかけとは一緒にできません)、command: { name, description, options?: [{ name, description, type: string・integer・number・boolean・user・channel・role, required?, choices? }], permissions?, visibility? } を付けます。コマンドはこのサーバーに登録され、実行されるとオプションの値が event.options(名前 → 値。user・channel・role はID)に、実行した人が event.user・event.member に入ります。コードは reply(\"文\") で実行した人に返事をします(visibility は既定の \"auto\" で返事ごとに実行した人の判定用モデルが全員に見せるか決め、迷えば実行した人だけに見せます。いつも本人だけなら \"private\"、いつも全員なら \"public\" です。依頼で指定がなければ付けません。そのときは確認画面で判定用モデルが既定値を選び、依頼者が3つから選び直せます)。コマンドは実行した人として動きます。変更は allow の範囲で、さらに実行した人が持つ権限の分だけ実行され、読み取りはそのチャンネルを見られる全員(と実行した人)が読めるものに限られます。permissions(例: [\"ManageChannels\"])を付けると、その権限がない人にはコマンドが出ず実行もできません。変更がなく返事だけのコマンドは allow を [] にします。sample_event には { options: { … } } を書けます。返事に画像を付けるときは、コードで renderMath・createCanvas などを呼ぶだけで添付されます。",
-  "  ボタン・セレクト・入力フォームを使うとき(「ボタンを押した人にフォームを出して、送信内容を◯◯に投稿」など)は、ステップでメッセージを投稿し(POST /channels/{channel}/messages の body.components に Discord のコンポーネントのまま。例: [{ type: 1, components: [{ type: 2, style: 1, label: \"申請\", custom_id: \"apply:open\" }] }]。Components V2 なら flags: 32768 を付け content は付けません。Botの投稿のボタンを変えるのは PATCH /channels/{channel}/messages/{message} の components)、押されたときの処理を trigger_event INTERACTION_CREATE のルールにします。押されるたびに、既定ではスラッシュコマンドと同じく押した人として動きます(変更は allow の範囲で押した人が持つ権限の分だけ、読み取りはそのチャンネルを見られる全員が読めるもの、judge・rank は押した人の判定モデル)。押した人にない権限が要るとき(例: 申請を押した人が見られない管理チャンネルに投稿する)だけ run_as: \"owner\" を付けると作成者として動きます。event は Discord のインタラクションのまま(押した人は event.member、ボタンは event.data.custom_id、フォームの入力は event.data.components)です。コードは event.data.custom_id で自分のボタンか確かめ(違えば return null)、respond({ type, data }) で押した人に応答します: type 9 はフォーム(data は { custom_id, title, components }。押した人だけに出ます)、4 はメッセージ(data.flags 64 で押した人だけ)、7 はボタンのメッセージの書き換え。フォームはコードが返ってすぐ(3秒以内)に出し、ほかの応答は変更を実行したあとに出ます。フォームの送信(event.type 5)も同じルールに届くので、custom_id で区別します。custom_id は llm・rule・plan・widen・wasm で始めない(Botの画面が使います)、他のルールと重ならない名前にします。応答だけで変更がなければ allow は [] でかまいません。sample_event にはインタラクションの例(type・data・member など)を付けます。",
-  "  ボイスチャンネルの在室者は discord.get(`/guilds/${guild}/voice-states`) で [{ user_id, channel_id }] として読めます。",
-  "  きっかけにできるイベント:",
-  triggerSummary(),
-].join("\n");
 
 /** A .wasm attached to a message the reader may open. */
 async function attachedWasm(reader: Reader, ref: { message_id: string; channel_id?: string | undefined; index?: number | undefined }, fetchFn: typeof fetch): Promise<{ bytes: Uint8Array; filename: string; authorId: string }> {
@@ -1110,7 +954,7 @@ function proposePlan(reader: Reader, propose: Propose, withRules: boolean, coder
           planned = { drafts: value.steps as StepDraft[], rules: fromCode };
           return null;
         } catch (e) {
-          return e instanceof Error ? e.message : String(e);
+          return errorMessage(e);
         }
       };
 

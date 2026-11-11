@@ -1,4 +1,5 @@
-import { createHash, randomBytes } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { sha256Hex, shortId } from "../crypto.ts";
 import { VISIBILITIES } from "../rules/command.ts";
 import type { CommandVisibility } from "../rules/command.ts";
 import type { API } from "@discordjs/core";
@@ -11,20 +12,28 @@ import { toChannel, toMember, toRole } from "../discord/cache.ts";
 import { modalValue } from "../discord/modal.ts";
 import { canView, needsThreadMembership, shareableChannels } from "../discord/permissions.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
-import { DM_INTERVAL_MS, routeOf } from "./catalog.ts";
+import { DM_INTERVAL_MS, resolveOp, routeOf } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
-import { codeFiles, confirmModal, FILES_CHOICE, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, reviseModal } from "./dialog.ts";
+import { codeFiles, confirmModal, FILES_CHOICE, confirmPhrase, label, needsTypedConfirm, parsePlanCustomId, renderDialog, resourceName, reviseModal, stepNames } from "./dialog.ts";
 import type { DialogState, DialogView } from "./dialog.ts";
 import { batchKey, batchOutcome, batchRequest, batchRun, referencedSteps } from "./batch.ts";
-import { attachmentsFor, dialogUploads, stepFiles, uploadsFor } from "./files.ts";
+import { attachmentsFor, dialogUploads, uploadsFor } from "./files.ts";
 import { mimeOf } from "../agent/attachments.ts";
-import { isRef, maxRisk } from "./types.ts";
+import { draftOf, isRef, maxRisk } from "./types.ts";
 import type { AllowEntry, Attachment, Plan, PlanRule, PlanRuleDraft, PlanStatus, Precondition, RuleDryRun, Step, StepDraft } from "./types.ts";
 import type { Reader } from "../discord/reader.ts";
 import { allowProblems, allowRisk, needsChannel, needsTarget, ownerAllowProblems } from "../rules/allow.ts";
 import type { Targets } from "../rules/allow.ts";
 import type { RuleProposal } from "../rules/types.ts";
 import { type CheckContext, normalizeSteps, permissionProblems, PlanRejected, planRisk, resolveRefs, specOf, stepProblems } from "./validate.ts";
+import { errorMessage } from "../errors.ts";
+import { replyEphemeral, selectedValues, userIdOf } from "../discord/respond.ts";
+import { discordErrorText, PLAN_STATUS_LABEL } from "../discord/labels.ts";
+import { SETTINGS_COMMAND_ID } from "../discord/commands.ts";
+import { sentence, truncate } from "../text.ts";
+import { fingerprint, planHash } from "./hash.ts";
+import type { Resource } from "./hash.ts";
+export { fingerprint, planHash } from "./hash.ts";
 
 // Proposal → approval dialog → re-verification → execution. Every write the
 // bot makes on someone's behalf goes through here.
@@ -123,31 +132,6 @@ export interface ProposeInput {
   images?: Record<string, Attachment>;
 }
 
-type Resource = Record<string, unknown> | null;
-
-function stable(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stable((value as Record<string, unknown>)[k])}`).join(",")}}`;
-  }
-  return JSON.stringify(value ?? null);
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
-export function fingerprint(resource: Resource, fields: string[]): string {
-  if (!resource) return "absent";
-  return sha256(stable(fields.map((f) => [f, resource[f] ?? null])));
-}
-
-export function planHash(plan: Omit<Plan, "hash">): string {
-  const { id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, rules, createdAt, expiresAt } = plan;
-  // The rules are approved too, so a change to them (such as who sees a command's replies) changes the hash.
-  return sha256(stable({ id, guildId, actor, preconditions, steps, labels, risk, revises, source, rule, ...(rules ? { rules } : {}), createdAt, expiresAt }));
-}
-
 /** Fields shown as "before" in the preview, on top of the ones the step depends on. */
 function displayValues(kind: string, resource: Resource, fields: string[]): Record<string, unknown> | null {
   if (!resource) return null;
@@ -167,6 +151,48 @@ function memberLabel(m: APIGuildMember): string {
 
 /** Thrown when the world changed between approval and execution. */
 class Aborted extends Error {}
+
+/** Why a plan that waited too long was closed; its dialog's 出し直す button is the way on. */
+const EXPIRED = "期限(5分)が切れました";
+
+/**
+ * A check's problem as people read it. Problems start with the step they are
+ * about ("s1(ロール付与): …", as the agent sees them); people see the step as
+ * `name` gives it instead.
+ */
+function renameStep(problem: string, steps: Array<{ id: string; op: string }>, name: (id: string, label: string) => string): string {
+  for (const { id, op } of steps) {
+    const spec = resolveOp(op)?.spec;
+    if (!spec) continue;
+    for (const shown of [spec.label, op]) {
+      const prefix = `${id}(${shown}): `;
+      if (problem.startsWith(prefix)) return `${name(id, spec.label)}: ${problem.slice(prefix.length)}`;
+    }
+  }
+  return problem;
+}
+
+/**
+ * How people are told which step a problem is about: by its line in the
+ * dialog ("2. ロール付与"); a rule's plan has no dialog, so by its operation.
+ */
+function stepNamer(plan: Plan): (id: string, label: string) => string {
+  if (plan.rule) return (_id, label) => label;
+  const names = stepNames(plan);
+  return (id, label) => names.get(id) ?? label;
+}
+
+/** Why a plan stopped when someone lost a permission it needs. */
+function lostPermissions(problems: string[]): string {
+  return `権限が足りなくなりました。${sentence(problems.join(" / "))}`;
+}
+
+/** Why a plan made from drafts was refused, each step named by its operation (the new plan has no numbered lines yet). */
+function draftProblems(e: unknown, drafts: StepDraft[]): string {
+  if (!(e instanceof PlanRejected)) return errorMessage(e);
+  const steps = drafts.map((d, i) => ({ id: d.id ?? `s${i + 1}`, op: d.op }));
+  return e.reasons.map((r) => renameStep(r, steps, (_id, label) => label)).join("\n");
+}
 
 /** The steps ran but a rule could not be registered (e.g. its owner lost a permission it needs). */
 class RuleNotRegistered extends Error {}
@@ -194,7 +220,15 @@ export class Planner {
 
   #render(plan: Plan, state: DialogState): ReturnType<typeof renderDialog> {
     const shown = this.#shown.get(plan.id);
-    return renderDialog(plan, { ...state, view: state.view ?? shown?.view, actions: state.actions ?? !shown?.closed });
+    const settingsCommandId = this.deps.store.getMeta(SETTINGS_COMMAND_ID);
+    return renderDialog(plan, { ...state, view: state.view ?? shown?.view, actions: state.actions ?? !shown?.closed, ...(settingsCommandId ? { settingsCommandId } : {}) });
+  }
+
+  /** Why a press on a plan no longer does anything: how long it waited, or where it is now. */
+  #closed(planId: string, expired: boolean): string {
+    const status = this.deps.store.getPlan(planId)?.status;
+    if (!status || (status === "pending_approval" && expired)) return EXPIRED;
+    return `この変更案はもう${PLAN_STATUS_LABEL[status]}です`;
   }
 
   get #rest() {
@@ -259,7 +293,7 @@ export class Planner {
     const cache = this.deps.caches.get(input.guildId);
     if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
     const guild = cache.guild;
-    const id = randomBytes(6).toString("hex");
+    const id = shortId();
     const ruleInputs = input.rules ?? [];
     if (ruleInputs.length > 0 && !this.deps.rules) throw new PlanRejected(["ルールはここでは作れません"]);
     const steps = normalizeSteps(input.drafts, input.guildId, id, ruleInputs.length > 0);
@@ -281,56 +315,54 @@ export class Planner {
         })
       : undefined;
 
-    {
-      const preconditions = await this.#preconditions(input.guildId, steps);
-      const labels = await this.#labels(input.guildId, guild, steps, input.actorId, rules?.flatMap((r) => r.allow) ?? []);
-      const source = input.code === undefined ? undefined : { code: input.code, summary: input.summary !== undefined ? input.summary : await this.#summarize(input.code, input.actorId) };
-      const createdAt = new Date(this.deps.now());
-      const draft: Omit<Plan, "hash"> = {
-        id,
-        guildId: input.guildId,
-        actor: { kind: "user", userId: input.actorId, via: "conversation" },
-        preconditions,
-        steps,
-        labels,
-        risk: maxRisk([planRisk(steps), ...(rules ?? []).map((r) => allowRisk(r.allow))]),
-        ...(input.replaces ? { revises: input.replaces } : {}),
-        ...(source ? { source } : {}),
-        ...(rules ? { rules } : {}),
-        ...(await this.#emptyChannels(steps)),
-        ...(files.attachments ? { attachments: files.attachments } : {}),
-        createdAt: createdAt.toISOString(),
-        expiresAt: new Date(createdAt.getTime() + APPROVAL_MS).toISOString(),
-      };
-      const plan: Plan = { ...draft, hash: planHash(draft) };
-      this.deps.store.insertPlan(plan);
-      this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op), ...(rules ? { rules: rules.map((r) => r.trigger.event) } : {}) }, plan.id);
+    const preconditions = await this.#preconditions(input.guildId, steps);
+    const labels = await this.#labels(input.guildId, guild, steps, input.actorId, rules?.flatMap((r) => r.allow) ?? []);
+    const source = input.code === undefined ? undefined : { code: input.code, summary: input.summary !== undefined ? input.summary : await this.#summarize(input.code, input.actorId) };
+    const createdAt = new Date(this.deps.now());
+    const draft: Omit<Plan, "hash"> = {
+      id,
+      guildId: input.guildId,
+      actor: { kind: "user", userId: input.actorId, via: "conversation" },
+      preconditions,
+      steps,
+      labels,
+      risk: maxRisk([planRisk(steps), ...(rules ?? []).map((r) => allowRisk(r.allow))]),
+      ...(input.replaces ? { revises: input.replaces } : {}),
+      ...(source ? { source } : {}),
+      ...(rules ? { rules } : {}),
+      ...(await this.#emptyChannels(steps)),
+      ...(files.attachments ? { attachments: files.attachments } : {}),
+      createdAt: createdAt.toISOString(),
+      expiresAt: new Date(createdAt.getTime() + APPROVAL_MS).toISOString(),
+    };
+    const plan: Plan = { ...draft, hash: planHash(draft) };
+    this.deps.store.insertPlan(plan);
+    this.deps.store.audit(plan.actor, "plan.propose", { risk: plan.risk, steps: steps.map((s) => s.op), ...(rules ? { rules: rules.map((r) => r.trigger.event) } : {}) }, plan.id);
 
-      const oldRow = input.replaces ? this.deps.store.getPlan(input.replaces) : undefined;
-      if (oldRow?.channelId && oldRow.messageId) {
-        // Takes over the earlier dialog, so the channel keeps one message per request.
-        this.deps.store.setPlanMessage(plan.id, oldRow.channelId, oldRow.messageId);
-        this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更 \`${plan.id}\` に置き換えました` });
-        this.deps.store.audit(plan.actor, "plan.replace", { by: plan.id }, oldRow.plan.id);
-        // The new version's images replace the old ones on the message.
-        const uploads = await dialogUploads(plan);
-        await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, {
-          ...this.#render(plan, { status: "pending_approval" }),
-          attachments: uploads.map((f, i) => ({ id: i, filename: f.name })),
-          ...(uploads.length > 0 ? { files: uploads } : {}),
-        });
-        return plan;
-      }
+    const oldRow = input.replaces ? this.deps.store.getPlan(input.replaces) : undefined;
+    if (oldRow?.channelId && oldRow.messageId) {
+      // Takes over the earlier dialog, so the channel keeps one message per request.
+      this.deps.store.setPlanMessage(plan.id, oldRow.channelId, oldRow.messageId);
+      this.deps.store.transitionPlan(oldRow.plan.id, ["pending_approval", "cancelled", "aborted"], "cancelled", { reason: `変更案 \`${plan.id}\` に置き換えました` });
+      this.deps.store.audit(plan.actor, "plan.replace", { by: plan.id }, oldRow.plan.id);
+      // The new version's images replace the old ones on the message.
       const uploads = await dialogUploads(plan);
-      const message = await this.deps.api.channels.createMessage(input.channelId, {
+      await this.deps.api.channels.editMessage(oldRow.channelId, oldRow.messageId, {
         ...this.#render(plan, { status: "pending_approval" }),
+        attachments: uploads.map((f, i) => ({ id: i, filename: f.name })),
         ...(uploads.length > 0 ? { files: uploads } : {}),
-        allowed_mentions: { parse: [] },
-        ...(input.replyToId ? { message_reference: { message_id: input.replyToId, fail_if_not_exists: false } } : {}),
       });
-      this.deps.store.setPlanMessage(plan.id, input.channelId, message.id);
       return plan;
     }
+    const uploads = await dialogUploads(plan);
+    const message = await this.deps.api.channels.createMessage(input.channelId, {
+      ...this.#render(plan, { status: "pending_approval" }),
+      ...(uploads.length > 0 ? { files: uploads } : {}),
+      allowed_mentions: { parse: [] },
+      ...(input.replyToId ? { message_reference: { message_id: input.replyToId, fail_if_not_exists: false } } : {}),
+    });
+    this.deps.store.setPlanMessage(plan.id, input.channelId, message.id);
+    return plan;
   }
 
   /**
@@ -342,7 +374,7 @@ export class Planner {
     const cache = this.deps.caches.get(input.guildId);
     if (!cache?.guild) throw new Error("サーバーの情報をまだ受信していません");
     const guild = cache.guild;
-    const id = randomBytes(6).toString("hex");
+    const id = shortId();
     const steps = normalizeSteps(input.drafts, input.guildId, id);
     const ctx = { guild, actorId: input.actorId, selfId: this.deps.selfId(), ...(input.rule.ownReply ? { ownReply: input.rule.ownReply } : {}) };
     // Who may not see or do a step learns only that. The state of its target is
@@ -531,13 +563,12 @@ export class Planner {
     const parsed = parsePlanCustomId(interaction.data.custom_id);
     if (!parsed) return false;
     const { api, store } = this.deps;
-    const userId = interaction.member?.user.id ?? interaction.user?.id;
-    const ephemeral = (content: string) =>
-      api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+    const userId = userIdOf(interaction);
+    const ephemeral = (content: string) => replyEphemeral(api, interaction, content);
 
     const row = store.getPlan(parsed.planId);
     if (!row || row.plan.hash.slice(0, 8) !== parsed.hash8) {
-      await ephemeral("この変更は見つかりません");
+      await ephemeral("この変更案は見つかりません");
       return true;
     }
     const { plan } = row;
@@ -554,11 +585,11 @@ export class Planner {
       return api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, { status: row.status, steps, reason: row.reason }));
     };
     if (parsed.action === "view") {
-      const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+      const value = selectedValues(interaction)[0];
       if (value === FILES_CHOICE) {
         // Redrawn first so the menu goes back to the section shown.
         await redraw(undefined);
-        await api.interactions.followUp(interaction.application_id, interaction.token, { content: `変更 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
+        await api.interactions.followUp(interaction.application_id, interaction.token, { content: `変更案 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
         return true;
       }
       await redraw(value === "code" || value === "details" ? value : "result");
@@ -566,7 +597,7 @@ export class Planner {
     }
     // Buttons on dialogs drawn before the menu.
     if (parsed.action === "json" || parsed.action === "files") {
-      await api.interactions.reply(interaction.id, interaction.token, { content: `変更 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
+      await api.interactions.reply(interaction.id, interaction.token, { content: `変更案 \`${plan.id}\` の全内容です`, files: files(), flags: MessageFlags.Ephemeral });
       return true;
     }
     if (parsed.action === "code" || parsed.action === "result" || parsed.action === "details") {
@@ -574,28 +605,35 @@ export class Planner {
       return true;
     }
     if (userId !== plan.actor.userId) {
-      await ephemeral("この変更を操作できるのは依頼した本人だけです");
+      await ephemeral("依頼した本人だけが押せます");
       return true;
     }
     const update = (state: DialogState) => api.interactions.updateMessage(interaction.id, interaction.token, this.#render(plan, state));
     const expired = () => Date.parse(plan.expiresAt) <= this.deps.now();
     const followUp = (content: string) =>
       api.interactions.followUp(interaction.application_id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
-    const why = (e: unknown) => (e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e)).slice(0, 1800);
+    const closed = () => ephemeral(this.#closed(plan.id, expired()));
+    /** While a new plan is made from this one, the dialog says so and its buttons wait; on failure they come back. */
+    const busy = (text: string) => update({ status: row.status, steps: row.status === "pending_approval" ? undefined : store.getSteps(plan.id), reason: row.reason, busy: text });
+    const restored = () => this.#refresh(plan.id).catch((e) => this.deps.log(`変更 ${plan.id} の表示更新に失敗`, e));
 
     switch (parsed.action) {
       case "visibility": {
-        const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+        const value = selectedValues(interaction)[0];
         const target = plan.rules?.find((r) => r.key === parsed.rule && r.trigger.command);
-        if (row.status !== "pending_approval" || expired() || !target || !VISIBILITIES.includes(value as CommandVisibility)) {
-          await ephemeral("この変更はもう変えられません");
+        if (row.status !== "pending_approval" || expired()) {
+          await closed();
+          return true;
+        }
+        if (!target || !VISIBILITIES.includes(value as CommandVisibility)) {
+          await ephemeral("この変更案はもう変えられません");
           return true;
         }
         const rules = plan.rules!.map((r) => (r === target ? { ...r, trigger: { ...r.trigger, command: { ...r.trigger.command!, visibility: value as CommandVisibility } } } : r));
         const { hash: _old, ...rest } = plan;
         const changed: Plan = { ...rest, rules, hash: planHash({ ...rest, rules }) };
         if (!store.replacePendingPlan(changed)) {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.visibility", { rule: target.key, visibility: value }, plan.id);
@@ -604,7 +642,7 @@ export class Planner {
       }
       case "cancel": {
         if (!store.transitionPlan(plan.id, ["pending_approval"], "cancelled", { reason: "依頼者が取り消しました" })) {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.cancel", {}, plan.id);
@@ -614,12 +652,12 @@ export class Planner {
       case "run":
       case "confirm": {
         if (row.status !== "pending_approval") {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         if (expired()) {
           await this.#expire(plan.id);
-          await update({ status: "cancelled", reason: "期限切れになりました(5分)。もう一度頼んでください。" });
+          await update({ status: "cancelled", reason: EXPIRED });
           return true;
         }
         if (parsed.action === "run" && needsTypedConfirm(plan)) {
@@ -634,7 +672,7 @@ export class Planner {
           }
         }
         if (!store.transitionPlan(plan.id, ["pending_approval"], "approved", { approvedBy: userId })) {
-          await ephemeral("この変更はもう承認待ちではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.approve", {}, plan.id);
@@ -644,7 +682,7 @@ export class Planner {
       }
       case "resume": {
         if (!store.transitionPlan(plan.id, ["failed"], "approved", { reason: null })) {
-          await ephemeral("この変更は再開できる状態ではありません");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.resume", {}, plan.id);
@@ -654,31 +692,33 @@ export class Planner {
       }
       case "restore": {
         if (row.status !== "failed" || !row.channelId) {
-          await ephemeral("この変更は復元できる状態ではありません");
+          await closed();
           return true;
         }
-        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
-        const { drafts, skipped } = this.restoreDrafts(row);
+        const { drafts, skipped, skippedNames } = this.restoreDrafts(row);
         if (drafts.length === 0) {
-          await followUp(`戻せる変更がありません。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`);
+          await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+          await followUp(`戻せる変更がありません。${skippedNames.length > 0 ? `戻せないもの: ${skippedNames.join("、")}` : ""}`);
           return true;
         }
+        await busy("変更案を作っています…");
         try {
           const shareable = this.#shareable(plan, row.channelId);
           const restore = await this.propose({ guildId: plan.guildId, channelId: row.channelId, replyToId: row.messageId, actorId: plan.actor.userId, drafts, shareable });
           store.audit(plan.actor, "plan.restore", { restorePlan: restore.id, skipped }, plan.id);
-          const note = `復元の変更 \`${restore.id}\` を提案しました。${skipped.length > 0 ? `戻せないもの: ${skipped.join("、")}` : ""}`;
+          const note = `復元の変更案 \`${restore.id}\` を出しました${skippedNames.length > 0 ? `。戻せないもの: ${skippedNames.join("、")}` : ""}`;
           store.transitionPlan(plan.id, ["failed"], "failed", { reason: `${row.reason ?? ""}\n${note}` });
           this.#shown.set(plan.id, { ...this.#shown.get(plan.id), closed: true });
           await this.#refresh(plan.id);
         } catch (e) {
-          await followUp(`復元の変更を作れませんでした:\n${why(e)}`);
+          await restored();
+          await followUp(`復元の変更案を作れませんでした。${sentence(truncate(draftProblems(e, drafts), 1800))}`);
         }
         return true;
       }
       case "revise": {
         if (row.status !== "pending_approval" || expired() || !this.deps.revise) {
-          await ephemeral("この変更はもう修正できません");
+          await ephemeral(row.status === "pending_approval" && !expired() ? "この変更案は修正できません" : this.#closed(plan.id, expired()));
           return true;
         }
         await api.interactions.createModal(interaction.id, interaction.token, reviseModal(plan));
@@ -687,26 +727,31 @@ export class Planner {
       case "revisetext": {
         const instruction = interaction.type === InteractionType.ModalSubmit ? modalValue(interaction, "instruction")?.trim() : undefined;
         if (row.status !== "pending_approval" || !instruction || !row.channelId || !row.messageId || !this.deps.revise) {
-          await ephemeral("この変更はもう修正できません");
+          await ephemeral(row.status === "pending_approval" && !expired() ? "この変更案は修正できません" : this.#closed(plan.id, expired()));
           return true;
         }
-        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        await busy("修正中…");
         store.audit(plan.actor, "plan.revise", { instruction: instruction.slice(0, 500) }, plan.id);
         // The agent answers in the channel; it replaces this dialog when it proposes the new version.
-        void this.deps.revise({ plan, channelId: row.channelId, messageId: row.messageId, instruction }).catch((e) => {
+        // Without a new version the plan still waits, so its status and buttons come back.
+        const unrevised = async () => {
+          if (store.getPlan(plan.id)?.status === "pending_approval") await restored();
+        };
+        void this.deps.revise({ plan, channelId: row.channelId, messageId: row.messageId, instruction }).then(unrevised, async (e) => {
           this.deps.log(`変更 ${plan.id} の修正に失敗`, e);
-          void followUp(`修正版を作れませんでした: ${why(e)}`).catch(() => undefined);
+          await unrevised();
+          await followUp(`修正版を作れませんでした。${sentence(truncate(errorMessage(e), 1800))}`).catch(() => undefined);
         });
         return true;
       }
       case "redo": {
         if ((row.status !== "cancelled" && row.status !== "aborted") || !row.channelId) {
-          await ephemeral("この変更は出し直せません");
+          await closed();
           return true;
         }
-        await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
+        await busy("変更案を作っています…");
+        const drafts: StepDraft[] = plan.steps.map(draftOf);
         try {
-          const drafts: StepDraft[] = plan.steps.map((s) => ({ id: s.id, op: s.op, path: s.pathParams, ...(s.body !== undefined ? { body: s.body } : {}) }));
           await this.propose({
             guildId: plan.guildId, channelId: row.channelId, replyToId: null, actorId: plan.actor.userId, drafts,
             shareable: this.#shareable(plan, row.channelId), replaces: plan.id,
@@ -715,13 +760,14 @@ export class Planner {
             ...(plan.attachments ? { images: plan.attachments } : {}),
           });
         } catch (e) {
-          await followUp(`出し直せませんでした:\n${why(e)}`);
+          await restored();
+          await followUp(`出し直せませんでした。${sentence(truncate(draftProblems(e, drafts), 1800))}`);
         }
         return true;
       }
       case "keep": {
         if (row.status !== "failed") {
-          await ephemeral("この変更はもう終わっています");
+          await closed();
           return true;
         }
         store.audit(plan.actor, "plan.keep", {}, plan.id);
@@ -742,12 +788,18 @@ export class Planner {
     return shareableChannels(cache.guild, channelId, actor, this.deps.selfId());
   }
 
-  /** Steps that undo what a failed plan already did, newest first. */
-  restoreDrafts(row: PlanRow): { drafts: StepDraft[]; skipped: string[] } {
+  /**
+   * Steps that undo what a failed plan already did, newest first. `skipped`
+   * (kept in the audit log) names each step that cannot be undone by its id;
+   * `skippedNames` says them to people by operation, since a dialog that has
+   * started shows no line numbers.
+   */
+  restoreDrafts(row: PlanRow): { drafts: StepDraft[]; skipped: string[]; skippedNames: string[] } {
     const { plan } = row;
     const rows = new Map(this.deps.store.getSteps(plan.id).map((s) => [s.stepId, s]));
     const drafts: StepDraft[] = [];
     const skipped: string[] = [];
+    const names = new Set<string>();
     for (const step of [...plan.steps].reverse()) {
       const state = rows.get(step.id);
       if (state?.state !== "done" || !state.request) continue;
@@ -755,9 +807,12 @@ export class Planner {
       const snapshot = this.deps.store.getSnapshot(plan.id, step.id)?.data ?? null;
       const inverse = spec.inverse?.(state.request.pathParams, state.request.body as Body, snapshot, state.response as Record<string, unknown> | null);
       if (inverse) drafts.push(inverse);
-      else skipped.push(`${step.id}(${spec.label})`);
+      else {
+        skipped.push(`${step.id}(${spec.label})`);
+        names.add(spec.label);
+      }
     }
-    return { drafts, skipped };
+    return { drafts, skipped, skippedNames: [...names] };
   }
 
   // --- Execution ----------------------------------------------------------
@@ -842,13 +897,15 @@ export class Planner {
     const selfId = this.deps.selfId();
     const actorId = plan.actor.userId;
     const ownReply = plan.rule?.ownReply;
-    const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId, selfId, ...(ownReply ? { ownReply } : {}) }));
+    // These go to people only, so each step is named as the dialog shows it.
+    const name = stepNamer(plan);
+    const problems = remaining.flatMap((s) => permissionProblems(s, { guild: state, actorId, selfId, ...(ownReply ? { ownReply } : {}) }).map((p) => renameStep(p, [s], name)));
     const actor = state.members.get(actorId);
     if (plan.actor.via === "conversation" && actor) {
       // The dialog showed these channels because the actor could read them; one that is gone reveals nothing.
       for (const step of remaining) {
         for (const id of new Set(this.#namedChannels(step))) {
-          if (state.channels.has(id) && !canView(state, actor, id)) problems.push(`${step.id}(${specOf(step).label}): チャンネル ${id} を依頼者が見られなくなりました`);
+          if (state.channels.has(id) && !canView(state, actor, id)) problems.push(`${name(step.id, specOf(step).label)}: ${label(plan, id)} を依頼者が見られなくなりました`);
         }
       }
     }
@@ -882,14 +939,16 @@ export class Planner {
       // Values from earlier steps are known now, so a rule's allow list is checked on them too, and on the target as it is now.
       ...(plan.rule ? allowProblems([resolved], plan.rule.allow, key ? new Map([[step.id, before]]) : undefined, [step], channels) : []),
     ];
-    if (problems.length > 0) throw new Error(problems.join(" / "));
+    if (problems.length > 0) {
+      throw new Error(problems.map((p) => renameStep(p, [step], stepNamer(plan))).join(" / "));
+    }
     if (key) this.deps.store.saveSnapshot(plan.id, step.id, key, before);
   }
 
   #reason(plan: Plan): string {
     return plan.rule
-      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更 ${plan.id})`
-      : `${label(plan, plan.actor.userId)} の依頼(変更 ${plan.id})`;
+      ? `${label(plan, plan.actor.userId)} のルール「${plan.rule.name}」(変更案 ${plan.id})`
+      : `${label(plan, plan.actor.userId)} の依頼(変更案 ${plan.id})`;
   }
 
   /** Several steps in the one request Discord has for them. */
@@ -931,7 +990,7 @@ export class Planner {
       payload = {
         ...text,
         allowed_mentions: { parse: ["users"] },
-        nonce: sha256(step.idempotencyKey).slice(0, 25),
+        nonce: sha256Hex(step.idempotencyKey).slice(0, 25),
         enforce_nonce: true,
         ...(uploads.length > 0 ? { attachments: uploads.map((f, i) => ({ id: i, filename: f.name })) } : {}),
       };
@@ -960,96 +1019,98 @@ export class Planner {
     const row = store.getPlan(planId);
     if (!row || !store.transitionPlan(planId, ["approved"], "executing")) return;
     const { plan } = row;
-    const sleep = this.deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+    const sleep = this.deps.sleep ?? delay;
 
-    {
-      const rows = new Map(store.getSteps(plan.id).map((s) => [s.stepId, s]));
-      const remaining = plan.steps.filter((s) => rows.get(s.id)?.state !== "done");
-      const results = new Map<string, unknown>(plan.steps.filter((s) => rows.get(s.id)?.state === "done").map((s) => [s.id, rows.get(s.id)!.response]));
-      /** The steps being checked or sent; on an error they are the ones marked failed. */
-      let current: Step[] = [];
-      try {
-        let state = await this.#freshState(plan, remaining);
-        let stateAt = this.deps.now();
-        if (!opts.fresh) await this.#checkPreconditions(plan, remaining, results);
-        const problems = await this.#currentProblems(plan, state, remaining);
-        if (problems.length > 0) throw new Aborted(`権限が足りなくなりました: ${problems.join(" / ")}`);
+    const rows = new Map(store.getSteps(plan.id).map((s) => [s.stepId, s]));
+    const remaining = plan.steps.filter((s) => rows.get(s.id)?.state !== "done");
+    const results = new Map<string, unknown>(plan.steps.filter((s) => rows.get(s.id)?.state === "done").map((s) => [s.id, rows.get(s.id)!.response]));
+    /** The steps being checked or sent; on an error they are the ones marked failed. */
+    let current: Step[] = [];
+    try {
+      let state = await this.#freshState(plan, remaining);
+      let stateAt = this.deps.now();
+      if (!opts.fresh) await this.#checkPreconditions(plan, remaining, results);
+      const problems = await this.#currentProblems(plan, state, remaining);
+      if (problems.length > 0) throw new Aborted(lostPermissions(problems));
 
-        const referenced = referencedSteps(plan.steps);
-        let lastDm = 0;
-        let lastRefresh = this.deps.now();
-        for (let i = 0; i < remaining.length; ) {
-          current = [remaining[i]!];
-          if (this.deps.now() - stateAt >= STATE_REFRESH_MS) {
-            state = await this.#freshState(plan, remaining.slice(i));
-            stateAt = this.deps.now();
-            const lost = await this.#currentProblems(plan, state, remaining.slice(i));
-            if (lost.length > 0) throw new Error(`権限が足りなくなりました: ${lost.join(" / ")}`);
-          }
-          const group = this.#nextGroup(remaining, i, results, referenced);
-          i += group.length;
-          current = group.map((g) => g.step);
-          // Every step is checked on its own as before; only the request is shared.
-          const checks = await Promise.allSettled(group.map((g) => this.#checkStep(plan, state, g.step, g.resolved)));
-          const refused = checks.flatMap((c, k) => (c.status === "rejected" ? [{ step: group[k]!.step, error: c.reason as unknown }] : []));
-          if (refused.length > 0) {
-            current = refused.map((r) => r.step);
-            throw refused[0]!.error;
-          }
-          if (group[0]!.resolved.op === "POST /users/{user}/dm") {
-            const wait = lastDm + DM_INTERVAL_MS - this.deps.now();
-            if (wait > 0) await sleep(wait);
-            lastDm = this.deps.now();
-          }
-          for (const { step, resolved } of group) {
-            store.markStepInFlight(plan.id, step.id, { pathParams: resolved.pathParams, body: resolved.body });
-            this.deps.beforeWrite?.(plan, resolved);
-          }
-          let responses: unknown[];
-          let errors: Array<string | null>;
-          if (group.length === 1) {
-            responses = [await this.#send(plan, group[0]!.resolved)];
-            errors = [null];
-          } else {
-            const resolved = group.map((g) => g.resolved);
-            const response = await this.#sendBatch(plan, resolved);
-            responses = group.map(() => null);
-            errors = batchOutcome(resolved, response);
-          }
-          group.forEach(({ step, resolved }, k) => {
-            if (errors[k]) return;
-            const response = responses[k];
-            const resultId = (response as { id?: string } | undefined)?.id ?? null;
-            store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
-            results.set(step.id, response ?? null);
-            this.deps.onWrite?.(plan, resolved, response);
-          });
-          current = group.filter((_, k) => errors[k]).map((g) => g.step);
-          if (current.length > 0) throw new Error(errors.find(Boolean)!);
-          // Progress on long plans, without editing the dialog on every step.
-          if (plan.steps.length > 1 && this.deps.now() - lastRefresh >= PROGRESS_INTERVAL_MS) {
-            lastRefresh = this.deps.now();
-            await this.#refresh(plan.id).catch(() => undefined);
-          }
+      const referenced = referencedSteps(plan.steps);
+      let lastDm = 0;
+      let lastRefresh = this.deps.now();
+      for (let i = 0; i < remaining.length; ) {
+        current = [remaining[i]!];
+        if (this.deps.now() - stateAt >= STATE_REFRESH_MS) {
+          state = await this.#freshState(plan, remaining.slice(i));
+          stateAt = this.deps.now();
+          const lost = await this.#currentProblems(plan, state, remaining.slice(i));
+          if (lost.length > 0) throw new Error(lostPermissions(lost));
         }
-        current = [];
-        if (plan.rules?.length) await this.#registerRules(plan, results);
-        store.transitionPlan(plan.id, ["executing"], "succeeded", { reason: null });
-        store.audit(plan.actor, "plan.succeeded", { steps: plan.steps.length }, plan.id);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        if (e instanceof Aborted) {
-          store.transitionPlan(plan.id, ["executing"], "aborted", { reason: message });
-          store.audit(plan.actor, "plan.aborted", { reason: message }, plan.id);
+        const group = this.#nextGroup(remaining, i, results, referenced);
+        i += group.length;
+        current = group.map((g) => g.step);
+        // Every step is checked on its own as before; only the request is shared.
+        const checks = await Promise.allSettled(group.map((g) => this.#checkStep(plan, state, g.step, g.resolved)));
+        const refused = checks.flatMap((c, k) => (c.status === "rejected" ? [{ step: group[k]!.step, error: c.reason as unknown }] : []));
+        if (refused.length > 0) {
+          current = refused.map((r) => r.step);
+          throw refused[0]!.error;
+        }
+        if (group[0]!.resolved.op === "POST /users/{user}/dm") {
+          const wait = lastDm + DM_INTERVAL_MS - this.deps.now();
+          if (wait > 0) await sleep(wait);
+          lastDm = this.deps.now();
+        }
+        for (const { step, resolved } of group) {
+          store.markStepInFlight(plan.id, step.id, { pathParams: resolved.pathParams, body: resolved.body });
+          this.deps.beforeWrite?.(plan, resolved);
+        }
+        let responses: unknown[];
+        let errors: Array<string | null>;
+        if (group.length === 1) {
+          responses = [await this.#send(plan, group[0]!.resolved)];
+          errors = [null];
         } else {
-          for (const step of current) store.finishStep(plan.id, step.id, { state: "failed", error: message.slice(0, 500) });
-          const reason = current.length > 0
-            ? `${current.map((step) => step.id).join("・")} で失敗: ${message.slice(0, 300)}`
-            : e instanceof RuleNotRegistered ? message.slice(0, 400) : `実行前の確認で失敗: ${message.slice(0, 300)}`;
-          store.transitionPlan(plan.id, ["executing"], "failed", { reason });
-          store.audit(plan.actor, "plan.failed", { step: current[0]?.id, error: message.slice(0, 500) }, plan.id);
-          this.deps.log(`変更 ${plan.id} の実行に失敗`, e);
+          const resolved = group.map((g) => g.resolved);
+          const response = await this.#sendBatch(plan, resolved);
+          responses = group.map(() => null);
+          errors = batchOutcome(resolved, response);
         }
+        group.forEach(({ step, resolved }, k) => {
+          if (errors[k]) return;
+          const response = responses[k];
+          const resultId = (response as { id?: string } | undefined)?.id ?? null;
+          store.finishStep(plan.id, step.id, { state: "done", response: response ?? null, resultId });
+          results.set(step.id, response ?? null);
+          this.deps.onWrite?.(plan, resolved, response);
+        });
+        current = group.filter((_, k) => errors[k]).map((g) => g.step);
+        if (current.length > 0) throw new Error(errors.find(Boolean)!);
+        // Progress on long plans, without editing the dialog on every step.
+        if (plan.steps.length > 1 && this.deps.now() - lastRefresh >= PROGRESS_INTERVAL_MS) {
+          lastRefresh = this.deps.now();
+          await this.#refresh(plan.id).catch(() => undefined);
+        }
+      }
+      current = [];
+      if (plan.rules?.length) await this.#registerRules(plan, results);
+      store.transitionPlan(plan.id, ["executing"], "succeeded", { reason: null });
+      store.audit(plan.actor, "plan.succeeded", { steps: plan.steps.length }, plan.id);
+    } catch (e) {
+      const message = errorMessage(e);
+      if (e instanceof Aborted) {
+        store.transitionPlan(plan.id, ["executing"], "aborted", { reason: message });
+        store.audit(plan.actor, "plan.aborted", { reason: message }, plan.id);
+      } else {
+        // The step keeps Discord's own words (the JSON and the audit log show them); the dialog says it in Japanese.
+        for (const step of current) store.finishStep(plan.id, step.id, { state: "failed", error: message.slice(0, 500) });
+        // One line: the dialog reads later lines of the reason as notes added after the failure.
+        const shown = sentence(truncate(discordErrorText(e).replace(/\s*\n\s*/g, " "), 300));
+        const name = stepNamer(plan);
+        const reason = current.length > 0
+          ? `${[...new Set(current.map((step) => name(step.id, specOf(step).label)))].join("・")}ができませんでした。${shown}`
+          : e instanceof RuleNotRegistered ? message.slice(0, 400) : `実行前の確認ができませんでした。${shown}`;
+        store.transitionPlan(plan.id, ["executing"], "failed", { reason });
+        store.audit(plan.actor, "plan.failed", { step: current[0]?.id, error: message.slice(0, 500) }, plan.id);
+        this.deps.log(`変更 ${plan.id} の実行に失敗`, e);
       }
     }
     await this.#refresh(plan.id).catch((e) => this.deps.log(`変更 ${plan.id} の表示更新に失敗`, e));
@@ -1073,7 +1134,7 @@ export class Planner {
         const ruleId = this.deps.rules!.register(plan.guildId, plan.actor.userId, resolved);
         store.setMeta(key, ruleId);
       } catch (e) {
-        throw new RuleNotRegistered(`ルール「${draft.name}」を登録できませんでした: ${e instanceof Error ? e.message : String(e)}`);
+        throw new RuleNotRegistered(`ルール「${draft.name}」を登録できませんでした。${sentence(errorMessage(e))}`);
       }
     }
   }
@@ -1090,13 +1151,12 @@ export class Planner {
     for (const pre of plan.preconditions) {
       if (!needed.has(pre.resource) || touched.has(pre.resource)) continue;
       const now = fingerprint(await this.resource(plan.guildId, pre.resource), pre.fields);
-      if (now !== pre.fingerprint) throw new Aborted(`${pre.resource} の状態が提案のあとに変わりました`);
+      if (now !== pre.fingerprint) throw new Aborted(`${resourceName(plan, pre.resource)} が変更案を出したあとに変わりました`);
     }
   }
 
   async #expire(planId: string): Promise<boolean> {
-    const reason = "期限切れになりました(5分)。もう一度頼んでください。";
-    if (!this.deps.store.transitionPlan(planId, ["pending_approval"], "cancelled", { reason })) return false;
+    if (!this.deps.store.transitionPlan(planId, ["pending_approval"], "cancelled", { reason: EXPIRED })) return false;
     this.deps.store.audit({ kind: "system" }, "plan.expire", {}, planId);
     return true;
   }
@@ -1115,7 +1175,11 @@ export class Planner {
     for (const row of this.deps.store.expiredPlans(new Date(now))) {
       if (await this.#expire(row.plan.id)) await this.#refresh(row.plan.id).catch((e) => this.deps.log(`変更 ${row.plan.id} の表示更新に失敗`, e));
     }
-    this.deps.store.deleteSnapshotsBefore(new Date(now - SNAPSHOT_RETENTION_MS));
+  }
+
+  /** Drops snapshots past their retention; days long, so an hourly call is enough. */
+  pruneSnapshots(): void {
+    this.deps.store.deleteSnapshotsBefore(new Date(this.deps.now() - SNAPSHOT_RETENTION_MS));
   }
 
   /** A restart interrupted these plans; whether the in-flight request landed is unknown. */

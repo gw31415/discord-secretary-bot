@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "../crypto.ts";
 import type { RuleTimer, Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { toChannel } from "../discord/cache.ts";
@@ -13,19 +13,22 @@ import { PlanRejected } from "../plan/validate.ts";
 import { jsProgram, SANDBOX_LIMITS } from "../sandbox.ts";
 import type { Decide } from "../agent/decide.ts";
 import type { SandboxBindings, SandboxResult } from "../sandbox.ts";
-import { DEFAULT_TIMEZONE, isoNext, parseCron, startCron } from "./schedule.ts";
+import type { Cron } from "croner";
+import { DEFAULT_TIMEZONE, isoNext, parseCron } from "./schedule.ts";
 import { ACTOR_EVENTS, createdKindOf, MAX_BATCH, reactionKey, syntheticEvent, TRIGGERS, voiceMoveKey, voiceMuteKey } from "./triggers.ts";
 import { MAX_STATE_JSON } from "./types.ts";
 import { MAX_REPLY } from "./command.ts";
-import { fetchImage, imageRefs } from "../agent/images.ts";
-import { convertImage, ConvertOptionsSchema, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
-import type { APIMessage } from "discord-api-types/v10";
+import { messageImage } from "../agent/images.ts";
+import { convertImage, ConvertOptionsSchema, extOf, MathOptionsSchema, parseOptions, renderMath } from "../media.ts";
 import type { Rule, RunOutcome } from "./types.ts";
 import { NO_DECIDE, runModule } from "../wasm/run.ts";
 import { ANSWER_TTL_MS, isModalResponse } from "./interaction.ts";
 import type { InteractionResponder } from "./interaction.ts";
 import type { Program } from "../wasm/run.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
+import { errorMessage } from "../errors.ts";
+import { SETTINGS_COMMAND_ID } from "../discord/commands.ts";
+import { settingsCommand } from "../discord/labels.ts";
 
 // Fires event rules. Each matching event runs the rule's code in the sandbox
 // with its owner's read scope; the steps it returns go to the Planner, which
@@ -33,7 +36,7 @@ import type { WasmRegistry } from "../wasm/registry.ts";
 // runs them without a dialog. Safety: the bot's own changes are ignored unless
 // the rule opts in, each rule is rate limited, repeated failures switch it off,
 // and anyone with Manage Server can stop every rule in the server at once.
-// SCHEDULE rules fire from a cron job each (syncSchedules); rules with a debounce wait for
+// SCHEDULE rules fire from one timer that sleeps until the next of their times (syncSchedules); rules with a debounce wait for
 // a quiet moment and run once on the batch of events. COMMAND rules run when
 // someone uses their slash command, as that person: their read scope, their
 // permissions (within the allow list) and their judge model, and the outcome
@@ -60,6 +63,8 @@ export const MAX_LATER_CHAIN = 10;
 const LATER_RETRY_MS = 60_000;
 /** The longest the timer for later() sleeps at once (timers further off are looked at again then). */
 const LATER_MAX_SLEEP_MS = 6 * 60 * 60 * 1000;
+/** The longest the SCHEDULE timer sleeps at once, so a jump of the wall clock is noticed within this. */
+const SCHEDULE_MAX_SLEEP_MS = 10 * 60 * 1000;
 /** A debounced rule runs at the latest this many debounce periods after the first event. */
 const MAX_WAIT_PERIODS = 5;
 
@@ -74,6 +79,8 @@ export interface RuleEngineDeps {
   onRulesChanged?: (guildId: string) => void;
   /** Tells the owner their rule switched itself off. Failures are ignored. */
   notifyOwner?: (userId: string, content: string) => Promise<void>;
+  /** A server's name, for the note that a rule switched itself off; left out when unknown. */
+  guildName?: (guildId: string) => string | undefined;
   log: (message: string, error?: unknown) => void;
   run?: typeof runModule;
   /** Compiled uploaded modules, for rules that run one instead of JS. */
@@ -87,8 +94,6 @@ export interface RuleEngineDeps {
   threadMember?: (threadId: string, userId: string) => Promise<boolean>;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
-  /** Runs a cron schedule until stopped (croner; replaced in tests). */
-  startCron?: typeof startCron;
   /** The servers the bot serves now, whose later() requests may run. */
   guildIds?: () => Iterable<string>;
 }
@@ -134,6 +139,11 @@ export function haltKey(guildId: string): string {
   return `rules_halted:${guildId}`;
 }
 
+export function readHalt(store: Pick<Store, "getMeta">, guildId: string): Halt | null {
+  const raw = store.getMeta(haltKey(guildId));
+  return raw ? (JSON.parse(raw) as Halt) : null;
+}
+
 export interface Halt {
   by: string;
   at: string;
@@ -164,8 +174,7 @@ export class RuleEngine {
   }
 
   halted(guildId: string): Halt | null {
-    const raw = this.deps.store.getMeta(haltKey(guildId));
-    return raw ? (JSON.parse(raw) as Halt) : null;
+    return readHalt(this.deps.store, guildId);
   }
 
   /** The Planner reports each write, so events it causes are recognised. */
@@ -323,33 +332,74 @@ export class RuleEngine {
     return counts;
   }
 
-  /** The cron job of each SCHEDULE rule that is on, by rule id. */
-  readonly #schedules = new Map<string, { guildId: string; version: number; job: { stop(): void } }>();
+  /** Each SCHEDULE rule that is on, by rule id, with its schedule and its next time (null: none left). */
+  readonly #schedules = new Map<string, { guildId: string; version: number; cron: Cron; next: number | null }>();
+  /** The one timer for the earliest of #schedules, and when it wakes. */
+  #scheduleSleep: { timer: unknown; at: number } | null = null;
 
   /**
-   * Starts and stops the cron jobs of a server's SCHEDULE rules to match the
-   * rules that are on now. Called when the server becomes ready and whenever
-   * its rules change; nothing checks the clock in between.
+   * Keeps a server's SCHEDULE rules in step with the rules that are on now.
+   * Called when the server becomes ready and whenever its rules change. One
+   * timer, for all rules, sleeps until the earliest next time; croner works the
+   * times out.
    */
   syncSchedules(guildId: string): void {
     const ready = !!this.deps.caches.get(guildId)?.guild;
     const wanted = new Map((ready ? this.deps.store.enabledRules(guildId, "SCHEDULE") : []).map((rule) => [rule.id, rule]));
     for (const [id, entry] of this.#schedules) {
       if (entry.guildId !== guildId || wanted.get(id)?.version === entry.version) continue;
-      entry.job.stop();
       this.#schedules.delete(id);
     }
+    const now = this.deps.now();
     for (const rule of wanted.values()) {
       if (this.#schedules.has(rule.id)) continue;
-      const timezone = rule.trigger.timezone ?? DEFAULT_TIMEZONE;
+      let cron: Cron;
       try {
-        parseCron(rule.trigger.schedule ?? "", timezone);
+        cron = parseCron(rule.trigger.schedule ?? "", rule.trigger.timezone ?? DEFAULT_TIMEZONE);
       } catch {
         continue; // Checked at approval; a schedule that no longer parses just never fires.
       }
-      const job = (this.deps.startCron ?? startCron)(rule.trigger.schedule!, timezone, () => this.#scheduled(rule.id, rule.version));
-      this.#schedules.set(rule.id, { guildId, version: rule.version, job });
+      this.#schedules.set(rule.id, { guildId, version: rule.version, cron, next: nextRunAfter(cron, now) });
     }
+    this.#armSchedules();
+  }
+
+  /** Sleeps until the earliest next time of the SCHEDULE rules, at most SCHEDULE_MAX_SLEEP_MS. */
+  #armSchedules(): void {
+    const { setTimer = defaultSetTimer, clearTimer = defaultClearTimer } = this.deps;
+    let next: number | null = null;
+    for (const entry of this.#schedules.values()) if (entry.next !== null && (next === null || entry.next < next)) next = entry.next;
+    const now = this.deps.now();
+    const at = next === null ? null : Math.min(Math.max(next, now), now + SCHEDULE_MAX_SLEEP_MS);
+    if (this.#scheduleSleep?.at === at) return;
+    if (this.#scheduleSleep) clearTimer(this.#scheduleSleep.timer);
+    this.#scheduleSleep = null;
+    if (at === null) return;
+    this.#scheduleSleep = {
+      at,
+      timer: setTimer(() => {
+        this.#scheduleSleep = null;
+        this.#runSchedules();
+      }, at - now),
+    };
+  }
+
+  /**
+   * Fires the SCHEDULE rules whose time has come, once each however many times
+   * passed meanwhile (as croner does), and counts their next time from now.
+   */
+  #runSchedules(): void {
+    const now = this.deps.now();
+    const due = [...this.#schedules].filter(([, entry]) => entry.next !== null && entry.next <= now);
+    for (const [id, entry] of due) {
+      entry.next = nextRunAfter(entry.cron, now);
+      try {
+        this.#scheduled(id, entry.version);
+      } catch (e) {
+        this.deps.log(`ルール ${id} の定時実行に失敗`, e);
+      }
+    }
+    this.#armSchedules();
   }
 
   /** A SCHEDULE rule's time came. */
@@ -359,11 +409,13 @@ export class RuleEngine {
     this.#fire(rule, "SCHEDULE", syntheticEvent("SCHEDULE", rule.guildId, rule.trigger, this.deps.now())!);
   }
 
-  /** Stops every cron job and the later() timer (shutdown and tests). */
+  /** Stops the SCHEDULE timer and the later() timer (shutdown and tests). */
   stopSchedules(): void {
-    for (const entry of this.#schedules.values()) entry.job.stop();
+    const clearTimer = this.deps.clearTimer ?? defaultClearTimer;
     this.#schedules.clear();
-    if (this.#sleep) (this.deps.clearTimer ?? defaultClearTimer)(this.#sleep.timer);
+    if (this.#scheduleSleep) clearTimer(this.#scheduleSleep.timer);
+    this.#scheduleSleep = null;
+    if (this.#sleep) clearTimer(this.#sleep.timer);
     this.#sleep = null;
   }
 
@@ -597,17 +649,18 @@ export class RuleEngine {
     const shown = batch.filter((item) => this.#visible(rule, guild, item.eventName, item.event, actor));
     const members = await Promise.all(shown.map((item) => this.#inThread(guild, item.eventName, item.event, actor)));
     const visible = shown.filter((_, i) => members[i]);
-    if (visible.length === 0) return command ? { outcome: "skipped", error: "このチャンネルを見られる人として確認できないため、ここでは動きません", reply: null, images: [], steps: 0 } : null;
+    if (visible.length === 0) return command ? { outcome: "skipped", error: "このチャンネルでは使えません", reply: null, images: [], steps: 0 } : null;
     batch = visible;
     const runId = store.startRuleRun({ ruleId, ruleVersion: version, eventId });
     // The owner must still hold everything the rule allows, as at approval, even when someone else ran its command.
     const owned = ownerAllowProblems(guild, rule.ownerId, this.deps.selfId(), rule.allow, "ルールの作成者");
     if (owned.length > 0) {
       const error = owned.join("\n").slice(0, MAX_ERROR);
-      store.finishRuleRun(runId, { outcome: "rejected", error, logs: [] });
-      store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome: "rejected", event: eventId, version }, undefined, rule.id);
       // This is the rule's own problem, so it counts toward switching the rule off.
-      this.#settle(rule, true, error);
+      this.#record(rule, true, error, () => {
+        store.finishRuleRun(runId, { outcome: "rejected", error, logs: [] });
+        store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome: "rejected", event: eventId, version }, undefined, rule.id);
+      });
       return { outcome: "rejected", error, reply: null, images: [], steps: 0 };
     }
     const last = batch.at(-1)!;
@@ -640,9 +693,8 @@ export class RuleEngine {
       if (result.kind === "none") keepState();
       const error = result.kind === "error" ? result.error : answerError;
       const outcome = error === null ? "no_change" : "failed";
-      store.finishRuleRun(runId, { outcome, error, logs: result.logs });
       // A command run that failed only because whoever ran it has no judge model is not the rule's fault.
-      this.#settle(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error);
+      this.#record(rule, (result.kind === "error" && !(command && error?.includes(NO_DECIDE))) || answerError !== null, error, () => store.finishRuleRun(runId, { outcome, error, logs: result.logs }));
       return { outcome, error, reply, images, steps: 0, ...(result.response !== undefined ? { response: result.response } : {}), ...(timers.length ? { timers } : {}) };
     }
     // A TIMER from a command may edit that command's reply as whoever ran it, without managing messages.
@@ -664,7 +716,7 @@ export class RuleEngine {
       if (outcome === "failed") error = done.reason ?? done.status;
     } catch (e) {
       outcome = e instanceof PlanRejected ? "rejected" : "failed";
-      error = e instanceof PlanRejected ? e.reasons.join("\n") : e instanceof Error ? e.message : String(e);
+      error = errorMessage(e);
     }
     if (response !== undefined && !isModalResponse(response)) {
       if (outcome === "executed") answerError = await responder!.send(response);
@@ -677,10 +729,11 @@ export class RuleEngine {
       outcome = "failed";
       error = error ? `${error}\n${answerError}` : answerError;
     }
-    store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
-    store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
     // A command turned down for what its runner may not do says nothing about the rule, and must not let anyone switch it off.
-    this.#settle(rule, outcome === "failed" || (outcome === "rejected" && !command), error);
+    this.#record(rule, outcome === "failed" || (outcome === "rejected" && !command), error, () => {
+      store.finishRuleRun(runId, { outcome, planId, error: error?.slice(0, MAX_ERROR) ?? null, logs: result.logs });
+      store.audit({ kind: "user", userId: actor, via: "rule" }, "rule.run", { outcome, event: eventId, version }, planId ?? undefined, rule.id);
+    });
     return { outcome, error: error?.slice(0, MAX_ERROR) ?? null, reply, images, steps: result.drafts.length, ...(result.response !== undefined ? { response: result.response } : {}), ...(timers.length ? { timers } : {}) };
   }
 
@@ -695,11 +748,11 @@ export class RuleEngine {
   async runCommand(rule: Rule, event: Data, userId: string): Promise<CommandReport> {
     const skipped = (error: string): CommandReport => ({ outcome: "skipped", error, reply: null, images: [], steps: 0 });
     if (!rule.enabled) return skipped("このコマンドのルールは止まっています");
-    if (this.halted(rule.guildId)) return skipped("このサーバーの全ルールが止められています");
+    if (this.halted(rule.guildId)) return skipped("いまは全ルールが止まっています");
     const guild = this.deps.caches.get(rule.guildId)?.guild;
     const channelId = typeof event.channel_id === "string" ? event.channel_id : "";
-    if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event, userId)) return skipped("このチャンネルを見られる人として確認できないため、ここでは動きません");
-    if (this.#allowRun(rule) !== 0) return skipped(`1分に${rule.limits.perMinute}回までです。少し待ってからもう一度使ってください`);
+    if (!guild || !channelId || !this.#visible(rule, guild, "COMMAND", event, userId)) return skipped("このチャンネルでは使えません");
+    if (this.#allowRun(rule) !== 0) return skipped("混み合っています。少し待ってからもう一度使ってください。");
     const actor = rule.trigger.runAs === "owner" ? rule.ownerId : userId;
     const reader = this.deps.makeReader({ guildId: rule.guildId, channelId, speakerId: actor, audience: "channel" });
     return new Promise((resolve) => {
@@ -707,25 +760,39 @@ export class RuleEngine {
         try {
           resolve((await this.#run(rule.id, rule.version, eventIdOf("COMMAND", event), [{ eventName: "COMMAND", event }], reader, actor)) ?? skipped("このコマンドのルールは止まっています"));
         } catch (e) {
-          resolve(skipped(e instanceof Error ? e.message : String(e)));
+          resolve(skipped(errorMessage(e)));
           throw e;
         }
       });
     });
   }
 
-  /** Counts the outcome; too many failures in a row switch the rule off and tell its owner. */
-  #settle(rule: Rule, failed: boolean, error: string | null): void {
+  /**
+   * Writes the run's records (`write`) and counts the outcome in one transaction;
+   * too many failures in a row switch the rule off and tell its owner.
+   */
+  #record(rule: Rule, failed: boolean, error: string | null, write: () => void): void {
     const { store } = this.deps;
-    const count = store.recordRuleResult(rule.id, failed);
-    if (!failed || count < rule.limits.maxConsecutiveFailures) return;
-    const reason = `${count}回続けて失敗したため自動で止めました`;
-    store.setRuleEnabled(rule.id, false, reason);
-    store.audit({ kind: "system" }, "rule.auto_disable", { reason, lastError: error?.slice(0, MAX_ERROR) ?? null }, undefined, rule.id);
+    const count = store.transaction(() => {
+      write();
+      const n = store.recordRuleResult(rule.id, failed);
+      if (!failed || n < rule.limits.maxConsecutiveFailures) return null;
+      const reason = `${n}回続けて失敗したため自動で止めました`;
+      store.setRuleEnabled(rule.id, false, reason);
+      store.audit({ kind: "system" }, "rule.auto_disable", { reason, lastError: error?.slice(0, MAX_ERROR) ?? null }, undefined, rule.id);
+      return n;
+    });
+    if (count === null) return;
     this.deps.onRulesChanged?.(rule.guildId);
+    const guildName = this.deps.guildName?.(rule.guildId);
+    const lastError = (error ?? "").slice(0, 300);
     void this.deps.notifyOwner?.(
       rule.ownerId,
-      `ルール「${rule.name}」は${count}回続けて失敗したため止めました。最後のエラー: ${(error ?? "").slice(0, 300)}\n直したら \`/settings\` の「ルール」から有効にできます。`,
+      [
+        `${guildName ? `${guildName} の` : ""}ルール「${rule.name}」が${count}回続けて失敗したので止めました。`,
+        ...(lastError ? [`最後のエラー: ${lastError}`] : []),
+        `直したら ${settingsCommand(this.deps.store.getMeta(SETTINGS_COMMAND_ID))} の「ルール」から再開できます。`,
+      ].join("\n"),
     ).catch(() => undefined);
   }
 
@@ -763,13 +830,7 @@ export class RuleEngine {
         }
         const ref = raw as { message_id?: unknown; channel_id?: unknown; index?: unknown } | null;
         if (typeof ref?.message_id !== "string" || typeof ref.channel_id !== "string") throw new Error('画像は "img1" のようなIDか { message_id, channel_id, index } で指定してください');
-        const message = (await source.get(`/channels/${ref.channel_id}/messages/${ref.message_id}`, {})) as APIMessage | null;
-        const index = typeof ref.index === "number" ? ref.index : 0;
-        const found = message && imageRefs(message).at(index);
-        if (!found) throw new Error(`メッセージ ${ref.message_id} に${index ? ` ${index + 1}枚目の` : ""}画像がありません`);
-        const image = await fetchImage(found);
-        if (!image) throw new Error("画像を取得できませんでした(20MBまでの PNG・JPEG・GIF・WebP だけ扱えます)");
-        return image.data;
+        return (await messageImage(source, { channelId: ref.channel_id, messageId: ref.message_id, index: typeof ref.index === "number" ? ref.index : 0 })).data;
       };
       const decider = this.deps.decide?.(actorId);
       const bindings: SandboxBindings = {
@@ -793,7 +854,7 @@ export class RuleEngine {
             math: async (tex: string, raw: unknown, name: string) => keep(await renderMath(tex, parseOptions(MathOptionsSchema, raw)), `${name || "math"}.svg`),
             convert: async (source: unknown, raw: unknown, name: string) => {
               const { data, format } = await convertImage(await load(source), parseOptions(ConvertOptionsSchema, raw));
-              return keep(data, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+              return keep(data, `${name || "image"}.${extOf(format)}`);
             },
           },
       };
@@ -807,11 +868,11 @@ export class RuleEngine {
       // A module draws with its own libraries and hands over the image; it is re-encoded so only real images go out.
       const image = async (data: Buffer, name: string) => {
         const { data: out, format } = await convertImage(data, {});
-        return keep(out, `${name || "image"}.${format === "jpeg" ? "jpg" : format}`);
+        return keep(out, `${name || "image"}.${extOf(format)}`);
       };
       result = await (this.deps.run ?? runModule)(program, { ...bindings, image }, SANDBOX_LIMITS);
     } catch (e) {
-      return { kind: "error", error: (e instanceof Error ? e.message : String(e)).slice(0, MAX_ERROR), logs: [] };
+      return { kind: "error", error: errorMessage(e).slice(0, MAX_ERROR), logs: [] };
     }
     if (!result.ok) return { kind: "error", error: (result.error ?? "不明なエラー").slice(0, MAX_ERROR), logs: result.logs };
     if (result.state && JSON.stringify(result.state.value ?? null).length > MAX_STATE_JSON) {
@@ -881,6 +942,11 @@ export function serialKey(rule: Pick<Rule, "id" | "trigger" | "program">, event:
   return `${rule.id}\u0000${typeof value === "object" ? JSON.stringify(value) : String(value)}`;
 }
 
+/** The first time of the schedule after `now`, as croner works it out; null when none is left. */
+function nextRunAfter(cron: Cron, now: number): number | null {
+  return cron.nextRun(new Date(now))?.getTime() ?? null;
+}
+
 function defaultSetTimer(fn: () => void, ms: number): unknown {
   const timer = setTimeout(fn, ms);
   timer.unref?.();
@@ -931,6 +997,6 @@ export type Evaluation =
 /** A stable id for the event: its own id when it has one, otherwise a hash of the payload. */
 export function eventIdOf(event: string, data: Data): string {
   const own = data.id ?? data.message_id ?? data.user?.id ?? data.user_id ?? data.role?.id ?? data.role_id;
-  const hash = createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 10);
+  const hash = sha256Hex(JSON.stringify(data)).slice(0, 10);
   return `${event}:${own ?? "-"}:${hash}`;
 }

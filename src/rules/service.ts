@@ -1,6 +1,6 @@
 import { toUploadable } from "../media.ts";
 import type { API } from "@discordjs/core";
-import { InteractionType, MessageFlags, PermissionFlagsBits } from "discord-api-types/v10";
+import { InteractionType, MessageFlags } from "discord-api-types/v10";
 import { commandEvent, commandName, permissionBits, RESERVED_COMMANDS } from "./command.ts";
 import { InteractionAnswer, interactionEvent, isRuleInteraction } from "./interaction.ts";
 import type { CommandReport } from "./engine.ts";
@@ -8,17 +8,17 @@ import type { APIInteraction, APIMessage } from "discord-api-types/v10";
 import type { Store, WasmSource } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { guildCommandIds } from "../discord/commands.ts";
+import { holdsPermissions } from "../discord/permissions.ts";
 import type { GuildState } from "../discord/permissions.ts";
 import type { Reader } from "../discord/reader.ts";
-import { CATALOG } from "../plan/catalog.ts";
 import { stepLines } from "../plan/dialog.ts";
 import type { PrepareRulesInput } from "../plan/service.ts";
-import { isRef } from "../plan/types.ts";
+import { containsRef } from "../plan/types.ts";
 import type { Plan, PlanRuleDraft, RuleDryRun } from "../plan/types.ts";
 import { badRefs, normalizeSteps, permissionProblems, PlanRejected, planRisk, stepProblems } from "../plan/validate.ts";
 import { AdminDenied } from "./admin.ts";
 import type { RuleAdmin } from "./admin.ts";
-import { allowProblems } from "./allow.ts";
+import { allowProblems, channelSchema } from "./allow.ts";
 import { attachmentsFor } from "../plan/files.ts";
 import type { RuleEngine } from "./engine.ts";
 import { auditView, commandsView, commandView, DELETE_CHOICE, detailView, homeView, parseRuleCustomId, plansView, RULE_PAGES } from "./panel.ts";
@@ -27,13 +27,17 @@ import type { Rendered } from "./panel.ts";
 import { syntheticEvent, triggerEvents, triggerProblems } from "./triggers.ts";
 import { commandProblems, MAX_CUSTOM_COMMANDS, sampleCommandEvent } from "./command.ts";
 import type { CommandSpec, CommandVisibility } from "./command.ts";
-import { VISIBILITY_CHOICES } from "./command.ts";
+import { visibilityLabel } from "./command.ts";
 import { defaultVisibility, showsToAll } from "../agent/judge.ts";
 import { DEFAULT_LIMITS, ruleLimits } from "./types.ts";
 import { ModuleRejected, sizeLabel, wasmRef } from "../wasm/registry.ts";
 import type { WasmRegistry } from "../wasm/registry.ts";
 import type { WasmRef } from "../plan/types.ts";
 import type { Rule, RuleDefinition, RuleProgram, RuleProposal, RuleRun, RuleTrigger } from "./types.ts";
+import { errorMessage } from "../errors.ts";
+import { sentence } from "../text.ts";
+import { discordErrorText, permissionQuoted } from "../discord/labels.ts";
+import { editV2, replyEphemeral, selectedValues, updateV2, userIdOf } from "../discord/respond.ts";
 
 // Rules are made in conversation, inside a plan: propose_plan can carry rules
 // next to its steps, and one approval runs the steps and registers the rules.
@@ -85,21 +89,11 @@ export function cacheLabel(guild: GuildState | null | undefined): (id: string) =
   };
 }
 
-/** Whether a value holds refs to a plan's step results. */
-function hasRefs(value: unknown): boolean {
-  if (isRef(value)) return true;
-  if (Array.isArray(value)) return value.some(hasRefs);
-  if (value && typeof value === "object") return Object.values(value).some(hasRefs);
-  return false;
-}
-
 /** Channels an allow list pins its entries to. */
 function pinnedIds(draft: Pick<RuleProposal, "allow">): string[] {
   const ids: string[] = [];
   for (const entry of draft.allow) {
-    const spec = CATALOG.get(entry.op);
-    if (!spec?.channel) continue;
-    const schema = entry.path?.[spec.channel] as { enum?: unknown[]; const?: unknown } | undefined;
+    const schema = channelSchema(entry);
     for (const v of schema?.enum ?? (schema?.const !== undefined ? [schema.const] : [])) if (typeof v === "string") ids.push(v);
   }
   return ids;
@@ -129,7 +123,7 @@ export class RuleService {
     }
     // Events the bot makes itself need no sample: the dry run makes one like the real thing.
     const synthetic = syntheticEvent(event, guildId, draft.trigger, this.deps.now());
-    if (synthetic) return { event: synthetic, source: "いま発火したとしたときのイベント" };
+    if (synthetic) return { event: synthetic, source: "仮のイベント" };
     try {
       if ((event === "MESSAGE_CREATE" || event === "MESSAGE_UPDATE") && channelId) {
         const messages = (await reader.get(`/channels/${channelId}/messages`, { limit: 10 })) as APIMessage[];
@@ -138,7 +132,7 @@ export class RuleService {
       }
       if (event === "GUILD_MEMBER_ADD" || event === "GUILD_MEMBER_UPDATE") {
         const member = await reader.get(`/guilds/${guildId}/members/${ownerId}`);
-        if (member) return { event: { ...(member as object), guild_id: guildId }, source: "依頼者のメンバー情報" };
+        if (member) return { event: { ...(member as object), guild_id: guildId }, source: "あなたのメンバー情報" };
       }
     } catch {
       // Fall back to the sample below.
@@ -213,7 +207,7 @@ export class RuleService {
           const found = this.deps.wasm.resolve(input.ownerId, this.deps.caches.get(input.guildId)?.guild, proposed.program.module);
           wasm = wasmRef(found, this.deps.wasm.source(found.sha256));
         } catch (e) {
-          own.push(e instanceof Error ? e.message : String(e));
+          own.push(errorMessage(e));
         }
       } else if (!code?.trim()) own.push("code(または wasm)がありません");
       const program: RuleProgram = code !== null ? { kind: "js", code } : { kind: "wasm", sha256: wasm?.sha256 ?? "" };
@@ -259,7 +253,7 @@ export class RuleService {
 
       let dry = r.dry;
       if (!dry) {
-        const waits = hasRefs(r.allow) || hasRefs(r.params);
+        const waits = containsRef(r.allow) || containsRef(r.params);
         const tried = input.reader
           ? await this.dryRun(input.guildId, input.ownerId, input.channelId, r, input.reader, input.shareable)
           : { source: null, outcome: "no_event" as const, lines: [], problems: [], logs: [] };
@@ -416,15 +410,15 @@ export class RuleService {
     const member = interaction.member;
     if (!guildId || !member) return true;
     const rule = store.enabledRules(guildId, "COMMAND").find((r) => r.trigger.command?.name === name);
-    const ephemeral = (content: string) => api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
+    const ephemeral = (content: string) => replyEphemeral(api, interaction, content);
     if (!rule?.trigger.command) {
       await ephemeral("このコマンドは今は使えません(ルールが止まっているか、削除されました)");
       return true;
     }
     const needed = permissionBits(rule.trigger.command.permissions);
     // Discord sends the member's permissions in this channel with the interaction.
-    if (needed && (BigInt(member.permissions) & needed) !== needed) {
-      await ephemeral(`このコマンドを使うには ${rule.trigger.command.permissions!.join(", ")} の権限が必要です`);
+    if (needed && !holdsPermissions(BigInt(member.permissions), needed)) {
+      await ephemeral(`このコマンドを使うには${permissionQuoted(rule.trigger.command.permissions!)}の権限が必要です`);
       return true;
     }
     const spec = rule.trigger.command;
@@ -476,7 +470,7 @@ export class RuleService {
     const answer = new InteractionAnswer(this.deps.api, interaction, this.deps.log);
     const { fired, limited } = this.deps.engine.dispatchInteraction(guildId, interactionEvent(interaction), answer);
     if (fired === 0) {
-      await answer.note(limited ? "混み合っています。少し待ってからもう一度試してください" : "これに応えるルールは今はありません");
+      await answer.note(limited ? "混み合っています。少し待ってからもう一度押してください。" : "これに応えるルールは今はありません");
       return true;
     }
     answer.arm();
@@ -508,11 +502,11 @@ export class RuleService {
     });
   }
 
-  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean; page?: RulePage } = {}): Rendered {
+  #detail(guildId: string, userId: string, ruleId: string, extra: { dry?: RuleDryRun; notice?: string; confirmDelete?: boolean; busy?: boolean; page?: RulePage } = {}): Rendered {
     const { admin } = this.deps;
     const rule = admin.get(guildId, userId, ruleId);
     return detailView(
-      { rule, userId, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), ...this.#wasmSource(rule), ...extra },
+      { rule, userId, runs: admin.runs(guildId, userId, ruleId), can: admin.abilities(guildId, userId, rule), state: this.deps.store.getRuleState(rule.id), halted: admin.halted(guildId) !== null, ...this.#wasmSource(rule), ...extra },
       cacheLabel(this.deps.caches.get(guildId)?.guild),
     );
   }
@@ -525,13 +519,13 @@ export class RuleService {
     const bits = BigInt(permissions);
     const canRun = (r: Rule) => {
       const needed = permissionBits(r.trigger.command!.permissions);
-      return (bits & PermissionFlagsBits.Administrator) !== 0n || (bits & needed) === needed;
+      return holdsPermissions(bits, needed);
     };
     const rules = this.deps.store
       .listRules(guildId)
       .filter((r) => r.trigger.command && triggerEvents(r.trigger).includes("COMMAND") && (r.ownerId === userId || (r.enabled && canRun(r))))
       .sort((a, b) => a.trigger.command!.name.localeCompare(b.trigger.command!.name));
-    return commandsView({ rules, userId, ids: guildCommandIds(this.deps.store, guildId), ...(notice ? { notice } : {}) });
+    return commandsView({ rules, userId, ids: guildCommandIds(this.deps.store, guildId), halted: this.deps.admin.halted(guildId) !== null, ...(notice ? { notice } : {}) });
   }
 
   /** Only the owner manages a command here; the rules panel covers the rest. */
@@ -547,13 +541,13 @@ export class RuleService {
     const parsed = parseRuleCustomId(interaction.data.custom_id);
     if (!parsed) return false;
     const { api } = this.deps;
-    const userId = interaction.member?.user.id;
+    const userId = userIdOf(interaction);
     const guildId = interaction.guild_id;
     if (!userId || !guildId) return true;
-    const ephemeral = (content: string) => api.interactions.reply(interaction.id, interaction.token, { content, flags: MessageFlags.Ephemeral, allowed_mentions: { parse: [] } });
-    // The panel's views replace each other in place; UPDATE_MESSAGE cannot change the ephemeral flag.
-    const update = (view: Rendered) => api.interactions.updateMessage(interaction.id, interaction.token, { ...view, flags: MessageFlags.IsComponentsV2 });
-    const edit = (view: Rendered) => api.interactions.editReply(interaction.application_id, interaction.token, { ...view, flags: MessageFlags.IsComponentsV2 });
+    const ephemeral = (content: string) => replyEphemeral(api, interaction, content);
+    // The panel's views replace each other in place.
+    const update = (view: Rendered) => updateV2(api, interaction, view);
+    const edit = (view: Rendered) => editV2(api, interaction, view);
 
     try {
       switch (parsed.action) {
@@ -561,14 +555,14 @@ export class RuleService {
           await update(this.#commands(guildId, userId, interaction.member?.permissions ?? "0"));
           return true;
         case "cmd": {
-          const values = "values" in interaction.data ? interaction.data.values : [];
+          const values = selectedValues(interaction);
           await update(this.#command(guildId, userId, values[0] ?? parsed.arg));
           return true;
         }
         case "cmdvis": {
-          const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const value = selectedValues(interaction)[0];
           const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
-          const label = VISIBILITY_CHOICES.find((o) => o.value === rule.trigger.command?.visibility)?.label ?? "";
+          const label = visibilityLabel(rule.trigger.command?.visibility);
           await update(this.#command(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
           return true;
         }
@@ -585,7 +579,7 @@ export class RuleService {
           await update(this.#home(guildId, userId));
           return true;
         case "open": {
-          const values = "values" in interaction.data ? interaction.data.values : [];
+          const values = selectedValues(interaction);
           await update(this.#detail(guildId, userId, values[0] ?? parsed.arg));
           return true;
         }
@@ -595,7 +589,7 @@ export class RuleService {
           await update(this.#detail(guildId, userId, parsed.arg, { page: parsed.action }));
           return true;
         case "view": {
-          const value = "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const value = selectedValues(interaction)[0];
           if (value === DELETE_CHOICE) await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
           else await update(this.#detail(guildId, userId, parsed.arg, { page: RULE_PAGES.includes(value as RulePage) ? (value as RulePage) : "summary" }));
           return true;
@@ -603,7 +597,7 @@ export class RuleService {
         case "enable":
         case "disable": {
           const rule = this.deps.admin.setEnabled(guildId, userId, parsed.arg, parsed.action === "enable");
-          await update(this.#detail(guildId, userId, rule.id, { notice: rule.enabled ? "有効にしました" : "止めました" }));
+          await update(this.#detail(guildId, userId, rule.id, { notice: rule.enabled ? "再開しました" : "止めました" }));
           return true;
         }
         case "dry": {
@@ -612,19 +606,25 @@ export class RuleService {
             await ephemeral("ドライランは作成者だけが使えます");
             return true;
           }
-          await api.interactions.deferMessageUpdate(interaction.id, interaction.token);
-          const channelId = interaction.channel?.id ?? "";
-          const dry = await this.dryRun(guildId, userId, channelId, rule, this.deps.engine.ownerReader(guildId, userId, channelId));
-          await edit(this.#detail(guildId, userId, rule.id, { dry }));
+          // The press answers at once: the status line says it is running and the buttons that act are left out.
+          await update(this.#detail(guildId, userId, rule.id, { busy: true, notice: "ドライラン中…" }));
+          try {
+            const channelId = interaction.channel?.id ?? "";
+            const dry = await this.dryRun(guildId, userId, channelId, rule, this.deps.engine.ownerReader(guildId, userId, channelId));
+            await edit(this.#detail(guildId, userId, rule.id, { dry }));
+          } catch (e) {
+            await edit(this.#detail(guildId, userId, rule.id));
+            throw e;
+          }
           return true;
         }
         case "delete":
           await update(this.#detail(guildId, userId, parsed.arg, { confirmDelete: true }));
           return true;
         case "visibility": {
-          const value = interaction.type === InteractionType.MessageComponent && "values" in interaction.data ? interaction.data.values[0] : undefined;
+          const value = selectedValues(interaction)[0];
           const rule = this.deps.admin.setVisibility(guildId, userId, parsed.arg, value as CommandVisibility);
-          const label = VISIBILITY_CHOICES.find((o) => o.value === rule.trigger.command?.visibility)?.label ?? "";
+          const label = visibilityLabel(rule.trigger.command?.visibility);
           await update(this.#detail(guildId, userId, rule.id, { notice: `「${label}」にしました` }));
           return true;
         }
@@ -636,7 +636,7 @@ export class RuleService {
           }
           this.deps.store.setRuleState(rule.id, null);
           this.deps.store.audit({ kind: "user", userId, via: "panel" }, "rule.clear_state", {}, undefined, rule.id);
-          await update(this.#detail(guildId, userId, rule.id, { page: "runs", notice: "状態を消しました。次の実行は state が null で始まります" }));
+          await update(this.#detail(guildId, userId, rule.id, { page: "runs", notice: "状態を消しました" }));
           return true;
         }
         case "delete2": {
@@ -705,11 +705,11 @@ function commandFailed(report: CommandReport): boolean {
 
 export function commandReplyText(ruleName: string, report: CommandReport): string {
   const status = commandFailed(report)
-    ? `⚠️ 実行できませんでした: ${(report.error ?? "不明なエラー").slice(0, 500)}`
+    ? `⚠️ 実行できませんでした。${sentence(discordErrorText(report.error ?? "不明なエラー").slice(0, 500))}`
     : report.reply || report.images.length
       ? null
       : report.outcome === "executed"
-        ? `「${ruleName}」を実行しました(${report.steps}件の変更)`
+        ? `「${ruleName}」を実行しました(操作${report.steps}件)`
         : "変更することはありませんでした";
   return [report.reply, status].filter((t): t is string => !!t).join("\n").slice(0, 2000);
 }

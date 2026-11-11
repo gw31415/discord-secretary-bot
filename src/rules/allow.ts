@@ -2,9 +2,12 @@ import { Value } from "typebox/value";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { basePermissions, channelPermissions } from "../discord/permissions.ts";
 import { CATALOG, pathParamNames, permissionNames } from "../plan/catalog.ts";
-import { isRef, maxRisk } from "../plan/types.ts";
+import { containsRef, isRef, maxRisk } from "../plan/types.ts";
 import type { AllowEntry, Risk, Step } from "../plan/types.ts";
 import { MAX_STEPS } from "../plan/validate.ts";
+import { errorMessage } from "../errors.ts";
+import { truncate } from "../text.ts";
+import { permissionList } from "../discord/labels.ts";
 
 // The allow list a rule's owner approves: which operations the rule may make,
 // with JSON Schemas on path parameters and the body. Every step a rule
@@ -20,7 +23,7 @@ function schemaProblem(schema: unknown, where: string): string | null {
     Value.Check(schema as never, null);
     return null;
   } catch (e) {
-    return `${where}: JSON Schemaとして読めません(${e instanceof Error ? e.message : String(e)})`;
+    return `${where}: JSON Schemaとして読めません(${errorMessage(e)})`;
   }
 }
 
@@ -140,13 +143,6 @@ export function needsTarget(step: Step, allow: AllowEntry[]): boolean {
   return allow.some((entry) => entry.op === step.op && entry.target !== undefined);
 }
 
-function containsRef(value: unknown): boolean {
-  if (isRef(value)) return true;
-  if (Array.isArray(value)) return value.some(containsRef);
-  if (value && typeof value === "object") return Object.values(value).some(containsRef);
-  return false;
-}
-
 /** Top-level body fields that wait on an earlier step are left out until they are known. */
 function withoutRefs(body: unknown): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
@@ -181,11 +177,15 @@ function possibleFields(entry: AllowEntry): string[] {
   return Object.keys(spec.byField ?? {});
 }
 
+/** The schema an entry puts on its operation's channel parameter, if the operation has one. */
+export function channelSchema(entry: AllowEntry): { enum?: unknown[]; const?: unknown } | undefined {
+  const spec = CATALOG.get(entry.op);
+  return spec?.channel ? (entry.path?.[spec.channel] as { enum?: unknown[]; const?: unknown } | undefined) : undefined;
+}
+
 /** Channels the entry is pinned to by an enum or const on the channel parameter. */
 function pinnedChannels(entry: AllowEntry): string[] | null {
-  const spec = CATALOG.get(entry.op)!;
-  if (!spec.channel) return null;
-  const schema = entry.path?.[spec.channel] as { enum?: unknown[]; const?: unknown } | undefined;
+  const schema = channelSchema(entry);
   if (schema?.enum?.every((v) => typeof v === "string")) return schema.enum as string[];
   if (typeof schema?.const === "string") return [schema.const];
   return null;
@@ -227,10 +227,10 @@ export function ownerAllowProblems(guild: GuildState, ownerId: string, selfId: s
   if (!owner) return [`${who}がサーバーのメンバーとして見つかりません`];
   const problems: string[] = [];
   const missing = missingPermissions(guild, owner, allow);
-  if (missing.length > 0) problems.push(`許す操作に必要な権限を${who}が持っていません: ${missing.join(", ")}`);
+  if (missing.length > 0) problems.push(`許す操作に必要な権限を${who}が持っていません: ${permissionList(missing)}`);
   const bot = guild.members.get(selfId);
   const botMissing = bot ? missingPermissions(guild, bot, allow) : ["(Botの情報がありません)"];
-  if (botMissing.length > 0) problems.push(`許す操作に必要な権限をBotが持っていません: ${botMissing.join(", ")}`);
+  if (botMissing.length > 0) problems.push(`許す操作に必要な権限をBotが持っていません: ${permissionList(botMissing)}`);
   return problems;
 }
 
@@ -245,8 +245,7 @@ export function allowRisk(allow: AllowEntry[]): Risk {
 }
 
 function compact(schema: unknown, max = 160): string {
-  const text = JSON.stringify(schema);
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  return truncate(JSON.stringify(schema), max);
 }
 
 /** A value of a schema or of params, with a ref to a step result shown as such. */
@@ -258,22 +257,25 @@ export function valueText(value: unknown, label: (id: string) => string = (id) =
   return typeof value === "string" ? label(value) : JSON.stringify(value);
 }
 
-/** One line per entry, drawn only from the entry itself. */
-export function allowLines(allow: AllowEntry[], label: (id: string) => string = (id) => id): string[] {
+/**
+ * One line per entry, drawn only from the entry itself. `brief` names the operation without
+ * its API path and leaves out a channel that is not narrowed, for a first screen.
+ */
+export function allowLines(allow: AllowEntry[], label: (id: string) => string = (id) => id, { brief = false }: { brief?: boolean } = {}): string[] {
   return allow.map((entry) => {
     const spec = CATALOG.get(entry.op);
-    const parts = [`**${spec?.label ?? entry.op}** \`${entry.op}\``];
+    const parts = [brief ? `**${spec?.label ?? entry.op}**` : `**${spec?.label ?? entry.op}** \`${entry.op}\``];
     for (const [name, schema] of Object.entries(entry.path ?? {})) {
       const s = schema as { enum?: unknown[]; const?: unknown };
       const values = s.enum ?? (s.const !== undefined ? [s.const] : null);
       if (isMadeInRun(schema)) parts.push(`${name}: このルールが同じ回に作ったもののみ`);
       else parts.push(values ? `${name}: ${values.map((v) => valueText(v, label)).join("、")} のみ` : `${name}: ${compact(schema)}`);
     }
-    if (spec?.channel && !entry.path?.[spec.channel]) parts.push(`${spec.channel}: どこでも`);
+    if (spec?.channel && !entry.path?.[spec.channel] && !brief) parts.push(`${spec.channel}: どこでも`);
     if (entry.body !== undefined) parts.push(`本文: ${compact(entry.body)}`);
     if (entry.target !== undefined) parts.push(`対象の条件: ${compact(entry.target)}`);
     if (entry.channel !== undefined) parts.push(`チャンネルの条件: ${compact(entry.channel)}`);
     parts.push(entry.maxStepsPerRun !== undefined ? `1回に${entry.maxStepsPerRun}件まで` : `1回に${MAX_STEPS}件まで`);
-    return `- ${parts.join(" / ")}`;
+    return `- ${parts.join(brief ? " · " : " / ")}`;
   });
 }

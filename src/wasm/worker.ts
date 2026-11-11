@@ -1,6 +1,7 @@
 import { randomFillSync } from "node:crypto";
 import { parentPort, receiveMessageOnPort } from "node:worker_threads";
 import type { MessagePort } from "node:worker_threads";
+import { errorMessage } from "../errors.ts";
 
 // Runs Wasm modules, one at a time, in a thread of its own; each run gets a
 // fresh instance, so runs share nothing but the thread. The module sees a minimal WASI
@@ -214,7 +215,7 @@ function run(input: WorkerInput): WorkerMessage {
     if (e instanceof Exit) exitCode = e.code;
     else {
       exitCode = 1;
-      error = e instanceof WebAssembly.RuntimeError ? `Wasmの実行時エラー: ${e.message}` : e instanceof Error ? e.message : String(e);
+      error = e instanceof WebAssembly.RuntimeError ? `Wasmの実行時エラー: ${e.message}` : errorMessage(e);
     }
   }
   return { type: "done", exitCode, stdout: stdout.bytes(), stderr: stderr.bytes(), ...(error ? { error } : {}) };

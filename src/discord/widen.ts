@@ -1,7 +1,9 @@
 import type { API } from "@discordjs/core";
-import { ButtonStyle, ComponentType, InteractionType, MessageFlags } from "discord-api-types/v10";
+import { ButtonStyle, ComponentType, InteractionType } from "discord-api-types/v10";
 import type { APIInteraction } from "discord-api-types/v10";
 import { randomUUID } from "node:crypto";
+import { NS } from "./custom-id.ts";
+import { replyEphemeral, userIdOf } from "./respond.ts";
 
 // Questions to the speaker in the middle of a reply: letting it read beyond
 // what everyone in the channel can see, or going on past its turn limit. The
@@ -9,7 +11,7 @@ import { randomUUID } from "node:crypto";
 // reply waits for the answer (or gives up after a while).
 
 export const WIDEN_TIMEOUT_MS = 2 * 60_000;
-const PREFIX = "widen";
+const PREFIX = NS.widen;
 
 interface Pending {
   speakerId: string;
@@ -55,17 +57,20 @@ export class WidenPrompts {
 
   /** Resolves true when the speaker pressed 許可, false on 許可しない or no answer in time. */
   ask(input: WidenRequest): Promise<boolean> {
+    // The question is taken back after the timeout; it says when, as the plan dialog does.
+    const deadline = Math.floor((Date.now() + this.#timeoutMs) / 1000);
     return this.#ask({
       ...input,
       content: [
-        `🔓 <@${input.speakerId}> さん、あなたが見られる範囲まで読み取りを広げてよいですか?`,
+        `<@${input.speakerId}> 読み取りをあなたが見られる範囲まで広げてよいですか?`,
         `理由: ${input.reason.slice(0, 300)}`,
         "-# この返答のあいだだけです。全員は見られない内容が返答に入ることがあります。",
+        `-# 期限 <t:${deadline}:R>`,
       ].join("\n"),
       yes: "許可する",
       no: "許可しない",
-      answered: (allowed, speakerId) => (allowed ? `🔓 <@${speakerId}> さんが見られる範囲まで読み取ります。` : "🔒 読み取りは広げずに答えます。"),
-      expired: "🔒 返事がなかったので、読み取りは広げません。",
+      answered: (allowed, speakerId) => (allowed ? `🔓 <@${speakerId}> が見られる範囲まで読み取ります` : "🔒 読み取りは広げずに答えます"),
+      expired: "🔒 返事がなかったので、読み取りは広げません",
     });
   }
 
@@ -73,11 +78,11 @@ export class WidenPrompts {
   askContinue(input: ContinueRequest): Promise<boolean> {
     return this.#ask({
       ...input,
-      content: `⏸️ <@${input.speakerId}> さん、手順が${input.turns}回に達したので止めています。続けますか?`,
+      content: `⏸️ <@${input.speakerId}> 手順が${input.turns}回に達したので止めています。続けますか?`,
       yes: "続ける",
       no: "ここで終える",
-      answered: (go) => (go ? "▶️ 続けます。" : "⏹️ ここで終えました。"),
-      expired: "⏹️ 返事がなかったので終えました。",
+      answered: (go) => (go ? "▶️ 続けます" : "⏹️ ここで終えました"),
+      expired: "⏹️ 返事がなかったので終えました",
     });
   }
 
@@ -124,14 +129,14 @@ export class WidenPrompts {
     if (interaction.type !== InteractionType.MessageComponent) return false;
     const [ns, token, answer] = interaction.data.custom_id.split(":");
     if (ns !== PREFIX || !token) return false;
-    const userId = interaction.member?.user.id ?? interaction.user?.id;
+    const userId = userIdOf(interaction);
     const pending = this.#pending.get(token);
     if (!pending) {
-      await this.#api.interactions.updateMessage(interaction.id, interaction.token, { content: "この確認はもう終わっています。", components: [] });
+      await this.#api.interactions.updateMessage(interaction.id, interaction.token, { content: "この確認はもう終わっています", components: [] });
       return true;
     }
     if (userId !== pending.speakerId) {
-      await this.#api.interactions.reply(interaction.id, interaction.token, { content: "頼んだ本人だけが押せます。", flags: MessageFlags.Ephemeral });
+      await replyEphemeral(this.#api, interaction, "依頼した本人だけが押せます");
       return true;
     }
     const allowed = answer === "yes";

@@ -1,13 +1,14 @@
-import { randomBytes } from "node:crypto";
+import { shortId } from "../crypto.ts";
 import { VISIBILITIES } from "./command.ts";
 import type { CommandVisibility } from "./command.ts";
 import { PermissionFlagsBits as P } from "discord-api-types/v10";
 import type { AuditEntry, PlanRow, Store } from "../db.ts";
 import type { GuildCaches } from "../discord/cache.ts";
 import { basePermissions, has } from "../discord/permissions.ts";
+import { permissionList } from "../discord/labels.ts";
 import type { GuildState, MemberState } from "../discord/permissions.ts";
 import { allowShapeProblems, missingPermissions, ownerAllowProblems } from "./allow.ts";
-import { haltKey } from "./engine.ts";
+import { haltKey, readHalt } from "./engine.ts";
 import type { Halt } from "./engine.ts";
 import { triggerEvents, triggerProblems } from "./triggers.ts";
 import type { Rule, RuleDefinition, RuleRun } from "./types.ts";
@@ -139,7 +140,7 @@ export class RuleAdmin {
     const now = new Date(this.deps.now()).toISOString();
     const rule: Rule = {
       ...definition,
-      id: randomBytes(6).toString("hex"),
+      id: shortId(),
       guildId,
       ownerId,
       version: 1,
@@ -158,9 +159,9 @@ export class RuleAdmin {
     const rule = this.#rule(guildId, ruleId);
     const actor = { kind: "user" as const, userId, via: "panel" as const };
     if (enabled) {
-      if (rule.ownerId !== userId) throw new AdminDenied("ルールを有効にできるのは作成者だけです");
+      if (rule.ownerId !== userId) throw new AdminDenied("ルールを再開できるのは作成者だけです");
       const missing = missingPermissions(this.#viewer(guildId, userId).guild, this.#viewer(guildId, userId).member, rule.allow);
-      if (missing.length > 0) throw new AdminDenied(`許す操作に必要な権限をあなたが持っていません: ${missing.join(", ")}`);
+      if (missing.length > 0) throw new AdminDenied(`許す操作に必要な権限をあなたが持っていません: ${permissionList(missing)}`);
       const clash = this.#commandClash(guildId, userId, rule.trigger, rule.id);
       if (clash.length > 0) throw new AdminDenied(`${clash[0]}。そちらを止めるか、コマンド名を変えてください`);
       this.deps.store.setRuleEnabled(rule.id, true, null);
@@ -197,8 +198,7 @@ export class RuleAdmin {
   }
 
   halted(guildId: string): Halt | null {
-    const raw = this.deps.store.getMeta(haltKey(guildId));
-    return raw ? (JSON.parse(raw) as Halt) : null;
+    return readHalt(this.deps.store, guildId);
   }
 
   /** Stops every rule in the server at once, without confirmation. */

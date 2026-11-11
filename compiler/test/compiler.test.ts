@@ -173,7 +173,7 @@ test("reads clang, rustc and go messages", () => {
 });
 
 /** A compiler over the real language definitions, set up in a temp dir, with a stand-in box. */
-function setup(box: BoxRunner, options: { ready?: boolean; concurrency?: number; maxQueue?: number } = {}) {
+function setup(box: BoxRunner, options: { ready?: boolean; concurrency?: number; maxQueue?: number; cacheBytes?: number } = {}) {
   const home = mkdtempSync(join(tmpdir(), "wasmc-"));
   const languages = loadLanguages(LANGUAGES);
   const paths = { toolchains: join(home, "toolchains"), rootfs: join(home, "rootfs"), jobs: join(home, "jobs") };
@@ -185,7 +185,7 @@ function setup(box: BoxRunner, options: { ready?: boolean; concurrency?: number;
     mkdirSync(join(paths.rootfs, "base"), { recursive: true });
     writeFileSync(join(paths.rootfs, "base", ".ready"), "");
   }
-  const compiler = new Compiler({ languages, paths, box, concurrency: options.concurrency ?? 1, ...(options.maxQueue === undefined ? {} : { maxQueue: options.maxQueue }) });
+  const compiler = new Compiler({ languages, paths, box, concurrency: options.concurrency ?? 1, ...(options.maxQueue === undefined ? {} : { maxQueue: options.maxQueue }), ...(options.cacheBytes === undefined ? {} : { cacheBytes: options.cacheBytes }) });
   return { compiler, languages, paths };
 }
 
@@ -213,6 +213,26 @@ test("a build gets its sources under /work/src, and its module comes back", asyn
   const again = await compiler.compile(compileC(languages));
   assert.ok(again.ok && again.cached);
   assert.equal(seen.length, 1);
+});
+
+test("the cache keeps results up to a total size, dropping the least recently used", async () => {
+  const builds: string[] = [];
+  // Each module is 100 bytes and each log 4, so two results fit in 250 bytes and three do not.
+  const { compiler, languages } = setup(async (spec) => {
+    const source = await readFile(join(spec.work, "src", "main.c"), "utf8");
+    builds.push(source);
+    await writeFile(join(spec.work, "out", "module.wasm"), Buffer.concat([WASM, Buffer.alloc(92)]));
+    return { exitCode: 0, signal: null, timedOut: false, output: "done", truncated: false };
+  }, { cacheBytes: 250 });
+  const build = (name: string) => compiler.compile(compileC(languages, `int ${name};`));
+  await build("a");
+  await build("b");
+  await build("a");
+  await build("c");
+  assert.equal(compiler.status().cached, 2);
+  assert.ok((await build("a")).cached, "used last, so kept");
+  assert.equal((await build("b")).cached, false, "least recently used, so dropped");
+  assert.deepEqual(builds, ["int a;", "int b;", "int c;", "int b;"]);
 });
 
 test("a failed build returns where it failed", async () => {

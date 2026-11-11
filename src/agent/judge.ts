@@ -1,5 +1,7 @@
+import { contentText } from "@earendil-works/pi-ai";
 import type { Api, ClassifierApi, ClassifierModel, Model, ThinkingLevel } from "@earendil-works/pi-ai";
-import { isClassifier, lightestThinking, llm } from "../llm/models.ts";
+import { budget, isClassifier, llm } from "../llm/models.ts";
+import { firstJsonObject } from "./llm-json.ts";
 import type { JudgeModel } from "../llm/models.ts";
 
 // Decides whether a message is addressed to the bot.
@@ -14,22 +16,15 @@ export interface Judgement {
 export const CONFIDENCE_THRESHOLD = 0.7;
 
 export function parseJudgement(text: string): Judgement | null {
-  const match = /\{[\s\S]*\}/.exec(text);
-  if (!match) return null;
-  try {
-    const value = JSON.parse(match[0]) as { addressed?: unknown; confidence?: unknown };
-    if (typeof value.addressed !== "boolean") return null;
-    const confidence = typeof value.confidence === "number" ? Math.max(0, Math.min(1, value.confidence)) : 0;
-    return { addressed: value.addressed, confidence };
-  } catch {
-    return null;
-  }
+  const value = firstJsonObject(text);
+  if (!value || typeof value.addressed !== "boolean") return null;
+  const confidence = typeof value.confidence === "number" ? Math.max(0, Math.min(1, value.confidence)) : 0;
+  return { addressed: value.addressed, confidence };
 }
 
 // The verdict is a short JSON; models that cannot skip thinking need room to think first.
 function judgeBudget(model: Model<Api>): { maxTokens: number; reasoning?: ThinkingLevel } {
-  const reasoning = lightestThinking(model);
-  return reasoning ? { maxTokens: 2000, reasoning } : { maxTokens: 300 };
+  return budget(model, { thinking: 2000, plain: 300 });
 }
 
 interface JudgeInput {
@@ -92,10 +87,7 @@ async function askAddressed(input: JudgeInput & { model: Model<Api> }): Promise<
     },
     { apiKey: input.apiKey, signal: input.signal, ...judgeBudget(input.model) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
+  const text = contentText(res.content, "");
   // Fail quiet: an unreadable verdict means "not addressed".
   return parseJudgement(text) ?? { addressed: false, confidence: 0 };
 }
@@ -161,20 +153,11 @@ export async function publicReplyScore(input: VisibilityInput): Promise<number> 
     },
     { apiKey: input.apiKey, signal: input.signal, ...judgeBudget(model) },
   );
-  const text = res.content
-    .filter((c) => c.type === "text")
-    .map((c) => (c as { text: string }).text)
-    .join("");
-  const match = /\{[\s\S]*\}/.exec(text);
-  if (!match) return 0;
-  try {
-    const value = JSON.parse(match[0]) as { public?: unknown; confidence?: unknown };
-    if (typeof value.public !== "boolean") return 0;
-    const confidence = typeof value.confidence === "number" ? Math.max(0, Math.min(1, value.confidence)) : 0.5;
-    return value.public ? confidence : 1 - confidence;
-  } catch {
-    return 0;
-  }
+  const text = contentText(res.content, "");
+  const value = firstJsonObject(text);
+  if (!value || typeof value.public !== "boolean") return 0;
+  const confidence = typeof value.confidence === "number" ? Math.max(0, Math.min(1, value.confidence)) : 0.5;
+  return value.public ? confidence : 1 - confidence;
 }
 
 /** A reply is shown to everyone when the score clears the bar the addressed judge uses. */
