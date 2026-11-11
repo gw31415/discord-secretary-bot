@@ -414,7 +414,7 @@ function dryShort(r: PlanRuleDraft): string {
       return n === 1 ? "ドライラン: 1種類の操作をします" : `ドライラン: ${n}種類の操作をします`;
     }
     case "none":
-      return r.dry.reply || r.dry.images || r.dry.response ? "ドライラン: 返事だけします" : "ドライラン: 何も変更しません";
+      return "ドライラン: 何も変更しません";
     case "pending":
       return "ドライラン: 登録後に動きます";
     case "no_event":
@@ -511,7 +511,7 @@ function detailsBody(plan: Plan, state: DialogState): string[] {
   const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps, { risk: true });
   const listed = lines.slice(0, MAX_LISTED);
   if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(続きは「ファイルで受け取る」)`);
-  const out: string[] = [`依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts}`, `-# 変更案 \`${plan.id}\``, ...listed];
+  const out: string[] = [`依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts}`, `変更案 \`${plan.id}\``, ...listed];
   if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
     const json = JSON.stringify(plan.steps.map(draftOf));

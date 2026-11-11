@@ -515,10 +515,10 @@ test("the allow page says whose permissions the rule runs with, and warns only w
   assert.match(limited, /1分に2回まで/);
 });
 
-test("a dry run on the rule's panel says what it would do in a line, and leaves out what it would keep", async () => {
+test("a dry run on the rule's panel says what it would do in a line, and leaves out its event's origin and what it would keep", async () => {
   const { dryRunText } = await import("../src/rules/panel.ts");
   const text = dryRunText({ source: "このチャンネルの直近のメッセージ", outcome: "steps", lines: ["1. **投稿** #general — 作成"], problems: [], logs: ["a"], state: "{\"n\":1}" } as never);
-  assert.equal(text, "**ドライラン**: 1種類の操作をします\n1. **投稿** #general — 作成\n-# 使ったイベント: このチャンネルの直近のメッセージ · ログ: a");
+  assert.equal(text, "ドライラン: 次の操作をします(1種類)\n1. **投稿** #general — 作成\n-# ログ: a");
 });
 
 test("the code page puts 'ファイルで受け取る' under the code, and a run history says how many it shows", async () => {
@@ -616,7 +616,7 @@ test("the dry run answers at once with the buttons gone, then shows its result",
   const [running, done] = w.calls.map((c) => layout(c[1]));
   assert.ok(running!.includes("-# ドライラン中…"));
   assert.ok(!running!.some((p) => p.includes("ドライラン |") || p.includes("止める")));
-  assert.ok(done!.some((p) => p.startsWith("**ドライラン**")));
+  assert.ok(done!.some((p) => p.startsWith("ドライラン: ")));
 });
 
 test("a command that cannot run says so in the same short form, whatever the reason", async () => {

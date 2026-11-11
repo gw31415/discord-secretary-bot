@@ -796,7 +796,7 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   await t.planner.handleInteraction(pick(plan, "details", "1"));
   const details = dialogText(t.replies.at(-1)!.body);
   assert.match(details, /依頼: .* · 危険度: 破壊的 · 1件 · ルール2件/);
-  assert.match(details, new RegExp(`変更案 \`${plan.id}\``));
+  assert.match(details, new RegExp(`^変更案 \`${plan.id}\`$`, "m"));
   assert.match(details, /\*\*空き部屋を消す\*\* · 危険度: 破壊的/);
   assert.match(details, /`VOICE_STATE_UPDATE`/);
   assert.match(details, /確かめました/);

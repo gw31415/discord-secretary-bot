@@ -160,7 +160,7 @@ export function limitsLabel(limits: RuleLimits): string {
 
 /**
  * A dry run on the rule's panel: what it would do in a line, then its operations, what went wrong,
- * and the reply; the event it used and its logs share one small line. What it would keep is left out.
+ * the reply, and its logs in one small line. Where its event came from and what it would keep are left out.
  */
 export function dryRunText(dry: RuleDryRun): string {
   const head = (() => {
@@ -174,10 +174,10 @@ export function dryRunText(dry: RuleDryRun): string {
       case "error":
         return "コードがエラーになりました";
       case "steps":
-        return `${dry.lines.length}種類の操作をします`;
+        return `次の操作をします(${dry.lines.length}種類)`;
     }
   })();
-  const body: string[] = [`**ドライラン**: ${head}`];
+  const body: string[] = [`ドライラン: ${head}`];
   if (dry.outcome === "steps") {
     body.push(...dry.lines.slice(0, 8));
     if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
@@ -185,8 +185,7 @@ export function dryRunText(dry: RuleDryRun): string {
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
   if (dry.response !== undefined) body.push(`応答: ${truncate(dry.response, 300)}`);
   if (dry.reply !== undefined || dry.images) body.push(`返事: ${truncate(dry.reply ?? "", 300)}${dry.images ? `(画像${dry.images}枚)` : ""}`);
-  const small = [...(dry.source ? [`使ったイベント: ${dry.source}`] : []), ...(dry.logs.length > 0 ? [`ログ: ${dry.logs.slice(0, 5).join(" / ")}`] : [])];
-  if (small.length > 0) body.push(`-# ${truncate(small.join(" · "), 300)}`);
+  if (dry.logs.length > 0) body.push(`-# ログ: ${truncate(dry.logs.slice(0, 5).join(" / "), 300)}`);
   return body.join("\n");
 }
 
