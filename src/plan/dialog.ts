@@ -11,7 +11,7 @@ import type {
 import type { StepRow } from "../db.ts";
 import { allowLines, allowRisk } from "../rules/allow.ts";
 import { fenceLanguage, limitsLabel, paramsText, triggerLabel } from "../rules/panel.ts";
-import { visibilitySelect } from "../rules/command.ts";
+import { visibilityLabel, visibilitySelect } from "../rules/command.ts";
 import { DEFAULT_LIMITS } from "../rules/types.ts";
 import { messageRef } from "./catalog.ts";
 import type { Body } from "./catalog.ts";
@@ -166,18 +166,18 @@ function mark(g: Group, started: boolean, index: number): string {
   return "・";
 }
 
-function groupLine(g: Group, started: boolean, index: number): string {
+function groupLine(g: Group, started: boolean, index: number, risk: boolean): string {
   const shown = g.targets.slice(0, MAX_TARGETS_SHOWN).join("、");
   const more = g.targets.length > MAX_TARGETS_SHOWN ? ` ほか${g.targets.length - MAX_TARGETS_SHOWN}件` : "";
   const count = g.targets.length > 1 ? `(${g.targets.length}件${started ? `、完了 ${g.states.filter((s) => s === "done").length}` : ""}) ` : "";
   const error = g.errors.length > 0 ? `\n　→ ${truncate(discordErrorText(g.errors[0]!), 200)}` : "";
-  return `${mark(g, started, index)} **${g.label}** ${count}${shown}${more} — ${g.change}  \`${RISK_LABEL[g.risk]}\`${error}`;
+  return `${mark(g, started, index)} **${g.label}** ${count}${shown}${more} — ${g.change}${risk ? `  \`${RISK_LABEL[g.risk]}\`` : ""}${error}`;
 }
 
-/** One line per kind of change: operation, targets, before → after, risk. */
-export function stepLines(plan: Plan, steps?: StepRow[]): string[] {
+/** One line per kind of change: operation, targets, before → after, and with `risk` its risk. */
+export function stepLines(plan: Plan, steps?: StepRow[], { risk = false }: { risk?: boolean } = {}): string[] {
   const started = !!steps && steps.some((s) => s.state !== "pending");
-  return groups(plan, steps).map((g, i) => groupLine(g, started, i));
+  return groups(plan, steps).map((g, i) => groupLine(g, started, i, risk));
 }
 
 /** How the dialog names each step to people: its line's number and operation ("2. ロール付与"), by step id. */
@@ -253,14 +253,14 @@ function statusLine(plan: Plan, state: DialogState): string {
   const done = state.steps?.filter((s) => s.state === "done").length ?? 0;
   switch (state.status) {
     case "pending_approval":
-      return `${needsTypedConfirm(plan) ? "⚠️ 戻せない操作を含みます\n" : ""}-# 期限 ${discordTime(plan.expiresAt)} · \`${plan.id}\``;
+      return `${needsTypedConfirm(plan) ? "⚠️ 戻せない操作を含みます\n" : ""}-# 期限 ${discordTime(plan.expiresAt)}`;
     case "approved":
     case "executing":
       return plan.steps.length > 1 ? `実行中… ${done}/${plan.steps.length}` : "実行中…";
     case "succeeded": {
       if (!plan.rules?.length) return "✅ 実行しました";
-      const registered = `ルール${plan.rules.length}件を登録しました。止めるときは ${settingsCommand(state.settingsCommandId)} の「ルール」から。`;
-      return plan.steps.length > 0 ? `✅ 実行しました。${registered}` : `✅ ${registered}`;
+      const settings = settingsCommand(state.settingsCommandId);
+      return plan.steps.length > 0 ? `✅ 実行しました。ルールは ${settings} で止められます` : `✅ ルール${plan.rules.length}件を登録しました。${settings} で止められます`;
     }
     case "failed": {
       const head = `⚠️ 途中で失敗しました(${done}/${plan.steps.length}件完了)`;
@@ -315,11 +315,11 @@ function buttons(plan: Plan, state: DialogState): APIButtonComponent[] {
 
 const VIEW_LABEL: Record<DialogView, string> = { result: "概要", code: "コード", details: "詳細" };
 
-/** The sections this plan has: code only when it was made from code or registers rules, details only when there is more to show. */
+/** The sections this plan has: code only when it was made from code or registers rules. Details always: who asked, the risk and the plan's id live there. */
 function views(plan: Plan): DialogView[] {
   const out: DialogView[] = ["result"];
   if (plan.source || plan.rules?.length) out.push("code");
-  if (plan.rules?.length || (plan.source && plan.steps.length > 0)) out.push("details");
+  out.push("details");
   return out;
 }
 
@@ -406,6 +406,25 @@ function replyLine(r: PlanRuleDraft): string {
   return `${r.dry.reply || images ? `\n　返事: ${truncate(r.dry.reply ?? "", 200)}${images}` : ""}${response}`;
 }
 
+/** The dry run in one line for the summary; why it failed stays, the rest is in the details. */
+function dryShort(r: PlanRuleDraft): string {
+  switch (r.dry.outcome) {
+    case "steps": {
+      const n = r.dry.lines.length;
+      return n === 1 ? "ドライラン: 1種類の操作をします" : `ドライラン: ${n}種類の操作をします`;
+    }
+    case "none":
+      return r.dry.reply || r.dry.images || r.dry.response ? "ドライラン: 返事だけします" : "ドライラン: 何も変更しません";
+    case "pending":
+      return "ドライラン: 登録後に動きます";
+    case "no_event":
+      return "ドライラン: 試せるイベントがありませんでした";
+    case "error":
+      return `ドライラン: エラー ${r.dry.problems[0] ?? ""}`;
+  }
+}
+
+/** The dry run in full, with where its event came from: for the details. */
 function dryLine(r: PlanRuleDraft): string {
   const head = r.dry.source ? `ドライラン(${r.dry.source})` : "ドライラン";
   switch (r.dry.outcome) {
@@ -448,26 +467,31 @@ function changeLines(r: PlanRuleDraft): string[] {
   return [...code, ...settings.map((c) => `- ${c}`)];
 }
 
-/** A rule the plan registers, in short: when it runs, what it does or what changes, and how its dry run went. */
+/**
+ * A rule the plan registers, in short: when it runs, what it does or what changes, and how its dry run went
+ * in a line. Its risk, the event's internal name, who sees a command's replies and the dry run in full are in the details.
+ */
 function ruleSummary(r: PlanRuleDraft): string {
   const triggerChanged = r.replaces?.before && !same(r.replaces.before.trigger, r.trigger);
   return [
-    `**${r.name}**${r.replaces ? `(v${r.replaces.version} からの変更${r.replaces.name !== r.name ? `、元の名前「${r.replaces.name}」` : ""})` : ""} · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
-    ...(triggerChanged ? [] : [`きっかけ: ${triggerLabel(r.trigger)}`]),
+    `**${r.name}**${r.replaces ? `(v${r.replaces.version} からの変更${r.replaces.name !== r.name ? `、元の名前「${r.replaces.name}」` : ""})` : ""}`,
+    ...(triggerChanged ? [] : [`きっかけ: ${triggerLabel(r.trigger, { visibility: false, internal: false })}`]),
     ...(r.replaces ? changeLines(r) : [r.summary ?? "説明を作れませんでした。「コード」で確かめてください。"]),
-    dryLine(r),
+    dryShort(r),
   ].join("\n");
 }
 
-/** A rule's full definition, drawn only from it. */
-function ruleDetail(plan: Plan, r: PlanRuleDraft): string {
+/** A rule's full definition, drawn only from it. `picking`: the reply audience's select follows, so its heading closes the text. */
+function ruleDetail(plan: Plan, r: PlanRuleDraft, picking: boolean): string {
   const lookup = (id: string) => label(plan, id);
   return [
-    `**${r.name}**`,
+    `**${r.name}** · 危険度: ${RISK_LABEL[allowRisk(r.allow)]}`,
+    `きっかけ: ${triggerLabel(r.trigger, { visibility: false })}`,
     ...(r.limits ? [limitsLabel(r.limits)] : []),
     `許す操作(これ以外の変更は実行されません):\n${allowLines(r.allow, lookup).join("\n") || "なし(返事だけします)"}`,
     ...(r.params ? [`使う値:\n${paramsText(r.params, lookup)}`] : []),
-    ...(r.trigger.command ? ["返事を見せる相手:"] : []),
+    dryLine(r),
+    ...(r.trigger.command ? [picking ? "返事を見せる相手:" : `返事を見せる相手: ${visibilityLabel(r.trigger.command.visibility ?? "auto")}`] : []),
   ].join("\n");
 }
 
@@ -481,8 +505,13 @@ function resultBody(plan: Plan, state: DialogState): string[] {
   return [...explained, ...listed, ...rules];
 }
 
-function detailsBody(plan: Plan): string[] {
-  const out: string[] = [];
+/** Who asked, how risky the plan is in all and step by step, how much it does, and its id. */
+function detailsBody(plan: Plan, state: DialogState): string[] {
+  const counts = [...(plan.steps.length > 0 || !plan.rules?.length ? [`${plan.steps.length}件`] : []), ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join(" · ");
+  const lines = stepLines(plan, state.status === "pending_approval" ? undefined : state.steps, { risk: true });
+  const listed = lines.slice(0, MAX_LISTED);
+  if (lines.length > MAX_LISTED) listed.push(`…ほか${lines.length - MAX_LISTED}種類(続きは「ファイルで受け取る」)`);
+  const out: string[] = [`依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts}`, `-# 変更案 \`${plan.id}\``, ...listed];
   if (plan.source && plan.steps.length > 0) {
     // The exact calls the code produced, when they fit.
     const json = JSON.stringify(plan.steps.map(draftOf));
@@ -502,10 +531,8 @@ function gallery(plan: Plan): Array<APIMediaGalleryComponent | APITextDisplayCom
   ];
 }
 
-function header(plan: Plan): string {
-  const counts = [...(plan.steps.length > 0 || !plan.rules?.length ? [`${plan.steps.length}件`] : []), ...(plan.rules?.length ? [`ルール${plan.rules.length}件`] : [])].join(" · ");
-  return `### 変更の確認\n依頼: ${label(plan, plan.actor.userId)} · 危険度: ${RISK_LABEL[plan.risk]} · ${counts}`;
-}
+/** The heading alone: who asked, the risk and the counts are in the details. */
+const HEADER = "### 変更の確認";
 
 /**
  * Laid out from the parts to the whole: the shown section (on the summary, each
@@ -526,16 +553,19 @@ export function renderDialog(plan: Plan, state: DialogState): Rendered {
   const view = viewOf(plan, state);
   const section = view === "result"
     ? [
-        text([header(plan), ...resultBody(plan, state)].join("\n")),
+        text([HEADER, ...resultBody(plan, state)].join("\n")),
         ...gallery(plan),
         ...(plan.rules ?? []).map((r) => text(ruleSummary(r))),
       ]
     : view === "code"
-      ? [text([header(plan), ...codeBody(plan, room - header(plan).length)].join("\n"))]
+      ? [text([HEADER, ...codeBody(plan, room - HEADER.length)].join("\n"))]
       : [
-          text([header(plan), ...detailsBody(plan)].join("\n")),
-          // Who sees a command's replies starts on the judge model's pick (the summary says which); it is changed here.
-          ...(plan.rules ?? []).flatMap((r) => [text(ruleDetail(plan, r)), ...visibilityRow(plan, state, r)]),
+          text([HEADER, ...detailsBody(plan, state)].join("\n")),
+          // Who sees a command's replies starts on the judge model's pick; it is shown and changed only here.
+          ...(plan.rules ?? []).flatMap((r) => {
+            const select = visibilityRow(plan, state, r);
+            return [text(ruleDetail(plan, r, select.length > 0)), ...select];
+          }),
         ];
   // Not ephemeral: the dialog stays in the channel.
   return v2Message(

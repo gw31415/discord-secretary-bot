@@ -531,9 +531,10 @@ test("出し直す re-validates an expired plan and takes over the same dialog",
   assert.deepEqual(dialogButtons(busy.body), []);
   const edited = replies.at(-1)!;
   assert.equal(edited.kind, "editMessage");
-  assert.match(dialogText(edited.body), /期限 <t:\d+:R>/);
+  assert.match(dialogText(edited.body), /期限 <t:\d+:R>$/);
   assert.equal(replies.filter((r) => r.kind === "createMessage").length, 1);
-  const newId = /`([0-9a-f]{12})`/.exec(dialogText(edited.body))![1]!;
+  const newId = store.recentPlans({ guildId: GUILD, limit: 1 })[0]!.plan.id;
+  assert.notEqual(newId, plan.id);
   const fresh = store.getPlan(newId)!;
   assert.equal(fresh.plan.revises, plan.id);
   assert.equal(fresh.messageId, messageId);
@@ -784,13 +785,21 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.equal(plan.risk, "destructive"); // the cleanup rule may delete channels
   const dialog = t.replies.find((r) => r.kind === "createMessage")!.body;
   const text = dialogText(dialog);
-  assert.match(text, /1件 · ルール2件/);
   assert.match(text, /登録するルール/);
   assert.match(text, /通話部屋を作る/);
-  assert.doesNotMatch(text, /lobby:/);
+  // The summary keeps to what changes and what each rule does; who asked, the risk, the counts, the id,
+  // the event's internal name and where the dry run came from are in the details.
+  assert.match(text, /^### 変更の確認\n1\. \*\*チャンネル作成\*\* #vc作成 — 作成\n/);
+  assert.match(text, /\nドライラン: 登録後に動きます\n/);
+  assert.doesNotMatch(text, /lobby:|依頼:|危険度|1件 · ルール2件|VOICE_STATE_UPDATE|`破壊的`|確かめました|`[0-9a-f]{12}`/);
   assert.deepEqual(dialogButtons(dialog), ["実行", "修正", "取り消し"]);
   await t.planner.handleInteraction(pick(plan, "details", "1"));
   const details = dialogText(t.replies.at(-1)!.body);
+  assert.match(details, /依頼: .* · 危険度: 破壊的 · 1件 · ルール2件/);
+  assert.match(details, new RegExp(`変更案 \`${plan.id}\``));
+  assert.match(details, /\*\*空き部屋を消す\*\* · 危険度: 破壊的/);
+  assert.match(details, /`VOICE_STATE_UPDATE`/);
+  assert.match(details, /確かめました/);
   assert.match(details, /lobby: \(s1 で作るもののid\)/);
   assert.match(details, /対象の条件: .*📞/);
   assert.equal(t.store.listRules(GUILD).length, 0); // nothing is registered before the approval
@@ -808,7 +817,7 @@ test("one approval runs the steps and registers the rules, with the steps' resul
   assert.equal(made.summary, "説明です。");
   assert.equal(made.sourcePrompt, "vcを動的に作成削除する仕組みを作りたい");
   assert.equal(rules.find((r) => r.name === "空き部屋を消す")!.trigger.includeBotOrigin, true);
-  assert.match(dialogText(t.replies.at(-1)!.body), /\n✅ 実行しました。ルール2件を登録しました。止めるときは <\/settings:99> の「ルール」から。$/);
+  assert.match(dialogText(t.replies.at(-1)!.body), /\n✅ 実行しました。ルールは <\/settings:99> で止められます$/);
 });
 
 test("the rules a plan registers are checked against the actor's permissions again at approval, before any step runs", async () => {
@@ -1192,11 +1201,12 @@ test("a command's dialog starts on the judge's pick for who sees replies, and th
 
   const plan = await t.planner.propose({ ...base, rules: [TEX_RULE] });
   assert.equal(plan.rules![0]!.trigger.command!.visibility, "auto");
-  // The summary says who sees the replies; it is picked in 詳細.
+  // Who sees the replies is shown and picked in 詳細, not on the summary.
   assert.equal(selectOf(t.replies.at(-1)!.body), undefined);
-  assert.match(dialogText(t.replies.at(-1)!.body), /返事を見せる相手: 判定モデルが決める/);
+  assert.doesNotMatch(dialogText(t.replies.at(-1)!.body), /返事を見せる相手/);
   await t.planner.handleInteraction(click(plan, "details", "1"));
   assert.equal(chosen(t.replies.at(-1)!.body), "auto");
+  assert.match(dialogText(t.replies.at(-1)!.body), /返事を見せる相手:$/m);
   score = 0.9;
   assert.equal((await t.planner.propose({ ...base, rules: [TEX_RULE] })).rules![0]!.trigger.command!.visibility, "public");
   score = null; // no judge model: only the person who ran it
@@ -1414,7 +1424,10 @@ test("a dialog names messages by link, fields and permissions in Japanese, and w
   assert.match(text, new RegExp(`#general の\\[メッセージ\\]\\(https://discord\\.com/channels/${GUILD}/10/500\\)`));
   assert.match(text, /タイムアウトの終了時刻: \(空\) → <t:1792544400:f>/);
   assert.match(text, /@\(名前なし\) — 作成\(権限: チャンネルの管理・ロールの管理\)/);
-  assert.match(text, /\n⚠️ 戻せない操作を含みます\n-# 期限 <t:\d+:R> · `[0-9a-f]{12}`$/);
+  assert.match(text, /\n⚠️ 戻せない操作を含みます\n-# 期限 <t:\d+:R>$/);
+  // Each line's risk is in the details only; the irreversible line and the red 実行 say what matters.
+  assert.doesNotMatch(text, /`(書き込み|破壊的)`/);
+  assert.match(dialogText(renderDialog(plan, { status: "pending_approval", view: "details" })), /— 作成\(権限: チャンネルの管理・ロールの管理\)  `書き込み`/);
 });
 
 test("a Discord error is said by its code in the dialog, and the step keeps Discord's words", async () => {

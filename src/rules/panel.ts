@@ -126,13 +126,17 @@ export function triggerRunsAs(trigger: Rule["trigger"]): "actor" | "owner" | "ow
   return trigger.runAs === "owner" ? "owner_by_choice" : "actor";
 }
 
-/** `visibility: false` leaves out the reply audience of a command, for a screen that has its select. */
-export function triggerLabel(trigger: Rule["trigger"], { visibility = true }: { visibility?: boolean } = {}): string {
+/**
+ * `visibility: false` leaves out the reply audience of a command, for a screen that has its select or leaves it to another;
+ * `internal: false` leaves out the event's internal name, for a first screen.
+ */
+export function triggerLabel(trigger: Rule["trigger"], { visibility = true, internal = true }: { visibility?: boolean; internal?: boolean } = {}): string {
   const label = triggerEvents(trigger)
     .map((e) => {
-      if (ACTOR_EVENTS.has(e)) return `${TRIGGERS[e]!.label}(\`${e}\`、${trigger.runAs === "owner" ? "⚠️ 作成者の権限で動きます" : e === "INTERACTION_CREATE" ? "押した人の権限で動きます" : "付けた人・外した人の権限で動きます"})`;
+      const name = internal ? `\`${e}\`` : "";
+      if (ACTOR_EVENTS.has(e)) return `${TRIGGERS[e]!.label}(${[name, trigger.runAs === "owner" ? "⚠️ 作成者の権限で動きます" : e === "INTERACTION_CREATE" ? "押した人の権限で動きます" : "付けた人・外した人の権限で動きます"].filter(Boolean).join("、")})`;
       if (e === "COMMAND" && trigger.command) return `\`/${trigger.command.name}\` が実行されたとき${visibility ? visibilityClause(trigger.command.visibility) : ""}${trigger.runAs === "owner" ? "(⚠️ 作成者の権限で動きます)" : ""}`;
-      const base = `${TRIGGERS[e]?.label ?? e}(\`${e}\`)`;
+      const base = `${TRIGGERS[e]?.label ?? e}${name ? `(${name})` : ""}`;
       return e === "SCHEDULE" && trigger.schedule ? `${base} \`${trigger.schedule}\`(${trigger.timezone ?? DEFAULT_TIMEZONE})` : base;
     })
     .join("、または");
