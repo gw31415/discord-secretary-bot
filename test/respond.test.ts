@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { REST } from "@discordjs/rest";
-import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider, Type } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxText, fauxToolCall, fauxProvider } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { llm } from "../src/llm/models.ts";
 import { hasWrittenToolCall, Inbox, ReplyFailed, respond, stripWrittenToolCalls, typicalLength } from "../src/agent/respond.ts";
 import { isTransient } from "../src/agent/retry.ts";

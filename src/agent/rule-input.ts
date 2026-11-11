@@ -1,5 +1,5 @@
-import { Type } from "@earendil-works/pi-ai";
-import type { Static } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import type { Static } from "typebox";
 import { Value } from "typebox/value";
 import { MAX_ALLOW_ENTRIES } from "../rules/allow.ts";
 import { MAX_OPTIONS, OPTION_TYPES } from "../rules/command.ts";

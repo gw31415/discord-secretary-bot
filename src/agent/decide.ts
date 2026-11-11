@@ -1,4 +1,5 @@
-import { contentText, Type } from "@earendil-works/pi-ai";
+import { contentText } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ClassifierAnswer, ClassifierQuestion, JsonObject } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { budget, isClassifier, judgeModelFor, llm } from "../llm/models.ts";

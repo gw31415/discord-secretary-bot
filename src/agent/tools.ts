@@ -1,6 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
-import type { TSchema } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { APIChannel, APIMessage } from "discord-api-types/v10";
 import { ChannelType, ComponentType } from "discord-api-types/v10";
