@@ -194,6 +194,9 @@ test("a Tavily key alone does not complete setup, and the web tool defaults to t
   store.setWebTool("u1", "tavily");
   assert.equal(store.getSettings("u1").web, "tavily");
   assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1")), /llm:model:response:tavily/);
+  // What is missing is said on the home page only.
+  assert.match(JSON.stringify(renderPanel(store, "u1")), /⚠️ まだ設定していないものがあります: APIキー、言語モデル/);
+  assert.doesNotMatch(JSON.stringify(renderPanel(store, "u1", undefined, "keys")), /まだ設定していない/);
 });
 
 test("OpenRouter models are typed in, and the one chosen is shown in its role's menu", () => {
@@ -405,11 +408,22 @@ test("the settings pages say each thing once, name models rather than ids, and k
   // Moving between screens is gray; nothing on the settings pages asks for an action.
   assert.ok(buttons(home).every((b) => b.style === ButtonStyle.Secondary), JSON.stringify(buttons(home)));
   const keys = JSON.stringify(renderPanel(store, "u1", undefined, "keys"));
-  assert.match(keys, /Tavily: 登録済み/);
+  assert.match(keys, /Tavily · 末尾 `/);
+  // Keys not registered are offered only in the select.
+  assert.doesNotMatch(keys, /未登録|OpenAI · /);
+  assert.match(keys, /OpenAIのキーを登録する/);
   assert.doesNotMatch(keys, /Webツール\)/);
   assert.match(JSON.stringify(keyModal("anthropic")), /Claude API のキー/);
   assert.doesNotMatch(JSON.stringify(keyModal("anthropic")), /placeholder/);
   const models = JSON.stringify(renderPanel(store, "u1", undefined, "models"));
-  assert.match(models, /Botがあなたのキーで使うモデルです"/);
-  assert.match(models, /Bot宛てかの判定、返事を見せる相手、リアクション、judge\(\)・rank\(\) に使います。軽いモデルが向いています。/);
+  // A page holds its own settings: what each model is for is in docs/settings.md, and the moves are on the home page only.
+  assert.match(models, /"\*\*判定モデル\*\*\\n-# 軽いモデルが向いています"/);
+  assert.doesNotMatch(models, /Botがあなたのキーで使うモデルです|返事を書く|judge\(\)/);
+  for (const page of ["keys", "models", "roles", "lookup"] as const) {
+    const view = renderPanel(store, "u1", undefined, page);
+    assert.deepEqual(buttons(view).map((b) => b.label).filter((l) => l !== "用途別のモデル"), ["← 設定のトップへ"], page);
+    assert.doesNotMatch(JSON.stringify(view), /設定は済んで|まだ設定していない/, page);
+  }
+  assert.deepEqual(buttons(home).map((b) => b.label), ["APIキー", "モデル", "ハーネス", "ルール", "コマンド", "Wasm"]);
+  assert.doesNotMatch(homeText, /設定は済んで/);
 });

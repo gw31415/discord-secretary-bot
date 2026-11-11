@@ -115,20 +115,22 @@ function navButton(page: PanelPage, label: string, current: PanelPage): APIButto
   return button(CUSTOM_ID.page(page), label, ButtonStyle.Secondary, page === current);
 }
 
-/** The settings panel: a home page with the general settings, and pages for keys and models reached by buttons. */
+/**
+ * The settings panel: a home page with the general settings and the buttons to every page, and pages
+ * for keys, models and the harness that hold only their own settings, their notice and the way back.
+ */
 export function renderPanel(store: Store, userId: string, notice?: string, page: PanelPage = "home"): { flags: number; components: APIMessageTopLevelComponent[] } {
-  const status = setupStatus(store, userId);
   const body: APIComponentInContainer[] =
     page === "keys" ? keysPage(store, userId) : page === "models" ? modelsPage(store, userId) : page === "roles" ? rolesPage(store, userId) : page === "lookup" ? lookupPage(store, userId) : homePage(store, userId);
-  body.push(
-    { type: ComponentType.Separator },
-    {
-      type: ComponentType.TextDisplay,
-      content: status.complete
-        ? "✅ 設定は済んでいます。Botをメンションすると会話できます。"
-        : `⚠️ まだ設定していないものがあります: ${status.missing.join("、")}`,
-    },
-  );
+  body.push({ type: ComponentType.Separator });
+  if (page !== "home") {
+    if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
+    body.push({ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] });
+    return v2Message(body, { ephemeral: true });
+  }
+  // Only what is missing is said; a finished setup needs no line.
+  const status = setupStatus(store, userId);
+  if (!status.complete) body.push({ type: ComponentType.TextDisplay, content: `⚠️ まだ設定していないものがあります: ${status.missing.join("、")}` });
   if (notice) body.push({ type: ComponentType.TextDisplay, content: `-# ${notice}` });
   // At most three buttons a row; the rules and the commands open their own panels in this message.
   body.push(
@@ -141,8 +143,6 @@ export function renderPanel(store: Store, userId: string, notice?: string, page:
         button(WASM_HOME_ID, "Wasm"),
       ],
     },
-    // From the per-use page, the モデル button above leads back to the models page.
-    ...(page === "home" ? [] : [{ type: ComponentType.ActionRow, components: [navButton("home", "← 設定のトップへ", page)] } satisfies APIActionRowComponent<APIButtonComponent>]),
   );
   return v2Message(body, { ephemeral: true });
 }
@@ -184,24 +184,19 @@ function lookupPage(store: Store, userId: string): APIComponentInContainer[] {
     { type: ComponentType.TextDisplay, content: `## ${LOOKUP_TITLE}` },
     ...webSection(store, userId),
     { type: ComponentType.Separator },
-    {
-      type: ComponentType.TextDisplay,
-      content: "**読み取りの範囲**\nBotは、チャンネルの全員が見られる情報だけを使います。あなたへの返事にそれより広い情報が要るときの扱いを選んでください。",
-    },
+    { type: ComponentType.TextDisplay, content: "**読み取りの範囲**\n全員が見られる範囲より広い情報が要るとき" },
     readScopeSelect(store, userId),
   ];
 }
 
 function keysPage(store: Store, userId: string): APIComponentInContainer[] {
   const keys = new Map(store.listKeys(userId).map((k) => [k.provider, k.last4]));
-  const keyLines = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).map((p) => {
-    const last4 = keys.get(p);
-    return `${KEY_PROVIDERS[p].label}: ${last4 ? `登録済み(末尾 \`${last4}\`)` : "未登録"}`;
-  });
+  // Only the keys there are; the ones to register are in the select below.
+  const keyLines = (Object.keys(KEY_PROVIDERS) as KeyProviderId[]).filter((p) => keys.has(p)).map((p) => `${KEY_PROVIDERS[p].label} · 末尾 \`${keys.get(p)}\``);
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## APIキー\nキーは暗号化して保存します。表示するのは末尾4文字だけです。" },
+    { type: ComponentType.TextDisplay, content: "## APIキー" },
     { type: ComponentType.Separator },
-    { type: ComponentType.TextDisplay, content: keyLines.join("\n") },
+    { type: ComponentType.TextDisplay, content: keyLines.join("\n") || "まだ登録していません" },
     {
       type: ComponentType.ActionRow,
       components: [{
@@ -232,7 +227,7 @@ function keysPage(store: Store, userId: string): APIComponentInContainer[] {
 
 function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## モデル\nBotがあなたのキーで使うモデルです" },
+    { type: ComponentType.TextDisplay, content: "## モデル" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
@@ -241,14 +236,11 @@ function modelsPage(store: Store, userId: string): APIComponentInContainer[] {
   }
   const response = roleSelects(store, userId, "response", "言語モデル");
   body.push(
-    { type: ComponentType.TextDisplay, content: "**言語モデル**\n返事を書く、調べものをする、変更案やコードを作るときに使います。" },
+    { type: ComponentType.TextDisplay, content: "**言語モデル**" },
     ...(response.length > 0
       ? response
       : [{ type: ComponentType.TextDisplay, content: "-# 言語モデルに使えるモデルがありません。Claude API、GLM Coding Plan、OpenAI、OpenRouterのどれかのキーを登録してください。" } satisfies APIComponentInContainer]),
-    {
-      type: ComponentType.TextDisplay,
-      content: "**判定モデル**\nBot宛てかの判定、返事を見せる相手、リアクション、judge()・rank() に使います。軽いモデルが向いています。",
-    },
+    { type: ComponentType.TextDisplay, content: "**判定モデル**\n-# 軽いモデルが向いています" },
     ...roleSelects(store, userId, "judge", "判定モデル", "言語モデルと同じ"),
     { type: ComponentType.ActionRow, components: [navButton("roles", "用途別のモデル", "models")] },
   );
@@ -260,7 +252,7 @@ const NO_KEY = "先に「APIキー」でキーを登録すると、モデルを�
 // Part of the models page: each use takes the language or judge model unless one is chosen here.
 function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
   const body: APIComponentInContainer[] = [
-    { type: ComponentType.TextDisplay, content: "## 用途別のモデル\n用途ごとに、言語モデルや判定モデルとは別のモデルを選べます。選ばなければ元のモデルを使います。" },
+    { type: ComponentType.TextDisplay, content: "## 用途別のモデル\n選ばなければ元のモデルを使います" },
     { type: ComponentType.Separator },
   ];
   if (!store.listKeys(userId).some((k) => isProviderId(k.provider))) {
@@ -268,14 +260,11 @@ function rolesPage(store: Store, userId: string): APIComponentInContainer[] {
     return body;
   }
   body.push(
-    { type: ComponentType.TextDisplay, content: "**宛先の判定**\nBotが起きている間に、あなたのメンションのない発言がBot宛てかどうかを決めます。" },
+    { type: ComponentType.TextDisplay, content: "**宛先の判定** — Bot宛てかを決める" },
     ...roleSelects(store, userId, "addressee", "宛先を判定するモデル", "判定モデルと同じ"),
-    { type: ComponentType.TextDisplay, content: "**コード**\n調べもの、変更案、ルールのコードを書きます。" },
+    { type: ComponentType.TextDisplay, content: "**コード** — 変更案とルールを書く" },
     ...roleSelects(store, userId, "code", "コードを書くモデル", "言語モデルと同じ"),
-    {
-      type: ComponentType.TextDisplay,
-      content: "**リアクション**\n文で返すか絵文字だけで返すかを決めます",
-    },
+    { type: ComponentType.TextDisplay, content: "**リアクション** — 絵文字だけで返すかを決める" },
     ...roleSelects(store, userId, "reaction", "リアクションを選ぶモデル", "判定モデルと同じ"),
   );
   return body;
@@ -290,11 +279,8 @@ function webSection(store: Store, userId: string): APIComponentInContainer[] {
     { type: ComponentType.Separator },
     {
       type: ComponentType.TextDisplay,
-      content: [
-        "**Webツール**",
-        "BotがWebを検索したりページを読んだりするときに使います。",
-        ...(warning ? [`-# ⚠️ ${warning}`] : []),
-      ].join("\n"),
+      // What each tool does is in its option's description; a warning stays, since it says why the web is not used.
+      content: ["**Webツール**", ...(warning ? [`-# ⚠️ ${warning}`] : [])].join("\n"),
     },
     {
       type: ComponentType.ActionRow,
