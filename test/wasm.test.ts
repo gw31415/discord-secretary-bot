@@ -566,7 +566,7 @@ test("get takes a query written into the route, and an explicit query wins", asy
   ]);
 });
 
-test("the Wasm section opens with one sentence and its limits, and each screen ends with the way back", async () => {
+test("the Wasm section opens with one sentence and the usage, and each screen ends with the way back", async () => {
   const { detailView, homeView, sourceView } = await import("../src/wasm/panel.ts");
   const parts = (view: unknown): string[] => {
     const c = (view as { components: Array<{ components: Array<{ type: number; content?: string; placeholder?: string; components?: Array<{ type: number; label?: string; placeholder?: string }> }> }> }).components[0]!;
@@ -580,8 +580,8 @@ test("the Wasm section opens with one sentence and its limits, and each screen e
 
   const empty = parts(homeView([], () => 0));
   assert.deepEqual([empty[0], empty[1]], ["## Wasm", "Botに .wasm を渡すか、「Wasmを登録」で登録します"]);
-  assert.match(empty[2]!, /^-# 上限: /);
-  assert.equal(empty[3], "まだ登録していません。");
+  assert.equal(empty[2], "まだ登録していません。");
+  assert.ok(!empty.some((p) => p.includes("上限")));
   assert.deepEqual(empty.slice(-2), ["[buttons: Wasmを登録]", "[buttons: ← 設定のトップへ]"]);
   // The sentence names the source only where a compiler can take it.
   assert.equal(parts(homeView([], () => 0, undefined, ["rust"]))[1], "Botに .wasm かソースを渡すか、「Wasmを登録」で登録します");
@@ -589,10 +589,17 @@ test("the Wasm section opens with one sentence and its limits, and each screen e
   const many = Array.from({ length: 30 }, (_, i) => ({ ...module, sha256: `${i}`.padStart(64, "0"), name: `m${i}` }));
   assert.ok(parts(homeView(many, () => 0)).includes("[select: モジュールを開く(30個中25個)]"));
   assert.ok(parts(homeView(many.slice(0, 2), () => 0)).includes("[select: モジュールを開く(2個)]"));
+  assert.equal(parts(homeView(many.slice(0, 2), () => 0))[2], "-# 2個 · 2KB");
 
   const detail = parts(detailView(module, true, [{ name: "あいさつ", enabled: true, guildId: "g", mine: true }, { name: "停止", enabled: false, guildId: "g", mine: false }], false, "名前を変えました。この名前でルールに使えます"));
-  assert.match(detail[1]!, /\*\*インポート\*\*/);
-  assert.doesNotMatch(detail[1]!, /\*\*import\*\*/);
+  // A compiled module shows its size, source and when it came; the technical facts are at the end of its source.
+  assert.equal(detail[1], "**大きさ**: 1KB\n**ソース**: rust・1ファイル(Botがコンパイル)\n**登録**: <t:0:R>");
+  const source = parts(sourceView(module, { language: "rust", version: "1", files: [{ path: "src/main.rs", content: "fn main() {}" }] }));
+  assert.match(source.at(-2)!, /^\*\*sha256\*\*: `(ab)+`\n\*\*メモリ\*\*: .*\n\*\*ビルド\*\*: rustc\n\*\*インポート\*\*: `wasi_snapshot_preview1.fd_write`$/);
+  // An uploaded module has no source screen, so they stay on its own.
+  const uploaded = parts(detailView({ ...module, source: null } as never, true, []));
+  assert.match(uploaded[1]!, /\*\*sha256\*\*.*\n.*\*\*インポート\*\*/s);
+  assert.ok(!uploaded.includes("[buttons: ソースを見る]"));
   assert.equal(detail[2], "**使っているルール**\n🟢 動作中 · あいさつ\n⏸️ 停止中 · 停止(ほかの人のルール)");
   assert.deepEqual(detail.slice(3), ["[buttons: ソースを見る]", "---", "-# 名前を変えました。この名前でルールに使えます", "[buttons: 名前を変える | 削除]", "[buttons: ← 一覧へ]"]);
   assert.ok(parts(detailView(module, true, [], true)).includes("⚠️ 「hello」を削除します"));

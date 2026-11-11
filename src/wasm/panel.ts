@@ -6,8 +6,8 @@ import { modalValue } from "../discord/modal.ts";
 import { NS } from "../discord/custom-id.ts";
 import { actionRow, button, discordTime, escapeFence, panelTexts, settingsHomeButton, v2Message } from "../discord/ui.ts";
 import type { Rendered } from "../discord/ui.ts";
-import { MAX_MEMORY_PAGES, MAX_MODULE_BYTES } from "./module.ts";
-import { MAX_BYTES_PER_USER, MAX_MODULES_PER_USER, ModuleRejected, sizeLabel } from "./registry.ts";
+import { MAX_MODULE_BYTES } from "./module.ts";
+import { ModuleRejected, sizeLabel } from "./registry.ts";
 import type { WasmRegistry } from "./registry.ts";
 import { errorMessage } from "../errors.ts";
 import { editV2, replyEphemeral, selectedValues, updateV2, userIdOf } from "../discord/respond.ts";
@@ -69,11 +69,11 @@ export function homeView(modules: WasmModule[], usage: (sha: string) => number, 
         }],
       }
     : undefined;
+  // The limits are said by the error that meets them and in docs/wasm.md, so only the usage is shown.
   return view([
     "## Wasm",
     `Botに ${languages.length ? ".wasm かソースを" : ".wasm を"}渡すか、「Wasmを登録」で登録します`,
-    `-# 上限: 1個${MAX_MODULE_BYTES / 1024 / 1024}MB・一人${MAX_MODULES_PER_USER}個・合計${MAX_BYTES_PER_USER / 1024 / 1024}MB(いま ${modules.length}個・${sizeLabel(total)})。実行は1回30秒・メモリ${MAX_MEMORY_PAGES / 16}MiBまで。`,
-    modules.length ? "" : "まだ登録していません。",
+    modules.length ? `-# ${modules.length}個 · ${sizeLabel(total)}` : "まだ登録していません。",
     ...(select ? [select] : []),
     notice ? `-# ${notice}` : "",
     busy ? [] : [button(wasmCustomId("upload"), "Wasmを登録", ButtonStyle.Primary)],
@@ -84,17 +84,26 @@ export function homeView(modules: WasmModule[], usage: (sha: string) => number, 
 /** What a select holds at most. */
 const SELECT_MAX = 25;
 
+/** A module's sha256, memory, build and imports: under its source when it has one, else on its own screen. */
+function technicalLines(module: WasmModule): string[] {
+  return [
+    `**sha256**: \`${module.sha256}\``,
+    `**メモリ**: ${module.info.memory.min * 64}KiB から最大 ${module.info.memory.max / 16}MiB`,
+    `**ビルド**: ${module.info.producers.join("、") || "記載なし"}`,
+    `**インポート**: ${module.info.imports.map((i) => `\`${i}\``).join(" ").slice(0, 900) || "なし"}`,
+  ];
+}
+
 /** From the parts to the whole: the facts, the source, then under a divider the status line and the buttons. */
 export function detailView(module: WasmModule, latest: boolean, rules: Array<{ name: string; enabled: boolean; guildId: string; mine: boolean }>, confirmDelete = false, notice?: string): Rendered {
   const parts: Array<string | APIButtonComponent[] | APIComponentInContainer> = [
     `## ${module.name}${latest ? "" : "(古い版)"}`,
     [
-      `**sha256**: \`${module.sha256}\``,
-      `**大きさ**: ${sizeLabel(module.size)} · **メモリ**: ${module.info.memory.min * 64}KiB から最大 ${module.info.memory.max / 16}MiB`,
-      `**ビルド**: ${module.info.producers.join("、") || "記載なし"}`,
+      `**大きさ**: ${sizeLabel(module.size)}`,
       ...(module.source ? [`**ソース**: ${module.source.language}・${module.source.files}ファイル(Botがコンパイル)`] : []),
-      `**インポート**: ${module.info.imports.map((i) => `\`${i}\``).join(" ").slice(0, 900) || "なし"}`,
-      `**登録**: ${discordTime(module.createdAt, "f")}`,
+      `**登録**: ${discordTime(module.createdAt)}`,
+      // An uploaded module has no source screen to hold the rest.
+      ...(module.source ? [] : technicalLines(module)),
     ].join("\n"),
     rules.length
       ? `**使っているルール**\n${rules.map((r) => `${r.enabled ? "🟢 動作中" : "⏸️ 停止中"} · ${r.name}${r.mine ? "" : "(ほかの人のルール)"}`).join("\n")}`
@@ -112,9 +121,10 @@ export function detailView(module: WasmModule, latest: boolean, rules: Array<{ n
 
 const MAX_SOURCE_SHOWN = 3400;
 
-/** The sources a module was compiled from, as much as fits in one message. */
+/** The sources a module was compiled from, as much as fits in one message, then the module's technical facts. */
 export function sourceView(module: WasmModule, source: WasmSource): Rendered {
-  let room = MAX_SOURCE_SHOWN;
+  const facts = technicalLines(module).join("\n");
+  let room = MAX_SOURCE_SHOWN - facts.length;
   const parts: string[] = [];
   for (const file of source.files) {
     const head = `**${file.path}**`;
@@ -128,7 +138,7 @@ export function sourceView(module: WasmModule, source: WasmSource): Rendered {
     parts.push(`${head}\n\`\`\`\n${shown}\n\`\`\``);
     room -= head.length + shown.length + 10;
   }
-  return view([`## ${module.name} のソース(${source.language} ${source.version})`, ...parts, [button(wasmCustomId("open", module.sha256), `← ${module.name} へ`)]]);
+  return view([`## ${module.name} のソース(${source.language} ${source.version})`, ...parts, facts, [button(wasmCustomId("open", module.sha256), `← ${module.name} へ`)]]);
 }
 
 function uploadModal(): APIModalInteractionResponseCallbackData {
