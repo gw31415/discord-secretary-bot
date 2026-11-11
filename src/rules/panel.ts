@@ -10,6 +10,7 @@ import { allowLines, allowRisk, valueText } from "./allow.ts";
 import type { Halt } from "./engine.ts";
 import { DEFAULT_TIMEZONE } from "./schedule.ts";
 import { ACTOR_EVENTS, TRIGGERS, triggerEvents } from "./triggers.ts";
+import { DEFAULT_LIMITS } from "./types.ts";
 import type { Rule, RuleLimits, RuleRun, RunOutcome } from "./types.ts";
 import { truncate } from "../text.ts";
 import { auditActionLabel, permissionList, PLAN_STATUS_LABEL } from "../discord/labels.ts";
@@ -151,44 +152,50 @@ export function triggerLabel(trigger: Rule["trigger"], { visibility = true, inte
   return `${label}${origin}${debounce}${serial}`;
 }
 
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
 export function limitsLabel(limits: RuleLimits): string {
   return `1分に${limits.perMinute}回まで · ${limits.maxConsecutiveFailures}回続けて失敗したら自動で止まります`;
 }
 
+/**
+ * A dry run on the rule's panel: what it would do in a line, then its operations, what went wrong,
+ * and the reply; the event it used and its logs share one small line. What it would keep is left out.
+ */
 export function dryRunText(dry: RuleDryRun): string {
-  const head = `**ドライラン**${dry.source ? `(${dry.source})` : ""}`;
-  const body: string[] = [];
-  switch (dry.outcome) {
-    case "no_event":
-      body.push("試せるイベントがありませんでした。");
-      break;
-    case "pending":
-      body.push("この変更で作るものの値を使うため、登録まで試せません(コードがエラーにならないことだけ確かめました)。");
-      break;
-    case "none":
-      body.push("このイベントでは何も変更しません。");
-      break;
-    case "error":
-      body.push("コードがエラーになりました。");
-      break;
-    case "steps":
-      body.push(`次の操作をします(${dry.lines.length}種類):`, ...dry.lines.slice(0, 8));
-      if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
+  const head = (() => {
+    switch (dry.outcome) {
+      case "no_event":
+        return "試せるイベントがありませんでした";
+      case "pending":
+        return "この変更で作るものの値を使うため、登録まで試せません";
+      case "none":
+        return "何も変更しません";
+      case "error":
+        return "コードがエラーになりました";
+      case "steps":
+        return `${dry.lines.length}種類の操作をします`;
+    }
+  })();
+  const body: string[] = [`**ドライラン**: ${head}`];
+  if (dry.outcome === "steps") {
+    body.push(...dry.lines.slice(0, 8));
+    if (dry.lines.length > 8) body.push(`…ほか${dry.lines.length - 8}種類`);
   }
   if (dry.problems.length > 0) body.push(`⚠️ ${dry.problems.slice(0, 5).join("\n⚠️ ")}`);
   if (dry.response !== undefined) body.push(`応答: ${truncate(dry.response, 300)}`);
   if (dry.reply !== undefined || dry.images) body.push(`返事: ${truncate(dry.reply ?? "", 300)}${dry.images ? `(画像${dry.images}枚)` : ""}`);
-  if (dry.state !== undefined) body.push(`次に持ち越す状態(実際には保存していません): \`${truncate(dry.state, 300)}\``);
-  if (dry.logs.length > 0) body.push(`-# ログ: ${truncate(dry.logs.slice(0, 5).join(" / "), 300)}`);
-  return [head, ...body].join("\n");
+  const small = [...(dry.source ? [`使ったイベント: ${dry.source}`] : []), ...(dry.logs.length > 0 ? [`ログ: ${dry.logs.slice(0, 5).join(" / ")}`] : [])];
+  if (small.length > 0) body.push(`-# ${truncate(small.join(" · "), 300)}`);
+  return body.join("\n");
 }
 
-/** A rule's params, with ids named where the cache knows them. */
-export function paramsText(params: Record<string, unknown>, label: (id: string) => string): string {
+/** A rule's params, with ids named where the cache knows them; `ids: false` gives the name alone. */
+export function paramsText(params: Record<string, unknown>, label: (id: string) => string, { ids = true }: { ids?: boolean } = {}): string {
   return Object.entries(params)
     .slice(0, 10)
     .map(([k, v]) => {
-      const text = typeof v === "string" && label(v) !== v ? `${label(v)}(${v})` : valueText(v, (id) => JSON.stringify(id));
+      const text = typeof v === "string" && label(v) !== v ? (ids ? `${label(v)}(${v})` : label(v)) : valueText(v, (id) => JSON.stringify(id));
       return `- ${k}: ${truncate(text ?? "null", 120)}`;
     })
     .join("\n");
@@ -289,10 +296,13 @@ export function stateText(state: unknown, max = MAX_STATE_SHOWN): string {
   return truncate(JSON.stringify(state, null, 1), max);
 }
 
+/** When and how a run ended, and why when it failed; its plan is in the audit log. */
 function runLine(run: RuleRun): string {
-  const error = run.error ? ` — ${truncate(run.error.replaceAll("\n", " "), 120)}` : "";
-  const plan = run.planId ? ` 変更案 \`${run.planId}\`` : "";
-  return `${discordTime(run.startedAt)} v${run.ruleVersion} ${OUTCOME_LABEL[run.outcome]}${plan}${error}`;
+  const why =
+    run.outcome === "rate_limited" ? " — 次にまとめて処理します"
+    : (run.outcome === "failed" || run.outcome === "rejected") && run.error ? ` — ${truncate(run.error.replaceAll("\n", " "), 120)}`
+    : "";
+  return `${discordTime(run.startedAt)} ${OUTCOME_LABEL[run.outcome]}${why}`;
 }
 
 /** Pages, and deleting, sit in one menu so the buttons stay few. */
@@ -339,10 +349,8 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
   const actions: APIButtonComponent[] = [];
   if (page === "summary") {
     const last = input.runs[0];
-    // The owner picks who sees a command's replies here, without a new version, so the line above says it once.
-    const selector = input.can.owner && rule.trigger.command;
-    parts.push(triggerLabel(rule.trigger, { visibility: !selector }));
-    if (selector) parts.push(VISIBILITY_HEADING, visibilitySelect(ruleCustomId("visibility", rule.id), rule.trigger.command?.visibility));
+    // The owner picks who sees a command's replies on the command's own screen; whoever cannot open it reads it here.
+    parts.push(triggerLabel(rule.trigger, { visibility: !input.can.owner, internal: false }));
     parts.push(
       rule.summary ?? "説明を作れませんでした。「コード」で確かめてください。",
       last ? `-# 最後の実行: ${runLine(last)}` : "-# まだ実行されていません",
@@ -355,9 +363,10 @@ export function detailView(input: DetailInput, label: (id: string) => string): R
     }
   } else if (page === "allow") {
     parts.push(
-      `**許す操作**(これ以外の変更は実行されません)\n${allowLines(rule.allow, label).join("\n") || "なし(返事だけします)"}`,
-      `${runsAsText(rule)} · 危険度: ${RISK_LABEL[allowRisk(rule.allow)]}\n${limitsLabel(rule.limits)}`,
-      rule.params ? `**使う値**\n${paramsText(rule.params, label)}` : "",
+      `**許す操作**\n${allowLines(rule.allow, label, { brief: true }).join("\n") || "なし(返事だけします)"}`,
+      // The limits are said only when they differ from every rule's default.
+      `${runsAsText(rule)} · 危険度: ${RISK_LABEL[allowRisk(rule.allow)]}${same(rule.limits, DEFAULT_LIMITS) ? "" : `\n${limitsLabel(rule.limits)}`}`,
+      rule.params ? `**使う値**\n${paramsText(rule.params, label, { ids: false })}` : "",
     );
   } else if (page === "source") {
     parts.push(
@@ -387,10 +396,11 @@ function opNames(plan: PlanRow["plan"]): string {
   return [...new Set(plan.steps.map((s) => CATALOG.get(s.op)?.label ?? s.op))].slice(0, 3).join("・");
 }
 
+/** When, how it ended and what it did; whose it was only when the list has others' too. Ids are in the audit log. */
 export function plansView(plans: Array<PlanRow & { updatedAt?: string }>, all: boolean): Rendered {
   const lines = plans.map(({ plan, status, reason }) => {
-    const who = plan.rule ? `ルール「${plan.rule.name}」` : `<@${plan.actor.userId}>`;
-    return `${discordTime(plan.createdAt)} \`${plan.id}\` ${PLAN_STATUS_LABEL[status]} · ${who} · ${plan.steps.length}件 ${opNames(plan)}${reason ? ` — ${truncate(reason.replaceAll("\n", " "), 80)}` : ""}`;
+    const who = plan.rule ? ` · ルール「${plan.rule.name}」` : all ? ` · <@${plan.actor.userId}>` : "";
+    return `${discordTime(plan.createdAt)} ${PLAN_STATUS_LABEL[status]}${who} · ${opNames(plan)}${reason ? ` — ${truncate(reason.replaceAll("\n", " "), 80)}` : ""}`;
   });
   return container([
     `### 変更案の履歴(${plans.length}件)${all ? "" : "\n-# あなたの分だけです(ルールによるものを含む)"}`,
@@ -441,8 +451,9 @@ export function commandsView(input: CommandsInput): Rendered {
   const lines = input.rules.map((r) => {
     const c = r.trigger.command!;
     const status = r.enabled ? commandLink(c.name, input.ids) : `\`/${c.name}\` ⏸️ 停止中`;
-    const owner = r.ownerId === input.userId ? "あなた" : `<@${r.ownerId}>`;
-    return `${status} ${c.description}\n-# 作成: ${owner}${c.permissions?.length ? ` · 必要な権限: ${permissionList(c.permissions)}` : ""}`;
+    // One's own commands open to their screen, which says the permissions; someone else's has no screen, so its line says them.
+    if (r.ownerId === input.userId) return `${status} ${c.description}`;
+    return `${status} ${c.description}\n-# 作成: <@${r.ownerId}>${c.permissions?.length ? ` · 必要な権限: ${permissionList(c.permissions)}` : ""}`;
   });
   const parts: Array<string | APIComponentInContainer> = [
     "## コマンド",
@@ -486,7 +497,6 @@ export function commandView(input: CommandInput): Rendered {
     `## ${rule.enabled ? commandLink(c.name, input.ids) : `/${c.name}`}`,
     [c.description, rule.enabled ? "" : "⏸️ 停止中(ルールを再開すると使えます)", c.permissions?.length ? `必要な権限: ${permissionList(c.permissions)}` : ""].filter(Boolean).join("\n"),
     options.length ? `**オプション**\n${options.join("\n")}` : "",
-    `関連ルール: 「${rule.name}」`,
   ];
   if (input.confirmDelete) {
     parts.push(noticeLine(input.notice), `⚠️ 「/${c.name}」とルール「${rule.name}」を削除します。実行履歴と監査ログは残ります。`);
@@ -499,7 +509,7 @@ export function commandView(input: CommandInput): Rendered {
     SEPARATOR,
     noticeLine(input.notice),
     row([button(ruleCustomId("cmddel", rule.id), "コマンドを削除", ButtonStyle.Danger)]),
-    row([button(ruleCustomId("open", rule.id), "関連ルールを見る")]),
+    row([button(ruleCustomId("open", rule.id), `ルール「${truncate(rule.name, 30)}」を見る`)]),
     row([button(ruleCustomId("commands"), "← 一覧へ")]),
   );
   return container(parts);

@@ -257,22 +257,25 @@ export function valueText(value: unknown, label: (id: string) => string = (id) =
   return typeof value === "string" ? label(value) : JSON.stringify(value);
 }
 
-/** One line per entry, drawn only from the entry itself. */
-export function allowLines(allow: AllowEntry[], label: (id: string) => string = (id) => id): string[] {
+/**
+ * One line per entry, drawn only from the entry itself. `brief` names the operation without
+ * its API path and leaves out a channel that is not narrowed, for a first screen.
+ */
+export function allowLines(allow: AllowEntry[], label: (id: string) => string = (id) => id, { brief = false }: { brief?: boolean } = {}): string[] {
   return allow.map((entry) => {
     const spec = CATALOG.get(entry.op);
-    const parts = [`**${spec?.label ?? entry.op}** \`${entry.op}\``];
+    const parts = [brief ? `**${spec?.label ?? entry.op}**` : `**${spec?.label ?? entry.op}** \`${entry.op}\``];
     for (const [name, schema] of Object.entries(entry.path ?? {})) {
       const s = schema as { enum?: unknown[]; const?: unknown };
       const values = s.enum ?? (s.const !== undefined ? [s.const] : null);
       if (isMadeInRun(schema)) parts.push(`${name}: このルールが同じ回に作ったもののみ`);
       else parts.push(values ? `${name}: ${values.map((v) => valueText(v, label)).join("、")} のみ` : `${name}: ${compact(schema)}`);
     }
-    if (spec?.channel && !entry.path?.[spec.channel]) parts.push(`${spec.channel}: どこでも`);
+    if (spec?.channel && !entry.path?.[spec.channel] && !brief) parts.push(`${spec.channel}: どこでも`);
     if (entry.body !== undefined) parts.push(`本文: ${compact(entry.body)}`);
     if (entry.target !== undefined) parts.push(`対象の条件: ${compact(entry.target)}`);
     if (entry.channel !== undefined) parts.push(`チャンネルの条件: ${compact(entry.channel)}`);
     parts.push(entry.maxStepsPerRun !== undefined ? `1回に${entry.maxStepsPerRun}件まで` : `1回に${MAX_STEPS}件まで`);
-    return `- ${parts.join(" / ")}`;
+    return `- ${parts.join(brief ? " · " : " / ")}`;
   });
 }

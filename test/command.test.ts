@@ -466,15 +466,13 @@ function ruleOf(trigger: RuleDefinition["trigger"], extra: Partial<import("../sr
 
 const CAN = { enable: true, disable: true, remove: true, owner: true };
 
-test("a rule's summary puts the audience select right under the trigger, and the buttons last", async () => {
+test("a rule's summary keeps to the trigger, the summary and the last run, and the buttons last", async () => {
   const { detailView } = await import("../src/rules/panel.ts");
   const rule = ruleOf({ event: "COMMAND", command: { ...SPEC, visibility: "auto" } });
   const owner = layout(detailView({ rule, userId: "1", runs: [], can: CAN, notice: "止めました" }, (id) => id));
   assert.deepEqual(owner, [
     "### お知らせ\n🟢 動作中 · v1",
     "`/announce` が実行されたとき",
-    "返事を見せる相手:",
-    "[select: ]",
     "要約です。",
     "-# まだ実行されていません",
     "[select: 詳しく見る]",
@@ -483,7 +481,9 @@ test("a rule's summary puts the audience select right under the trigger, and the
     "[buttons: 止める | ドライラン]",
     "[buttons: ← 一覧へ]",
   ]);
-  // Whoever has no select reads the audience in the sentence.
+  // The trigger is said without the event's internal name.
+  assert.equal(layout(detailView({ rule: ruleOf({ event: "MESSAGE_CREATE" }), userId: "1", runs: [], can: CAN }, (id) => id))[1], "メッセージが投稿されたとき");
+  // The owner picks the audience on the command's screen; whoever cannot open it reads it in the sentence.
   const viewer = layout(detailView({ rule, userId: "2", runs: [], can: { ...CAN, owner: false, enable: false, disable: false, remove: false } }, (id) => id));
   assert.equal(viewer[1], "`/announce` が実行されたとき(返事を見せる相手: 判定モデルが決める)");
   assert.ok(!viewer.includes("返事を見せる相手:"));
@@ -504,6 +504,21 @@ test("the allow page says whose permissions the rule runs with, and warns only w
   assert.match(page({ event: "MESSAGE_CREATE" }), /^<@1> の権限で動きます/m);
   assert.doesNotMatch(page({ event: "MESSAGE_CREATE" }), /⚠️/);
   assert.match(page({ event: "COMMAND", command: SPEC, runAs: "owner" }), /⚠️ <@1> の権限で動きます/);
+  // An operation by its name and how many a run may make; the API path, a channel left open and the default limits are not said.
+  const allow = [{ op: "POST /channels/{channel}/messages" }, { op: "PUT /guilds/{guild}/members/{user}/roles/{role}", path: { role: { const: "77" } }, maxStepsPerRun: 2 }] as never;
+  const named = (id: string) => (id === "77" ? "@Mod" : id === "10" ? "#general" : id);
+  const text = layout(detailView({ rule: ruleOf({ event: "MESSAGE_CREATE" }, { allow, params: { channel: "10" } }), userId: "1", page: "allow", runs: [], can: CAN }, named)).join("\n");
+  assert.match(text, /^\*\*許す操作\*\*\n- \*\*投稿\*\* · 1回に\d+件まで\n- \*\*ロール付与\*\* · role: @Mod のみ · 1回に2件まで$/m);
+  assert.doesNotMatch(text, /POST |channel: どこでも|1分に|これ以外の変更|\(10\)/);
+  assert.match(text, /- channel: #general/);
+  const limited = layout(detailView({ rule: ruleOf({ event: "MESSAGE_CREATE" }, { limits: { perMinute: 2, maxConsecutiveFailures: 3 } }), userId: "1", page: "allow", runs: [], can: CAN }, named)).join("\n");
+  assert.match(limited, /1分に2回まで/);
+});
+
+test("a dry run on the rule's panel says what it would do in a line, and leaves out what it would keep", async () => {
+  const { dryRunText } = await import("../src/rules/panel.ts");
+  const text = dryRunText({ source: "このチャンネルの直近のメッセージ", outcome: "steps", lines: ["1. **投稿** #general — 作成"], problems: [], logs: ["a"], state: "{\"n\":1}" } as never);
+  assert.equal(text, "**ドライラン**: 1種類の操作をします\n1. **投稿** #general — 作成\n-# 使ったイベント: このチャンネルの直近のメッセージ · ログ: a");
 });
 
 test("the code page puts 'ファイルで受け取る' under the code, and a run history says how many it shows", async () => {
@@ -513,9 +528,12 @@ test("the code page puts 'ファイルで受け取る' under the code, and a run
   assert.ok(source.findIndex((p) => p.startsWith("```js")) < source.indexOf("[buttons: ファイルで受け取る]"));
   assert.ok(source.indexOf("[buttons: ファイルで受け取る]") < source.indexOf("[select: 詳しく見る]"));
   const run = { id: 1, ruleId: "r1", ruleVersion: 1, startedAt: new Date(1_000_000).toISOString(), outcome: "executed", planId: "p1", error: null } as unknown as import("../src/rules/types.ts").RuleRun;
-  const runs = layout(detailView({ rule, userId: "1", page: "runs", runs: [run, run], can: CAN, state: { n: 1 } }, (id) => id));
-  assert.match(runs[1]!, /^\*\*最近の実行\*\*\(2件\)/);
-  assert.match(runs[1]!, /変更案 `p1`/);
+  const failed = { ...run, outcome: "failed", error: "権限が足りません", planId: null } as typeof run;
+  const limited = { ...run, outcome: "rate_limited", error: "1分あたり10回を超えたため…", planId: null } as typeof run;
+  const runs = layout(detailView({ rule, userId: "1", page: "runs", runs: [run, failed, limited], can: CAN, state: { n: 1 } }, (id) => id));
+  assert.match(runs[1]!, /^\*\*最近の実行\*\*\(3件\)/);
+  // A run says when and how it ended, and why only when it failed; its plan is in the audit log.
+  assert.deepEqual(runs[1]!.split("\n").slice(1), ["<t:1000:R> 実行", "<t:1000:R> 失敗 — 権限が足りません", "<t:1000:R> 回数制限 — 次にまとめて処理します"]);
   assert.ok(runs.indexOf("[buttons: 状態を消す]") > runs.findIndex((p) => p.startsWith("**状態**")));
   assert.equal(runs.at(-1), "[buttons: ← 一覧へ]");
 });
@@ -546,8 +564,10 @@ test("the history and audit screens count their lines, name the operations, and 
   const row = (steps: string[]) => ({ plan: { id: "p1", createdAt: new Date(1_000_000).toISOString(), actor: { userId: "1" }, steps: steps.map((op) => ({ op })) }, status: "pending_approval", reason: null }) as never;
   const own = layout(plansView([row(["POST /channels/{channel}/messages", "POST /channels/{channel}/messages", "PUT /guilds/{guild}/members/{user}/roles/{role}"])], false));
   assert.equal(own[0], "### 変更案の履歴(1件)\n-# あなたの分だけです(ルールによるものを含む)");
-  assert.match(own[1]!, /実行待ち · <@1> · 3件 投稿・/);
-  assert.doesNotMatch(own[1]!, /POST /);
+  // One's own list names no one and no id; the full list names whose each plan was.
+  assert.match(own[1]!, /^<t:1000:R> 実行待ち · 投稿・ロール付与$/);
+  assert.doesNotMatch(own[1]!, /POST |<@1>|p1/);
+  assert.match(layout(plansView([row(["POST /channels/{channel}/messages"])], true))[1]!, /^<t:1000:R> 実行待ち · <@1> · 投稿$/);
   assert.equal(own[2], "[buttons: ← 一覧へ]");
   assert.equal(layout(plansView([], true))[0], "### 変更案の履歴(0件)");
   const audit = layout(auditView([{ at: new Date(1_000_000).toISOString(), actor: { kind: "user", userId: "1", via: "panel" }, action: "plan.approve", planId: "p1" } as never], false));
@@ -564,7 +584,13 @@ test("the command screens follow the same order, name a halt, and say 動作中 
   assert.deepEqual(layout(list).map((p) => p.split("\n")[0]), ["## コマンド", "🛑 全ルール停止中", "`/announce` ⏸️ 停止中 お知らせを投稿する", "[select: 自分のコマンドを開く(1件)]", "[buttons: ← 設定のトップへ]"]);
   assert.match((list as any).components[0].components[3].components[0].options[0].description, /^停止中 · お知らせを投稿する/);
   const own = layout(commandView({ rule: { ...rule, enabled: true }, ids: {}, notice: "「全員に見せる」にしました" }));
-  assert.deepEqual(own.slice(-7), ["返事を見せる相手:", "[select: ]", "---", "-# 「全員に見せる」にしました", "[buttons: コマンドを削除]", "[buttons: 関連ルールを見る]", "[buttons: ← 一覧へ]"]);
+  assert.deepEqual(own.slice(-7), ["返事を見せる相手:", "[select: ]", "---", "-# 「全員に見せる」にしました", "[buttons: コマンドを削除]", "[buttons: ルール「お知らせ」を見る]", "[buttons: ← 一覧へ]"]);
+  assert.doesNotMatch(own.join("\n"), /関連ルール:/);
+  assert.match(own.join("\n"), /\n必要な権限: チャンネルの管理/);
+  // The list names the maker and the permissions only for someone else's command.
+  const mine = layout(commandsView({ rules: [{ ...rule, enabled: true }], userId: "1", ids: {} })).join("\n");
+  assert.doesNotMatch(mine, /作成:|必要な権限/);
+  assert.match(layout(commandsView({ rules: [{ ...rule, enabled: true }], userId: "2", ids: {} })).join("\n"), /\n-# 作成: <@1> · 必要な権限: チャンネルの管理/);
   assert.match(layout(commandView({ rule, ids: {} })).join("\n"), /⏸️ 停止中\(ルールを再開すると使えます\)/);
   assert.match(layout(commandView({ rule, ids: {}, confirmDelete: true })).join("\n"), /⚠️ 「\/announce」とルール「お知らせ」を削除します。実行履歴と監査ログは残ります。/);
 });
